@@ -84,11 +84,11 @@ public final class AvasWavTest {
         byte[] samples = pcm(Short.MIN_VALUE, -20_000, -1, 0, 1, 20_000, Short.MAX_VALUE);
 
         assertArrayEquals(pcm(0, 0, 0, 0, 0, 0, 0), navigation(samples, 0));
-        assertArrayEquals(pcm(-8_192, -5_000, 0, 0, 0, 5_000, 8_191),
-                navigation(samples, 25));
         assertArrayEquals(pcm(-16_384, -10_000, 0, 0, 0, 10_000, 16_383),
-                navigation(samples, 50));
-        assertArrayEquals(samples, navigation(samples, 100));
+                navigation(samples, 25));
+        assertArrayEquals(samples, navigation(samples, 50));
+        assertArrayEquals(pcm(Short.MIN_VALUE, Short.MIN_VALUE, -2, 0, 2,
+                Short.MAX_VALUE, Short.MAX_VALUE), navigation(samples, 100));
     }
 
     @Test
@@ -108,7 +108,7 @@ public final class AvasWavTest {
         AvasWav.scalePcm16(source, 2, target, 2, 4, 50);
 
         assertArrayEquals(original, source);
-        assertArrayEquals(new byte[]{11, 12, 0x1a, 0x09, (byte) 0xe6, (byte) 0xf6, 17, 18},
+        assertArrayEquals(new byte[]{11, 12, 0x34, 0x12, (byte) 0xcc, (byte) 0xed, 17, 18},
                 target);
         assertThrows(IllegalArgumentException.class,
                 () -> AvasWav.scalePcm16(source, 2, target, 2, 3, 50));

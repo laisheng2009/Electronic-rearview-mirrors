@@ -372,6 +372,8 @@ public final class CameraHelperService extends Service {
     }
 
     private void provisionAppPermissions(String reason) {
+        // The successful foreground RSA completion schedules this again after admission is released.
+        if (LocalAdbClient.AUTHORIZATION.pending() || !LocalAdbClient.hasAuthorizedIdentity(this)) return;
         if (!permissionsProvisioning.compareAndSet(false, true)) {
             // A pre-authorization check must not swallow the successful RSA follow-up.
             if ("foreground_adb_authorized".equals(reason)) {

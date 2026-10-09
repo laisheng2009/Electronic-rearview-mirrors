@@ -138,7 +138,8 @@ private fun FormScope.PermissionsSettings(state: SettingsUiState, strings: UiStr
         row("background") { SettingsActionRow(strings.text("Робота у фоні", "Background apps"),
             strings.text("Відкрити екран керування фоновою роботою", "Open background management screen"),
             colors, verticalPadding = 14.dp) {
-            ActionButton(strings.text("Робота у фоні", "Disable BG Apps"), colors, Modifier.width(190.dp)) {
+            ActionButton(strings.text("Робота у фоні", "Disable BG Apps"), colors, Modifier.width(190.dp),
+                enabled = !state.adbOperation.pending) {
                 onAction(BydExtendUiAction.Run(CommandId.OpenBackgroundSettings))
             }
         } }

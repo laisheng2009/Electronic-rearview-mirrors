@@ -224,12 +224,12 @@ final class LocalAdbClient {
                         open.authorizationError, open.publicKeySent, open.fingerprint);
             } else {
                 connection = open.connection;
-                if (!isCancellationTokenCurrent(cancellationToken)) {
+                if (!isCancellationTokenCurrent(cancellationToken) || connection.authorizationPreempted()) {
                     result = Result.superseded();
                 } else {
                     try {
                         ShellResult shell = connection.shell(fixedCommand);
-                        if (!isCancellationTokenCurrent(cancellationToken)) {
+                        if (!isCancellationTokenCurrent(cancellationToken) || connection.authorizationPreempted()) {
                             result = Result.superseded();
                         } else {
                             result = shell.exitCode == 0
@@ -239,7 +239,7 @@ final class LocalAdbClient {
                                             shell.output, shell.exitCode, open.fingerprint);
                         }
                     } catch (SocketTimeoutException timeout) {
-                        result = isCancellationTokenCurrent(cancellationToken)
+                        result = isCancellationTokenCurrent(cancellationToken) && !connection.authorizationPreempted()
                                 ? Result.commandReadTimeout(
                                         summary(timeout), open.fingerprint)
                                 : Result.superseded();
@@ -249,7 +249,8 @@ final class LocalAdbClient {
         } catch (AuthorizationSupersededException superseded) {
             result = Result.superseded();
         } catch (Throwable error) {
-            if (!isCancellationTokenCurrent(cancellationToken)) {
+            if (!isCancellationTokenCurrent(cancellationToken)
+                    || connection != null && connection.authorizationPreempted()) {
                 result = Result.superseded();
             } else {
                 result = error instanceof TransportUnavailableException
@@ -305,7 +306,9 @@ final class LocalAdbClient {
                         open.authorizationError, open.publicKeySent, open.fingerprint);
             } else {
                 connection = open.connection;
-                if (cancellation != null && cancellation.isCancellationRequested()) {
+                if (connection.authorizationPreempted()) {
+                    result = Result.superseded();
+                } else if (cancellation != null && cancellation.isCancellationRequested()) {
                     result = Result.cancelled();
                 } else {
                     // Connection.open keeps its handshake timeout unchanged. Export-only streams
@@ -313,7 +316,7 @@ final class LocalAdbClient {
                     connection.setReadTimeout(readTimeoutMs);
                     StreamShellResult shell = connection.shellTo(
                             fixedCommand, output, maxBytes, cancellation);
-                    result = shell.exitCode == 0
+                    result = connection.authorizationPreempted() ? Result.superseded() : shell.exitCode == 0
                             ? Result.ok("", shell.exitCode, open.fingerprint, false)
                             : Result.failed("shell_exit_" + shell.exitCode, "",
                                     shell.exitCode, open.fingerprint);
@@ -324,8 +327,12 @@ final class LocalAdbClient {
         } catch (OutputSinkException sinkError) {
             result = Result.failed(summary(sinkError), "", -1,
                     operationFingerprint.isEmpty() ? "unavailable" : operationFingerprint);
+        } catch (AuthorizationSupersededException superseded) {
+            result = Result.superseded();
         } catch (Throwable error) {
-            if (cancellation != null && cancellation.isCancellationRequested()) {
+            if (connection != null && connection.authorizationPreempted()) {
+                result = Result.superseded();
+            } else if (cancellation != null && cancellation.isCancellationRequested()) {
                 result = Result.cancelled();
             } else {
                 result = Result.failed(summary(error), "", -1, "unavailable");
@@ -572,9 +579,12 @@ final class LocalAdbClient {
         private final InputStream in;
         private final OutputStream out;
         private final OperationCancellation cancellation;
+        private final AdbAuthorizationSession.RecoveryOperation background;
 
-        private Connection(Socket socket, OperationCancellation cancellation) throws IOException {
+        private Connection(Socket socket, OperationCancellation cancellation,
+                AdbAuthorizationSession.RecoveryOperation background) throws IOException {
             this.socket = socket;
+            this.background = background;
             in = socket.getInputStream();
             out = socket.getOutputStream();
             this.cancellation = cancellation;
@@ -591,9 +601,17 @@ final class LocalAdbClient {
             String fingerprint = "unavailable";
             boolean publicKeySent = false;
             boolean publicKeyWriteStarted = false;
-            Socket socket = socketFactory.create();
-            if (cancellation != null) cancellation.registerActiveSocket(socket);
+            AdbAuthorizationSession.RecoveryOperation background = mode == PromptMode.NEVER
+                    ? AUTHORIZATION.beginRecovery() : null;
+            if (mode == PromptMode.NEVER && background == null) {
+                emitStage(eventSink, "background_deferred", "reason", "foreground_authorization");
+                throw new AuthorizationSupersededException();
+            }
+            Socket socket = null;
             try {
+                socket = socketFactory.create();
+                if (background != null) background.register(socket);
+                if (cancellation != null) cancellation.registerActiveSocket(socket);
                 if (mode != PromptMode.NEVER && !trackPending(socket, authGeneration)) {
                     throw new AuthorizationSupersededException();
                 }
@@ -619,7 +637,7 @@ final class LocalAdbClient {
                 socket.setTcpNoDelay(mode == PromptMode.NEVER);
                 emitStage(eventSink, "socket_connected", "fingerprint", fingerprint,
                         "endpoint", endpointForTest());
-                Connection connection = new Connection(socket, cancellation);
+                Connection connection = new Connection(socket, cancellation, background);
                 AdbPacket.write(connection.out, AdbPacket.A_CNXN, AdbPacket.VERSION,
                         AdbPacket.MAX_DATA, nul("host::"));
                 boolean signatureSent = false;
@@ -643,7 +661,7 @@ final class LocalAdbClient {
                         if (cancellation != null && cancellation.isCancellationRequested()) {
                             throw new OperationCancelledException();
                         }
-                        if (!isCancellationTokenCurrent(authGeneration)) {
+                        if (!isCancellationTokenCurrent(authGeneration) || connection.authorizationPreempted()) {
                             throw new AuthorizationSupersededException();
                         }
                         emitStage(eventSink, "cnxn_received", "fingerprint", fingerprint,
@@ -723,9 +741,15 @@ final class LocalAdbClient {
                     socket.setSoTimeout(AUTH_TIMEOUT_MS);
                 }
             } catch (Throwable error) {
+                boolean preempted = background != null && background.cancelled();
+                if (background != null) background.close();
                 clearPending(socket);
-                if (cancellation != null) cancellation.clearActiveSocket(socket);
+                if (cancellation != null && socket != null) cancellation.clearActiveSocket(socket);
                 LocalAdbClient.close(socket);
+                if (preempted) {
+                    emitStage(eventSink, "background_cancelled", "reason", "foreground_authorization");
+                    throw new AuthorizationSupersededException();
+                }
                 if ("unavailable".equals(fingerprint)) {
                     invalidateCacheForIdentity(context, fingerprint, operationGeneration);
                 }
@@ -870,6 +894,11 @@ final class LocalAdbClient {
             clearPending(socket);
             if (cancellation != null) cancellation.clearActiveSocket(socket);
             LocalAdbClient.close(socket);
+            if (background != null) background.close();
+        }
+
+        boolean authorizationPreempted() {
+            return background != null && background.cancelled();
         }
 
         void setReadTimeout(int timeoutMs) throws IOException {
@@ -1322,6 +1351,7 @@ final class LocalAdbClient {
     }
 
     private static void close(Socket socket) {
+        if (socket == null) return;
         try {
             socket.close();
         } catch (IOException ignored) {

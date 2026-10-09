@@ -10,7 +10,7 @@ public final class AvasPlaybackPlanTest {
     @Test public void exteriorVolumeMapsToPlayerAndLoudnessEnhancer() {
         int[] volumes = {0, 25, 50, 60, 80, 100};
         float[] playerVolumes = {0f, 0.25f, 0.5f, 0.6f, 0.8f, 1f};
-        int[] gainsMb = {0, 700, 1400, 1680, 2240, 2800};
+        int[] gainsMb = {0, 1302, 2002, 2282, 2842, 3402};
         for (int i = 0; i < volumes.length; i++) {
             assertEquals(playerVolumes[i], AvasPlaybackPlan.exteriorPlayerVolume(volumes[i]), 0f);
             assertEquals(gainsMb[i], AvasPlaybackPlan.exteriorTargetGainMb(volumes[i]));
@@ -18,7 +18,7 @@ public final class AvasPlaybackPlanTest {
         assertEquals(0f, AvasPlaybackPlan.exteriorPlayerVolume(-1), 0f);
         assertEquals(0, AvasPlaybackPlan.exteriorTargetGainMb(-1));
         assertEquals(1f, AvasPlaybackPlan.exteriorPlayerVolume(101), 0f);
-        assertEquals(2800, AvasPlaybackPlan.exteriorTargetGainMb(101));
+        assertEquals(3402, AvasPlaybackPlan.exteriorTargetGainMb(101));
     }
 
     @Test public void noRequestHasArtificialSilence() {

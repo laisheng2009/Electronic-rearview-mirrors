@@ -292,7 +292,7 @@ final class AvasEngineRuntime implements AutoCloseable {
                                         : exterior.loudnessGainMb(),
                                 "interior_enabled", interior != null,
                                 "interior_pcm_volume", settings.interiorVolume,
-                                "interior_pcm_multiplier", settings.interiorVolume / 100.0f,
+                                "interior_pcm_multiplier", AvasPlaybackPlan.interiorPcmGain(settings.interiorVolume),
                                 "microphone_duck", duck);
                         lastLog = now;
                     }
@@ -305,13 +305,13 @@ final class AvasEngineRuntime implements AutoCloseable {
                 }
                 AvasConfig.Engine settings = config;
                 if (exterior != null) {
-                    pcm(block, pcm, frames, 100);
+                    pcm(block, pcm, frames, 1f);
                     int written = exterior.write(pcm, frames);
                     if (cue == 1) startExteriorSubmitted += written;
                     else if (cue == 2) stopExteriorSubmitted += written;
                 }
                 if (interior != null) {
-                    pcm(block, pcm, frames, settings.interiorVolume);
+                    pcm(block, pcm, frames, AvasPlaybackPlan.interiorPcmGain(settings.interiorVolume));
                     int written = interior.write(pcm, frames);
                     if (cue == 1) startInteriorSubmitted += written;
                     else if (cue == 2) stopInteriorSubmitted += written;
@@ -403,8 +403,7 @@ final class AvasEngineRuntime implements AutoCloseable {
         return Float.isFinite(value) ? value : JSONObject.NULL;
     }
 
-    static void pcm(float[] input, short[] output, int frames, int volume) {
-        float gain = Math.max(0, Math.min(100, volume)) / 100f;
+    static void pcm(float[] input, short[] output, int frames, float gain) {
         for (int i = 0; i < frames; i++) {
             float value = input[i] * gain;
             output[i] = Float.isFinite(value)

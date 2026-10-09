@@ -168,6 +168,10 @@ public final class CameraProbeActivity extends ComponentActivity
             "weather_permission_migration_seen";
     private static final String STATE_WEATHER_PERMISSION_IN_FLIGHT =
             "weather_permission_in_flight";
+    private static final String STATE_CAMERA_PERMISSION_REQUESTED = "camera_permission_requested";
+    private static final String STATE_MICROPHONE_PERMISSION_PENDING = "microphone_permission_pending";
+    private static final String STATE_MANUAL_ADB_EVENT = "manual_adb_event";
+    private static final String STATE_MANUAL_ADB_OPERATION = "manual_adb_operation";
     private static final String STATE_WEATHER_PERMISSION_PENDING =
             "weather_permission_pending";
     private static final String STATE_WEATHER_ENABLE_REQUESTED =
@@ -756,7 +760,12 @@ public final class CameraProbeActivity extends ComponentActivity
     private LocalAdbClient.PromptMode adbAuthMode;
     private boolean adbAuthorizationRequested;
     private boolean adbAuthorizationStartScheduled;
+    private String pendingManualAdbEvent;
+    private String pendingManualAdbOperation;
     private boolean cameraPermissionPending;
+    private boolean cameraPermissionRequested;
+    private boolean microphonePermissionPending;
+    private boolean microphonePermissionInFlight;
     private boolean weatherRefreshAfterPermission;
     private boolean weatherLocationPermissionPending;
     private boolean weatherLocationPermissionStartScheduled;
@@ -967,10 +976,6 @@ public final class CameraProbeActivity extends ComponentActivity
     };
     private final Runnable startForegroundAdbAuthorization = () -> {
         adbAuthorizationStartScheduled = false;
-        if (weatherLocationPermissionPending || weatherLocationPermissionInFlight) {
-            advanceStartupAuthorizationFlow();
-            return;
-        }
         if (shouldStartForegroundAdbAuthorization(cameraPermissionPending,
                 backgroundStartSettingsPending(), hasWindowFocus(),
                 foregroundAdbAuthorizationReady(), adbAuthPending,
@@ -988,6 +993,7 @@ public final class CameraProbeActivity extends ComponentActivity
         weatherLocationPermissionStartScheduled = false;
         if (!weatherLocationPermissionPending || weatherLocationPermissionInFlight
                 || cameraPermissionPending || !activityResumed || !hasWindowFocus()
+                || !runtimePermissionWindowAvailable()
                 || settingsTransferInProgress || settingsReloadPending
                 || logExportInProgress || compatibilityExportInProgress || adbAuthPending
                 || productionUi != null && productionUi.getState().getDialog() != null) {
@@ -1109,6 +1115,12 @@ public final class CameraProbeActivity extends ComponentActivity
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         preferences = getSharedPreferences("settings", MODE_PRIVATE);
+        if (savedInstanceState != null) {
+            cameraPermissionRequested = savedInstanceState.getBoolean(STATE_CAMERA_PERMISSION_REQUESTED);
+            microphonePermissionPending = savedInstanceState.getBoolean(STATE_MICROPHONE_PERMISSION_PENDING);
+            pendingManualAdbEvent = savedInstanceState.getString(STATE_MANUAL_ADB_EVENT);
+            pendingManualAdbOperation = savedInstanceState.getString(STATE_MANUAL_ADB_OPERATION);
+        }
         avasLibrary = new AvasAudioLibrary(this, preferences);
         try {
             avasLibrary.initializeBuiltinConfig();
@@ -1160,22 +1172,19 @@ public final class CameraProbeActivity extends ComponentActivity
                 "shutdown_cleared", clearedShutdown,
                 "auto_start", GuardRecovery.isAutoStartEnabled(this),
                 "background_start_settings_required", backgroundStartSettingsRequired);
-        cameraPermissionPending = checkSelfPermission(Manifest.permission.CAMERA)
-                != PackageManager.PERMISSION_GRANTED;
         restoreWeatherPermissionState(savedInstanceState);
         initializeStartupWeatherPermissionState();
         startAndBindHelperService();
-
-        if (cameraPermissionPending) {
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
-        } else {
-            record("camera_permission", "granted", true);
-        }
         updateControls();
     }
 
     @Override
     protected void onSaveInstanceState(Bundle outState) {
+        outState.putBoolean(STATE_CAMERA_PERMISSION_REQUESTED, cameraPermissionRequested);
+        outState.putBoolean(STATE_MICROPHONE_PERMISSION_PENDING,
+                microphonePermissionPending || microphonePermissionInFlight);
+        outState.putString(STATE_MANUAL_ADB_EVENT, pendingManualAdbEvent);
+        outState.putString(STATE_MANUAL_ADB_OPERATION, pendingManualAdbOperation);
         outState.putBoolean(STATE_WEATHER_PERMISSION_IN_FLIGHT,
                 weatherLocationPermissionInFlight);
         outState.putBoolean(STATE_WEATHER_PERMISSION_PENDING,
@@ -1310,6 +1319,8 @@ public final class CameraProbeActivity extends ComponentActivity
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         if (requestCode == MICROPHONE_PERMISSION_REQUEST) {
+            microphonePermissionInFlight = false;
+            microphonePermissionPending = false;
             boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
             if (granted && !shutdownRequested)
                 preferences.edit().putBoolean(AvasMicrophoneSettings.ENABLED, true).apply();
@@ -1317,6 +1328,7 @@ public final class CameraProbeActivity extends ComponentActivity
                     Toast.LENGTH_LONG).show();
             if (productionUi != null) productionUi.refreshAvasState();
             refreshProductionHeader();
+            advanceStartupAuthorizationFlow();
         } else if (requestCode == CAMERA_PERMISSION_REQUEST) {
             cameraPermissionPending = false;
             refreshProductionHeader();
@@ -1782,6 +1794,7 @@ public final class CameraProbeActivity extends ComponentActivity
                     recordOperationFeedback(runtimeText(legacy ? R.string.runtime_imported_settings
                             : R.string.runtime_preset_loaded));
                     if (!legacy) showSettingsResultToast(runtimeText(R.string.runtime_preset_loaded));
+                    if (legacy) startupOverlayPermissionFlow.restore(false, false);
                     recreate();
                 });
             } catch (Exception error) {
@@ -1808,7 +1821,8 @@ public final class CameraProbeActivity extends ComponentActivity
             String title, String message, boolean cancellable, String confirmLabel,
             String dismissLabel, String markdown, Runnable confirm, Runnable dismiss) {
         if (activityDestroyed || isFinishing() || shutdownRequested || !activityResumed
-                || cameraPermissionPending || weatherLocationPermissionInFlight || adbAuthPending
+                || cameraPermissionPending || microphonePermissionInFlight
+                || weatherLocationPermissionInFlight || adbAuthPending
                 || settingsTransferDialog != null || legacyImportOfferDialog != null
                 || productionUi == null || productionUi.getState().getDialog() != null) return false;
         runtimeDialogOwner = owner;
@@ -1868,7 +1882,8 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private void showInstallationReminder() {
         if (!backgroundStartSettingsRequired || backgroundStartSettingsActive
-                || cameraPermissionPending || weatherLocationPermissionInFlight || adbAuthPending) return;
+                || cameraPermissionPending || microphonePermissionInFlight
+                || weatherLocationPermissionInFlight || adbAuthPending) return;
         UiStrings strings = new UiStrings(productionUi.getState().getLanguage());
         showRuntimeDialog(RuntimeDialogOwner.BACKGROUND, DialogKind.Background,
                 runtimeText(R.string.background_work),
@@ -2500,7 +2515,9 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private boolean canPresentUpdateResult(boolean replacingUpdateDialog) {
         return activityResumed && !activityDestroyed && !isFinishing() && !shutdownRequested
-                && !cameraPermissionPending && !backgroundStartSettingsPending()
+                && !cameraPermissionPending && !microphonePermissionInFlight
+                && !microphonePermissionPending && pendingManualAdbEvent == null
+                && !backgroundStartSettingsPending()
                 && !weatherLocationPermissionPending && !weatherLocationPermissionInFlight
                 && !adbAuthPending && !adbAuthorizationStartScheduled
                 && !startupOverlayPermissionFlow.foregroundAuthorizationInFlight()
@@ -3433,10 +3450,10 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private void onMicrophoneAction(AvasBackendAction action) {
         if (action.getKind() == AvasActionKind.SetEnabled && action.getBooleanValue() != null) {
+            if (!action.getBooleanValue()) microphonePermissionPending = false;
             if (action.getBooleanValue() && checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                     != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},
-                        MICROPHONE_PERMISSION_REQUEST);
+                requestMicrophonePermission();
             } else {
                 preferences.edit().putBoolean(AvasMicrophoneSettings.ENABLED,
                         action.getBooleanValue()).apply();
@@ -3459,13 +3476,37 @@ public final class CameraProbeActivity extends ComponentActivity
             } else if (action.getKind() == AvasActionKind.StartManual) {
                 stopAvasListAudition(avasAudition.getSessionId());
                 if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
-                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MICROPHONE_PERMISSION_REQUEST);
+                    requestMicrophonePermission();
                 else if (!WeatherRefreshAccessibilityService.startMicrophone())
                     Toast.makeText(this, runtimeText(R.string.avas_mic_unavailable), Toast.LENGTH_LONG).show();
             }
         }
         if (productionUi != null) productionUi.refreshAvasState();
         refreshProductionHeader();
+    }
+
+    private void requestMicrophonePermission() {
+        if (microphonePermissionInFlight) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            microphonePermissionPending = false;
+            preferences.edit().putBoolean(AvasMicrophoneSettings.ENABLED, true).apply();
+            if (productionUi != null) productionUi.refreshAvasState();
+            return;
+        }
+        if (!runtimePermissionWindowAvailable()) {
+            microphonePermissionPending = true;
+            record("microphone_permission_deferred", "reason", "startup_permissions");
+            return;
+        }
+        microphonePermissionPending = false;
+        microphonePermissionInFlight = true;
+        try {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MICROPHONE_PERMISSION_REQUEST);
+        } catch (RuntimeException failure) {
+            microphonePermissionInFlight = false;
+            record("microphone_permission_failed", "error", failure.toString());
+            Toast.makeText(this, runtimeText(R.string.avas_mic_permission), Toast.LENGTH_LONG).show();
+        }
     }
 
     private AvasPlaybackUiState avasPlayback(String profileId) {
@@ -3719,8 +3760,8 @@ public final class CameraProbeActivity extends ComponentActivity
     private boolean startupOverlayPermissionBlocked() {
         return !activityResumed || !hasWindowFocus() || activityDestroyed || isFinishing()
                 || shutdownRequested || cameraPermissionPending
-                || backgroundStartSettingsPending() || weatherLocationPermissionPending
-                || weatherLocationPermissionInFlight || weatherLocationPermissionStartScheduled
+                || microphonePermissionInFlight || backgroundStartSettingsPending()
+                || weatherLocationPermissionInFlight
                 || adbAuthPending || adbAuthorizationStartScheduled
                 || startupOverlayPermissionFlow.foregroundAuthorizationInFlight()
                 || settingsTransferInProgress || settingsReloadPending
@@ -3728,6 +3769,26 @@ public final class CameraProbeActivity extends ComponentActivity
                 || settingsTransferDialog != null || legacyImportOfferDialog != null
                 || productionUi != null && productionUi.getState().getDialog() != null
                 || !startupOverlayPermissionFlow.foregroundAuthorizationFinished();
+    }
+
+    private boolean runtimePermissionWindowAvailable() {
+        return pendingManualAdbEvent == null && !startupOverlayPermissionBlocked()
+                && !LocalAdbClient.AUTHORIZATION.pending()
+                && !startupOverlayPermissionFlow.overlaySettingsInFlight();
+    }
+
+    private void requestCameraPermissionIfNeeded() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                || cameraPermissionRequested || !runtimePermissionWindowAvailable()) return;
+        cameraPermissionRequested = true;
+        cameraPermissionPending = true;
+        record("camera_permission_requested");
+        try {
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
+        } catch (RuntimeException failure) {
+            cameraPermissionPending = false;
+            record("camera_permission_failed", "error", failure.toString());
+        }
     }
 
     @Override
@@ -4572,6 +4633,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 resumeSelectedCameraPreview();
             }
         }
+        if (isAutoPreviewTab(tab) || tab == TAB_CAMERA_DEBUG) requestCameraPermissionIfNeeded();
     }
 
     private static int rootTabToLegacy(RootTab tab) {
@@ -7641,6 +7703,7 @@ public final class CameraProbeActivity extends ComponentActivity
         }
         if (!transitionStarted && tab == TAB_REVERSE_CAMERAS) maybeOpenReversePreview();
         if (tab == TAB_PARKING_CAMERAS) selectParkingCamera(selectedParkingCameraId);
+        if (isAutoPreviewTab(tab) || tab == TAB_CAMERA_DEBUG) requestCameraPermissionIfNeeded();
     }
 
     private static boolean isValidTab(int tab) {
@@ -7859,12 +7922,26 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     private boolean requestLocationPermission(boolean enableWeather, boolean refreshAfter) {
-        if (hasLocationPermission()) return false;
+        if (hasLocationPermission()) {
+            weatherLocationPermissionPending = false;
+            boolean enable = enableWeather || weatherEnableRequestedForPermission;
+            boolean refresh = refreshAfter || weatherRefreshAfterPermission;
+            weatherEnableRequestedForPermission = false;
+            weatherRefreshAfterPermission = false;
+            if (enable) onProductionWeatherEnabled(true);
+            if (refresh) requestWeatherRefresh();
+            return false;
+        }
         if (settingsTransferInProgress || settingsReloadPending
                 || logExportInProgress || compatibilityExportInProgress) return false;
         weatherEnableRequestedForPermission |= enableWeather;
         weatherRefreshAfterPermission |= refreshAfter;
         cancelPendingWeatherLocationPermission();
+        if (!runtimePermissionWindowAvailable()) {
+            weatherLocationPermissionPending = true;
+            record("weather_location_permission_deferred", "reason", "startup_permissions");
+            return true;
+        }
         if (weatherLocationPermissionInFlight) return true;
         weatherLocationPermissionInFlight = true;
         if (weatherPanel != null) weatherPanel.setLocationPermissionPending(true);
@@ -7911,7 +7988,7 @@ public final class CameraProbeActivity extends ComponentActivity
         boolean weatherEnabled = preferences.getBoolean(
                 WeatherRuntime.PREF_ENABLED, false);
         boolean locationGranted = hasLocationPermission();
-        weatherLocationPermissionPending = shouldRequestStartupWeatherPermission(
+        weatherLocationPermissionPending |= shouldRequestStartupWeatherPermission(
                 weatherEnabled, locationGranted, requestPending, completedImport, migrationSeen);
         if (!weatherLocationPermissionPending
                 && (requestPending || (completedImport && !migrationSeen))) {
@@ -7924,8 +8001,8 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private void restoreWeatherPermissionState(Bundle savedInstanceState) {
         if (savedInstanceState == null) return;
-        weatherLocationPermissionInFlight = savedInstanceState.getBoolean(
-                STATE_WEATHER_PERMISSION_IN_FLIGHT, false);
+        // A saved Activity flag is not proof that a system permission window still exists.
+        boolean interrupted = savedInstanceState.getBoolean(STATE_WEATHER_PERMISSION_IN_FLIGHT, false);
         weatherEnableRequestedForPermission = savedInstanceState.getBoolean(
                 STATE_WEATHER_ENABLE_REQUESTED, false);
         weatherRefreshAfterPermission = savedInstanceState.getBoolean(
@@ -7934,9 +8011,7 @@ public final class CameraProbeActivity extends ComponentActivity
             weatherLocationPermissionPending = savedInstanceState.getBoolean(
                     STATE_WEATHER_PERMISSION_PENDING, false);
         }
-        if (weatherLocationPermissionInFlight && weatherPanel != null) {
-            weatherPanel.setLocationPermissionPending(true);
-        }
+        if (interrupted && !hasLocationPermission()) weatherLocationPermissionPending = true;
     }
 
     private void cancelPendingWeatherLocationPermission() {
@@ -14476,6 +14551,13 @@ public final class CameraProbeActivity extends ComponentActivity
             cancelPendingForegroundAdbAuthorization();
             return;
         }
+        if (pendingManualAdbEvent != null) {
+            if (foregroundAdbAuthorizationReady() && hasWindowFocus()
+                    && !cameraPermissionPending && !backgroundStartSettingsActive) {
+                requestAdbAuthorization(pendingManualAdbEvent, pendingManualAdbOperation, false);
+            }
+            return;
+        }
         if (shouldOpenBackgroundStartSettings(
                 GuardRecovery.isAutoStartEnabled(this), cameraPermissionPending,
                 hasWindowFocus(), backgroundStartSettingsRequired,
@@ -14491,12 +14573,9 @@ public final class CameraProbeActivity extends ComponentActivity
             return;
         }
         cancelPendingBackgroundStartSettings();
+        maybeStartForegroundAdbAuthorization();
+        if (!runtimePermissionWindowAvailable()) return;
         if (weatherLocationPermissionPending) {
-            if (adbAuthPending) {
-                cancelPendingWeatherLocationPermission();
-                updateControls();
-                return;
-            }
             if (!weatherLocationPermissionInFlight && !weatherLocationPermissionStartScheduled
                     && activityResumed && hasWindowFocus() && !cameraPermissionPending) {
                 weatherLocationPermissionStartScheduled = mainHandler.postDelayed(
@@ -14509,22 +14588,27 @@ public final class CameraProbeActivity extends ComponentActivity
             updateControls();
             return;
         }
-        maybeStartForegroundAdbAuthorization();
-        if (startupOverlayPermissionBlocked()) return;
+        if (microphonePermissionPending) {
+            requestMicrophonePermission();
+            if (microphonePermissionInFlight) return;
+        }
+        if (isAutoPreviewTab(selectedTab) || selectedTab == TAB_CAMERA_DEBUG) {
+            requestCameraPermissionIfNeeded();
+            if (cameraPermissionPending) return;
+        }
         boolean overlayPermissionGranted = android.provider.Settings.canDrawOverlays(this);
         if (startupOverlayPermissionFlow.beginStartupOverlayPermissionRequest(
                 overlayPermissionGranted, false)) {
             launchOverlayPermissionSettings(true);
-            if (startupOverlayPermissionFlow.overlaySettingsInFlight()) return;
+            return;
         }
-        if (!startupOverlayPermissionFlow.canPresentStartupDialogs(
-                android.provider.Settings.canDrawOverlays(this))) return;
         maybeShowLegacyImportOffer();
         showCachedUpdateIfAvailable();
     }
 
     private void maybeShowLegacyImportOffer() {
         if (!activityResumed || !hasWindowFocus() || cameraPermissionPending
+                || microphonePermissionInFlight || microphonePermissionPending || pendingManualAdbEvent != null
                 || backgroundStartSettingsPending() || weatherLocationPermissionPending
                 || weatherLocationPermissionInFlight || weatherLocationPermissionStartScheduled
                 || adbAuthPending || adbAuthorizationStartScheduled
@@ -14608,7 +14692,7 @@ public final class CameraProbeActivity extends ComponentActivity
     private boolean foregroundAdbAuthorizationReady() {
         return activityResumed && !activityDestroyed && !isFinishing() && !shutdownRequested
                 && !settingsTransferInProgress && !settingsReloadPending
-                && !weatherLocationPermissionPending && !weatherLocationPermissionInFlight
+                && !weatherLocationPermissionInFlight && !microphonePermissionInFlight
                 && !startupOverlayPermissionFlow.overlaySettingsInFlight()
                 && (productionUi == null || productionUi.getState().getDialog() == null);
     }
@@ -14618,13 +14702,34 @@ public final class CameraProbeActivity extends ComponentActivity
         LocalAdbClient.PromptMode mode = automatic
                 ? LocalAdbClient.PromptMode.AUTO_ONCE
                 : LocalAdbClient.PromptMode.FORCE;
-        if (settingsTransferInProgress || settingsReloadPending
-                || weatherLocationPermissionPending || weatherLocationPermissionInFlight
-                || shutdownRequested || activityDestroyed || isFinishing()
-                || cameraPermissionPending || backgroundStartSettingsPending()
-                || automatic && !foregroundAdbAuthorizationReady()
-                || automatic && adbAuthPending) {
+        if (shutdownRequested || activityDestroyed || isFinishing()) {
+            record("adb_authorization_request_rejected", "automatic", automatic,
+                    "reason", "activity_unavailable");
             return false;
+        }
+        if (automatic && (settingsTransferInProgress || settingsReloadPending
+                || weatherLocationPermissionInFlight || microphonePermissionInFlight
+                || cameraPermissionPending || backgroundStartSettingsPending()
+                || !foregroundAdbAuthorizationReady() || adbAuthPending)) {
+            record("adb_authorization_request_rejected", "automatic", true,
+                    "reason", "startup_pending");
+            return false;
+        }
+        if (!automatic) {
+            cancelPendingBackgroundStartSettings();
+            cancelPendingWeatherLocationPermission();
+            if (!foregroundAdbAuthorizationReady() || !hasWindowFocus()
+                    || cameraPermissionPending || backgroundStartSettingsActive) {
+                cancelPendingForegroundAdbAuthorization();
+                LocalAdbClient.AUTHORIZATION.cancelForeground();
+                pendingManualAdbEvent = event;
+                pendingManualAdbOperation = operation;
+                reconcileForegroundAdbAuthorization();
+                record("adb_authorization_manual_queued", "reason", "active_window");
+                return true;
+            }
+            pendingManualAdbEvent = null;
+            pendingManualAdbOperation = null;
         }
         cancelPendingForegroundAdbAuthorization();
         try {
@@ -15716,6 +15821,7 @@ public final class CameraProbeActivity extends ComponentActivity
 
         void restore(boolean overlayAttempted, boolean overlayInFlight) {
             // RSA state belongs to the live process request, never a saved Activity flag.
+            // Overlay attempts belong to this Activity flow, not restorable app preferences.
             foregroundAuthorizationStarted = false;
             foregroundAuthorizationFinished = false;
             overlayPermissionAttempted = overlayAttempted;
@@ -16075,10 +16181,8 @@ public final class CameraProbeActivity extends ComponentActivity
                     !shutdownRequested && !cameraPermissionPending
                             && !backgroundStartSettingsActive
                             && !backgroundStartSettingsStartScheduled && !adbAuthPending,
-                    !settingsTransferInProgress && !settingsReloadPending
-                            && !backgroundStartSettingsPending()
-                            && shouldEnableManualAdbAuthorization(
-                                    !shutdownRequested && !activityDestroyed && !cameraPermissionPending,
+                    shouldEnableManualAdbAuthorization(
+                                    !shutdownRequested && !activityDestroyed && !isFinishing(),
                                     adbAuthPending, adbAuthMode),
                     !requestedOpen && !cameraHandoffPending);
             if (legacyRuntimeBlocked) {

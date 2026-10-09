@@ -91,11 +91,11 @@ final class AvasWav {
                 || (length & 1) != 0) {
             throw new IllegalArgumentException("PCM16 range must contain whole samples");
         }
-        int gain = Math.max(0, Math.min(100, volume));
+        int gain = Math.max(0, Math.min(100, volume)) * AvasPlaybackPlan.PCM_GAIN_MULTIPLIER;
         for (int i = 0; i < length; i += 2) {
             int sample = (short) ((source[sourceOffset + i] & 0xff)
                     | (source[sourceOffset + i + 1] << 8));
-            int scaled = sample * gain / 100;
+            int scaled = Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, sample * gain / 100));
             target[targetOffset + i] = (byte) scaled;
             target[targetOffset + i + 1] = (byte) (scaled >> 8);
         }

@@ -1245,6 +1245,7 @@ class ProductionUiController @JvmOverloads constructor(
             backend.onProductionUiAction(BydExtendUiAction.Run(command))
             return true
         }
+        if (command == CommandId.OpenBackgroundSettings && state.settings.adbOperation.pending) return true
         val strings = UiStrings(state.language, context)
         val dialog = when (command) {
             CommandId.OpenBackgroundSettings -> DialogUiState(

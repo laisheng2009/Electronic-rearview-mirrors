@@ -55,8 +55,8 @@ public final class AvasEngineOutputTest {
         float[] input = {1, -1, 2, Float.NaN, 0.5f};
         short[] exterior = new short[5];
         short[] interior = new short[5];
-        AvasEngineRuntime.pcm(input, exterior, 5, 100);
-        AvasEngineRuntime.pcm(input, interior, 5, 50);
+        AvasEngineRuntime.pcm(input, exterior, 5, 1f);
+        AvasEngineRuntime.pcm(input, interior, 5, AvasPlaybackPlan.interiorPcmGain(25));
         assertArrayEquals(new short[]{32767, -32767, 32767, 0, 16384}, exterior);
         assertArrayEquals(new short[]{16384, -16383, 32767, 0, 8192}, interior);
         assertEquals(1f, input[0], 0);
@@ -84,8 +84,8 @@ public final class AvasEngineOutputTest {
         assertTrue(player.contains("MusicPlaybackSource.EVENT"));
         assertTrue(player.contains("MusicPlaybackSource.MICROPHONE"));
         assertTrue(runtime.contains("() -> config.exteriorVolume"));
-        assertTrue(runtime.contains("pcm(block, pcm, frames, 100)"));
-        assertTrue(runtime.contains("pcm(block, pcm, frames, settings.interiorVolume)"));
+        assertTrue(runtime.contains("pcm(block, pcm, frames, 1f)"));
+        assertTrue(runtime.contains("pcm(block, pcm, frames, AvasPlaybackPlan.interiorPcmGain(settings.interiorVolume))"));
     }
 
     private static String source(String name) throws Exception {

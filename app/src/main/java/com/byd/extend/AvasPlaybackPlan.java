@@ -7,6 +7,7 @@ final class AvasPlaybackPlan {
     interface FrameWriter { long write(long frames) throws Exception; }
     static final int EXTERIOR_SILENCE_MILLIS = 0;
     static final int NAVIGATION_SILENCE_MILLIS = 0;
+    static final int PCM_GAIN_MULTIPLIER = 2;
 
     private AvasPlaybackPlan() {}
 
@@ -15,7 +16,13 @@ final class AvasPlaybackPlan {
     }
 
     static int exteriorTargetGainMb(int volume) {
-        return Math.max(0, Math.min(100, volume)) * 2800 / 100;
+        int percent = Math.max(0, Math.min(100, volume));
+        // Doubling amplitude adds 6.02 dB, not twice the existing decibel value.
+        return percent == 0 ? 0 : percent * 2800 / 100 + 602;
+    }
+
+    static float interiorPcmGain(int volume) {
+        return Math.max(0, Math.min(100, volume)) * PCM_GAIN_MULTIPLIER / 100f;
     }
 
     static int silenceMillis(AvasPlaybackQueue.Kind kind) {
