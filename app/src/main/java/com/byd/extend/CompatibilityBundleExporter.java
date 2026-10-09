@@ -657,7 +657,7 @@ final class CompatibilityBundleExporter {
         if (Looper.myLooper() == mainLooper) {
             return new SteeringEvidence(null, null, "export_must_run_on_worker");
         }
-        AtomicReference<ReverseSteeringModelConfig.Selection> selected = new AtomicReference<>();
+        AtomicReference<ReverseSteeringModelConfig.PreparedModel> selected = new AtomicReference<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         CountDownLatch prepared = new CountDownLatch(1);
         Handler handler;
@@ -705,9 +705,11 @@ final class CompatibilityBundleExporter {
         if (failure.get() != null) {
             return new SteeringEvidence(null, null, summary(failure.get()));
         }
-        ReverseSteeringModelConfig.Selection selection = selected.get();
-        if (selection == null) return new SteeringEvidence(null, null, "selection_unavailable");
+        ReverseSteeringModelConfig.PreparedModel model = selected.get();
+        if (model == null) return new SteeringEvidence(null, null, "selection_unavailable");
+        ReverseSteeringModelConfig.Selection selection = null;
         try {
+            selection = model.resolve();
             return new SteeringEvidence(selection, selection.load(), null);
         } catch (Exception | LinkageError error) {
             if (control != null && control.isCancellationRequested()) {

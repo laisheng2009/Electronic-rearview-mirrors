@@ -164,7 +164,7 @@ public final class AvasNavigationAudioContractTest {
         assertTrue(gain.contains("AvasPlaybackPlan.exteriorTargetGainMb(volume)"));
         assertTrue(gain.contains("loudness.setEnabled(true)"));
         assertTrue(gain.contains("result != AudioEffect.SUCCESS || !loudness.getEnabled()"));
-        assertTrue(gain.contains("AvasPlaybackPlan.exteriorPlayerVolume(volume)"));
+        assertTrue(gain.contains("AvasPlaybackPlan.exteriorPlayerVolume(volume, loudness != null)"));
         assertTrue(gain.contains("\"fallback\", \"unboosted_pcm\""));
         assertTrue(gain.contains("owned.release()"));
         assertTrue(gain.contains("loudness = null"));

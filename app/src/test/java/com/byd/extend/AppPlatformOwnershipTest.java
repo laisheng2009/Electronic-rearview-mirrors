@@ -100,7 +100,7 @@ public class AppPlatformOwnershipTest {
         assertTrue(volume.contains("attenuation = 0"));
         assertTrue(volume.contains("compensation(referenceDb, actualDb)"));
         assertFalse(volume.contains("setStreamVolume"));
-        assertTrue(player.contains("AvasPlaybackPlan.exteriorPlayerVolume(volume) * attenuation"));
+        assertTrue(player.contains("AvasPlaybackPlan.exteriorPlayerVolume(volume, loudness != null) * attenuation"));
     }
 
     @Test public void samePowerSnapshotAfterAppDeathKeepsSessionAndClusterAttempt() {

@@ -7,12 +7,16 @@ import android.os.Looper;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /** Active OEM model steering bounds used only by Reverse crop shifting. */
@@ -20,9 +24,7 @@ final class ReverseSteeringModelConfig {
     private static final String STOCK_PACKAGE = "com.byd.avc";
     private static final String CAR_STATUS = "com.byd.avc.util.devicestates.CarStatus";
     private static final String DEVICE_STATES = "com.byd.avc.util.devicestates.DeviceStates";
-    private static final String RENDER_SDK_HELPER = "com.byd.avc.sdk.RenderSdkHelper";
-    private static final String PANO_RESOURCE_CONTROLLER =
-            "com.byd.avc.util.PanoResourceController";
+    private static final String OEM_RENDERER_FILE = "/collect2/autovideo/sdk/pano_sdk.txt";
     private static final int MAX_CONFIG_BYTES = 1_048_576;
 
     final float minimumDegrees;
@@ -42,8 +44,8 @@ final class ReverseSteeringModelConfig {
         this.model = model;
     }
 
-    /** Resolve OEM selection on the app Looper; callers read the selected asset on a worker. */
-    static Selection prepareLoad(Context context) throws Exception {
+    /** Read model identity on the app Looper; resource selection and I/O run on a worker. */
+    static PreparedModel prepareLoad(Context context) throws Exception {
         // CarStatus creates a Handler during class initialization.
         if (Looper.myLooper() != Looper.getMainLooper()) {
             throw new IllegalStateException("OEM steering model requires the app main Looper");
@@ -73,43 +75,108 @@ final class ReverseSteeringModelConfig {
         requirePathPart("car type", carType);
         requirePathPart("sub-car type", subCarType);
 
-        Object renderSdkHelper = invokeStatic(loader, RENDER_SDK_HELPER,
-                "getInstance", new Class<?>[0]);
-        String renderer = (String) invoke(renderSdkHelper, "getSDKTypeName", new Class<?>[0]);
-        if (!"TS".equals(renderer) && !"BYD".equals(renderer)) {
-            throw new IllegalArgumentException("active OEM renderer unavailable");
-        }
-        String resourceSuffix;
-        String assetPath;
-        String externalPath = "";
-        String format;
-        if ("TS".equals(renderer)) {
-            // Preserve the stock TS resource_ts/<type>/CarModel/<sub-type> layout.
-            resourceSuffix = "/" + subCarType;
-            assetPath = "resource_ts/" + carType + "/CarModel/" + subCarType
-                    + "/Vehicle_Configuration.json";
-            format = "json";
-        } else {
-            String bydSuffix = (String) invokeStatic(loader, PANO_RESOURCE_CONTROLLER,
-                    "getCarParamPath", new Class<?>[]{Context.class}, stockContext);
-            requireResourceSuffix(bydSuffix);
-            resourceSuffix = bydSuffix;
-            assetPath = "resource_byd/" + carType + "/CarModel" + resourceSuffix
-                    + "/configs/vehicle_param.yaml";
-            externalPath = "/collect2/autovideo/resource_byd/" + carType
-                    + "/CarModel" + resourceSuffix + "/resource/configs/vehicle_param.yaml";
-            format = "yaml";
-        }
-
         PackageInfo packageInfo = stockContext.getPackageManager()
                 .getPackageInfo(STOCK_PACKAGE, 0);
         String model = (series == null || series.isEmpty() ? "" : series + "/")
                 + carType + "/" + subCarType;
-        return new Selection(stockContext, STOCK_PACKAGE,
-                packageInfo.versionName == null ? "" : packageInfo.versionName,
-                packageInfo.versionCode, packageInfo.lastUpdateTime,
-                stockContext.getApplicationInfo().sourceDir, model, renderer,
-                resourceSuffix, assetPath, externalPath, format);
+        return new PreparedModel(stockContext, packageInfo, model, carType, subCarType);
+    }
+
+    static final class PreparedModel {
+        private final Context stockContext;
+        private final PackageInfo packageInfo;
+        private final String model;
+        private final String carType;
+        private final String subCarType;
+
+        PreparedModel(Context stockContext, PackageInfo packageInfo, String model,
+                String carType, String subCarType) {
+            this.stockContext = stockContext;
+            this.packageInfo = packageInfo;
+            this.model = model;
+            this.carType = carType;
+            this.subCarType = subCarType;
+        }
+
+        Selection resolve() throws Exception {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                throw new IllegalStateException("OEM steering resource selection requires a worker");
+            }
+            List<String> paths = new ArrayList<>();
+            addIfPresent(paths, "resource_ts/" + carType + "/CarModel/" + subCarType
+                    + "/Vehicle_Configuration.json");
+            String bydRoot = "resource_byd/" + carType + "/CarModel";
+            addIfPresent(paths, bydRoot + "/configs/vehicle_param.yaml");
+            String[] variants = stockContext.getAssets().list(bydRoot);
+            if (variants != null) {
+                for (String variant : variants) {
+                    requirePathPart("resource variant", variant);
+                    addIfPresent(paths, bydRoot + "/" + variant + "/configs/vehicle_param.yaml");
+                }
+            }
+            String rendererHint = "";
+            // Read the marker written by AutoVideo, never initialize its ADAS-backed renderer.
+            try (InputStream input = new FileInputStream(OEM_RENDERER_FILE)) {
+                rendererHint = readUtf8(input).trim();
+            } catch (IOException | SecurityException unavailable) {
+                // Without a readable marker, only a single model configuration is safe.
+            }
+            String path = selectConfigurationPath(carType, subCarType, paths, rendererHint);
+            boolean ts = path.startsWith("resource_ts/");
+            String root = ts ? "resource_ts/" + carType + "/CarModel" : bydRoot;
+            String ending = ts ? "/Vehicle_Configuration.json" : "/configs/vehicle_param.yaml";
+            String suffix = path.substring(root.length(), path.length() - ending.length());
+            return new Selection(stockContext, STOCK_PACKAGE,
+                    packageInfo.versionName == null ? "" : packageInfo.versionName,
+                    packageInfo.versionCode, packageInfo.lastUpdateTime,
+                    stockContext.getApplicationInfo().sourceDir, model, ts ? "TS" : "BYD",
+                    suffix, path, ts ? "" : "/collect2/autovideo/" + root + suffix
+                            + "/resource/configs/vehicle_param.yaml", ts ? "json" : "yaml");
+        }
+
+        private void addIfPresent(List<String> paths, String path) throws IOException {
+            int slash = path.lastIndexOf('/');
+            String[] files = stockContext.getAssets().list(path.substring(0, slash));
+            if (files == null) return;
+            for (String file : files) {
+                if (file.equals(path.substring(slash + 1))) {
+                    paths.add(path);
+                    return;
+                }
+            }
+        }
+    }
+
+    static String selectConfigurationPath(String carType, String subCarType,
+            List<String> paths, String rendererHint) {
+        requirePathPart("car type", carType);
+        requirePathPart("sub-car type", subCarType);
+        if (!rendererHint.isEmpty() && !"TS".equals(rendererHint) && !"BYD".equals(rendererHint)) {
+            throw new IllegalArgumentException("unsupported OEM renderer: " + rendererHint);
+        }
+        String tsPath = "resource_ts/" + carType + "/CarModel/" + subCarType
+                + "/Vehicle_Configuration.json";
+        String bydRoot = "resource_byd/" + carType + "/CarModel";
+        String bydEnding = "/configs/vehicle_param.yaml";
+        String selected = null;
+        for (String path : paths) {
+            boolean ts = path.equals(tsPath);
+            boolean byd = path.startsWith(bydRoot + "/") && path.endsWith(bydEnding);
+            if (byd) {
+                requireResourceSuffix(path.substring(bydRoot.length(), path.length() - bydEnding.length()));
+            }
+            if ((!ts && !byd) || ("TS".equals(rendererHint) && !ts)
+                    || ("BYD".equals(rendererHint) && !byd)) continue;
+            // Multiple renderer/trim resources are not evidence of which one is active.
+            if (selected != null && !selected.equals(path)) {
+                throw new IllegalArgumentException("ambiguous active-model steering configuration");
+            }
+            selected = path;
+        }
+        if (selected == null) {
+            throw new IllegalArgumentException("active-model steering configuration unavailable");
+        }
+        return selected;
     }
 
     boolean sameModel(ReverseSteeringModelConfig other) {
@@ -446,12 +513,6 @@ final class ReverseSteeringModelConfig {
         Class<?> type = loader.loadClass(className);
         Method method = type.getMethod(methodName, parameterTypes);
         return method.invoke(null, values);
-    }
-
-    private static Object invoke(
-            Object target, String methodName, Class<?>[] parameterTypes) throws Exception {
-        Method method = target.getClass().getMethod(methodName, parameterTypes);
-        return method.invoke(target);
     }
 
     private static String message(Throwable failure) {

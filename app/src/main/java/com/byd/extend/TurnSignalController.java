@@ -2109,14 +2109,14 @@ final class TurnSignalController {
 
     private void prepareSteeringModelOnMain() {
         if (stopped) return;
-        ReverseSteeringModelConfig.Selection selection = null;
+        ReverseSteeringModelConfig.PreparedModel selection = null;
         Throwable failure = null;
         try {
             selection = ReverseSteeringModelConfig.prepareLoad(context);
         } catch (Throwable error) {
             failure = error;
         }
-        final ReverseSteeringModelConfig.Selection prepared = selection;
+        final ReverseSteeringModelConfig.PreparedModel prepared = selection;
         final Throwable preparationFailure = failure;
         try {
             worker.execute(() -> {
@@ -2128,8 +2128,16 @@ final class TurnSignalController {
     }
 
     private void finishSteeringModelSelection(
-            ReverseSteeringModelConfig.Selection selection, Throwable failure) {
+            ReverseSteeringModelConfig.PreparedModel prepared, Throwable failure) {
         if (stopped) return;
+        ReverseSteeringModelConfig.Selection selection = null;
+        if (failure == null) {
+            try {
+                selection = prepared.resolve();
+            } catch (Throwable error) {
+                failure = error;
+            }
+        }
         if (failure != null) {
             steeringModelLoadPending = false;
             steeringSelection = null;

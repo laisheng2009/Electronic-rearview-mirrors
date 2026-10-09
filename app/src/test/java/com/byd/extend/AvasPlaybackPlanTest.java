@@ -9,16 +9,29 @@ import org.junit.Test;
 public final class AvasPlaybackPlanTest {
     @Test public void exteriorVolumeMapsToPlayerAndLoudnessEnhancer() {
         int[] volumes = {0, 25, 50, 60, 80, 100};
-        float[] playerVolumes = {0f, 0.25f, 0.5f, 0.6f, 0.8f, 1f};
-        int[] gainsMb = {0, 1302, 2002, 2282, 2842, 3402};
+        float[] playerVolumes = {0f, 1f, 1f, 1f, 1f, 1f};
+        int[] gainsMb = {0, 2796, 3398, 3556, 3806, 4000};
         for (int i = 0; i < volumes.length; i++) {
-            assertEquals(playerVolumes[i], AvasPlaybackPlan.exteriorPlayerVolume(volumes[i]), 0f);
+            assertEquals(playerVolumes[i], AvasPlaybackPlan.exteriorPlayerVolume(volumes[i], true), 0f);
             assertEquals(gainsMb[i], AvasPlaybackPlan.exteriorTargetGainMb(volumes[i]));
         }
-        assertEquals(0f, AvasPlaybackPlan.exteriorPlayerVolume(-1), 0f);
+        assertEquals(0f, AvasPlaybackPlan.exteriorPlayerVolume(-1, true), 0f);
         assertEquals(0, AvasPlaybackPlan.exteriorTargetGainMb(-1));
-        assertEquals(1f, AvasPlaybackPlan.exteriorPlayerVolume(101), 0f);
-        assertEquals(3402, AvasPlaybackPlan.exteriorTargetGainMb(101));
+        assertEquals(1f, AvasPlaybackPlan.exteriorPlayerVolume(101, true), 0f);
+        assertEquals(4000, AvasPlaybackPlan.exteriorTargetGainMb(101));
+    }
+
+    @Test public void exteriorSignalAppliesPercentageOnceAndKeepsZeroSilent() {
+        for (int percent = 0; percent <= 100; percent++) {
+            double signal = AvasPlaybackPlan.exteriorPlayerVolume(percent, true)
+                    * Math.pow(10, AvasPlaybackPlan.exteriorTargetGainMb(percent) / 2000.0);
+            assertEquals(percent, signal, Math.max(.001, percent * .0006));
+            assertEquals(percent / 100f,
+                    AvasPlaybackPlan.exteriorPlayerVolume(percent, false), 0f);
+        }
+        assertEquals(0f, AvasPlaybackPlan.interiorPcmGain(0), 0f);
+        assertEquals(1f, AvasPlaybackPlan.interiorPcmGain(50), 0f);
+        assertEquals(2f, AvasPlaybackPlan.interiorPcmGain(100), 0f);
     }
 
     @Test public void noRequestHasArtificialSilence() {

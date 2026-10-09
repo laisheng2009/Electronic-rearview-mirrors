@@ -6802,6 +6802,7 @@ public final class CameraProbeActivity extends ComponentActivity
             releaseProductionCalibrationHosts();
         }
         BlindSpotCameraView owner = new BlindSpotCameraView(this);
+        owner.setFusedOutput(false);
         owner.setAutomaticBufferQuality(CameraBufferQuality.load(preferences));
         owner.setForceDewarpPipeline(true);
         owner.setCallback(this);
@@ -8187,6 +8188,7 @@ public final class CameraProbeActivity extends ComponentActivity
         reverseCameraStatus = statusText("Очікування AVM camera...");
         previewPane.addView(reverseCameraStatus);
         reverseCameraPreview = new ReverseCameraCompositionView(this);
+        reverseCameraPreview.setFusedOutput(false);
         reverseCameraPreview.setAutomaticBufferQuality(
                 CameraBufferQuality.load(preferences));
         reverseCameraPreview.setForceDewarpPipeline(true);
@@ -10543,6 +10545,7 @@ public final class CameraProbeActivity extends ComponentActivity
         calibrationSourceFrame = sourceFrame;
 
         calibrationPreview = new BlindSpotCameraView(this);
+        calibrationPreview.setFusedOutput(false);
         calibrationPreview.setAutomaticBufferQuality(
                 CameraBufferQuality.load(preferences));
         calibrationPreview.setAlpha(1.0f);
@@ -14058,7 +14061,7 @@ public final class CameraProbeActivity extends ComponentActivity
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(CameraHelperMain.DESCRIPTOR);
-            surface.writeToParcel(data, 0);
+            CameraGpuOutput.writeSurface(data, surface);
             data.writeString(cameraTag);
             data.writeInt(index);
             data.writeInt(requestId);
@@ -14110,7 +14113,7 @@ public final class CameraProbeActivity extends ComponentActivity
             data.writeInt(bundle.sourceIndexes.length);
             for (int i = 0; i < bundle.sourceIndexes.length; i++) {
                 data.writeInt(bundle.sourceIndexes[i]);
-                bundle.surfaces[i].writeToParcel(data, 0);
+                CameraGpuOutput.writeSurface(data, bundle.surfaces[i]);
             }
             requireTransaction(current, CameraHelperMain.TX_OPEN_REVERSE_PREVIEW_TARGETED, data, reply);
             String result = reply.readString();

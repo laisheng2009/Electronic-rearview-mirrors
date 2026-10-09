@@ -413,7 +413,7 @@ final class CameraHelperMain {
                     return true;
                 }
                 if (code == TX_OPEN_DIRECT) {
-                    Surface requestedSurface = Surface.CREATOR.createFromParcel(data);
+                    Surface requestedSurface = CameraGpuOutput.readSurface(data);
                     String requestedTag = data.readString();
                     int requestedIndex = data.readInt();
                     int requestId = data.readInt();
@@ -4417,7 +4417,7 @@ final class CameraHelperMain {
                 directIndexes = new int[count];
                 for (int i = 0; i < count; i++) {
                     directIndexes[i] = data.readInt();
-                    directSurfaces[i] = Surface.CREATOR.createFromParcel(data);
+                    directSurfaces[i] = CameraGpuOutput.readSurface(data);
                 }
                 String validation = validateReversePreviewTargets(
                         panoOutput, directSurfaces, directIndexes);

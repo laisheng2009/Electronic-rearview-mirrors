@@ -96,6 +96,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     private int visibilityMask = ReverseCameraLayout.VISIBILITY_ALL;
     private int displayTarget = CameraDisplayTarget.TABLET;
     private boolean forceDewarpPipeline;
+    private boolean fusedOutput = true;
     private int[] borderDp = new int[CameraShellProtocol.ReverseOverlaySpec.BORDER_COUNT];
     private int[] borderArgb = defaultBorderColors();
 
@@ -270,6 +271,12 @@ final class ReverseCameraCompositionView extends FrameLayout {
         if (centralFrontPane != null) {
             centralFrontPane.texture.setForceDewarpPipeline(value);
         }
+    }
+
+    void setFusedOutput(boolean value) {
+        fusedOutput = value;
+        for (PaneView pane : panes) pane.texture.setFusedOutput(value);
+        if (centralFrontPane != null) centralFrontPane.texture.setFusedOutput(value);
     }
 
     void setDewarpPipelineRequirements(
@@ -1798,6 +1805,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
                 4, CameraDewarpConfig.LENS_FRONT);
         centralFrontPane.texture.setAutomaticBufferQuality(automaticBufferQuality);
         centralFrontPane.texture.setForceDewarpPipeline(forceDewarpPipeline);
+        centralFrontPane.texture.setFusedOutput(fusedOutput);
         centralFrontPane.setCornerRadiusDp(cornerRadiusDp);
         centralFrontPane.setAlpha(0.0f);
         applyModel();

@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -16,6 +17,51 @@ import org.junit.Assume;
 import org.junit.Test;
 
 public final class ReverseSteeringModelConfigTest {
+    @Test public void selectsUniqueTsAndBydModelResourcesWithoutOemInitialization() {
+        String ts = "resource_ts/ukea/CarModel/ukea/Vehicle_Configuration.json";
+        String byd = "resource_byd/shh/CarModel/configs/vehicle_param.yaml";
+        assertEquals(ts, ReverseSteeringModelConfig.selectConfigurationPath(
+                "ukea", "ukea", List.of(ts, byd), ""));
+        assertEquals(byd, ReverseSteeringModelConfig.selectConfigurationPath(
+                "shh", "shh", List.of(ts, byd), ""));
+    }
+
+    @Test public void oemMarkerDisambiguatesDualRendererModelWithoutCrossRendererFallback() {
+        String ts = "resource_ts/uked/CarModel/uked/Vehicle_Configuration.json";
+        String byd = "resource_byd/uked/CarModel/configs/vehicle_param.yaml";
+        List<String> paths = List.of(ts, byd);
+        assertEquals(ts, ReverseSteeringModelConfig.selectConfigurationPath(
+                "uked", "uked", paths, "TS"));
+        assertEquals(byd, ReverseSteeringModelConfig.selectConfigurationPath(
+                "uked", "uked", paths, "BYD"));
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath(
+                        "uked", "uked", paths, ""));
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath(
+                        "uked", "uked", List.of(ts), "BYD"));
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath(
+                        "uked", "uked", paths, "APA"));
+    }
+
+    @Test public void doesNotGuessBydTrimOrUseAnotherTsSubtype() {
+        String bev = "resource_byd/body/CarModel/bev/configs/vehicle_param.yaml";
+        String phev = "resource_byd/body/CarModel/phev/configs/vehicle_param.yaml";
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath(
+                        "body", "trim", List.of(bev, phev), "BYD"));
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath("body", "trim",
+                        List.of("resource_ts/body/CarModel/other/Vehicle_Configuration.json"), "TS"));
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath("../body", "trim",
+                        List.of(bev), "BYD"));
+        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath("body", "trim",
+                        List.of("resource_byd/body/CarModel/../configs/vehicle_param.yaml"), "BYD"));
+    }
+
     @Test public void shellSnapshotValidatesBoundsAndIdentityWithoutOemLookup() {
         ReverseSteeringModelConfig snapshot = new ReverseSteeringModelConfig(-543.163f, 543.163f,
                 "286/ocean/uked");

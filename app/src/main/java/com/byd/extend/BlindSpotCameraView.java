@@ -65,6 +65,7 @@ final class BlindSpotCameraView extends TextureView
     private int dewarpGeneration;
     private long dewarpRequestToken;
     private boolean forceDewarpPipeline;
+    private boolean fusedOutput = true;
     private boolean preserveInputFrameTimestamp;
     private boolean externalTransform;
     private float dewarpRoiCenterX = 0.5f;
@@ -195,6 +196,13 @@ final class BlindSpotCameraView extends TextureView
             throw new IllegalStateException("dewarp pipeline must be selected before attach");
         }
         forceDewarpPipeline = value;
+    }
+
+    void setFusedOutput(boolean value) {
+        if (hasCameraInputLifecycle()) {
+            throw new IllegalStateException("GPU output path must be selected before attach");
+        }
+        fusedOutput = value;
     }
 
     void applyDewarpConfig(CameraDewarpConfig value) {
@@ -391,6 +399,7 @@ final class BlindSpotCameraView extends TextureView
                     dewarpConfig, dewarpRequestToken, cameraGeneration,
                     dewarpStatsRequestId, dewarpStatsGeneration,
                     getWidth(), getHeight(),
+                    fusedOutput,
                     stats -> mainHandler.post(() -> {
                         if (rendererGeneration != dewarpGeneration
                                 || texture != getSurfaceTexture()

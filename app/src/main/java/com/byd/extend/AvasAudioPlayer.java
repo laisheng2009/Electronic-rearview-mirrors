@@ -1616,7 +1616,7 @@ final class AvasAudioPlayer implements AutoCloseable {
 
         private void applyVolume(int volume) {
             float attenuation = navVolume == null ? 0f : navVolume.attenuation();
-            float playerVolume = AvasPlaybackPlan.exteriorPlayerVolume(volume) * attenuation;
+            float playerVolume = AvasPlaybackPlan.exteriorPlayerVolume(volume, loudness != null) * attenuation;
             int result = output.setVolume(playerVolume);
             if (result != AudioTrack.SUCCESS) {
                 throw new IllegalStateException("Exterior player volume=" + result);

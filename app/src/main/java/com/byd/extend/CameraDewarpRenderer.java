@@ -82,6 +82,7 @@ final class CameraDewarpRenderer {
     private volatile MappingRequest request;
     private volatile Handler handler;
     private volatile Surface cameraSurface;
+    private CameraGpuOutput fusedOutput;
     private volatile boolean preserveInputFrameTimestamp;
     private SurfaceTexture cameraTexture;
     private EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
@@ -368,14 +369,31 @@ final class CameraDewarpRenderer {
             SurfaceTexture outputTexture, int width, int height,
             CameraDewarpConfig config, long requestToken, int inputGeneration,
             int statsRequestId, int statsGeneration, int viewWidth, int viewHeight,
+            boolean fuseWithSource,
             Consumer<Stats> statsSink, Consumer<Event> eventSink,
             LifecycleCallback lifecycleCallback) {
         CameraDewarpRenderer renderer = new CameraDewarpRenderer(
                 outputTexture, width, height, config, requestToken, inputGeneration,
                 statsRequestId, statsGeneration, viewWidth, viewHeight,
                 statsSink, eventSink, lifecycleCallback);
-        renderer.startInternal();
+        if (fuseWithSource) renderer.startFused();
+        else renderer.startInternal();
         return renderer;
+    }
+
+    private void startFused() {
+        try {
+            outputTexture.setDefaultBufferSize(width, height);
+            cameraSurface = new Surface(outputTexture);
+            fusedOutput = new CameraGpuOutput(width, height, request.config, request.token, this::emitEvent);
+            CameraGpuOutput.register(cameraSurface, fusedOutput);
+            lifecycleCallback.onReady(this, cameraSurface);
+        } catch (Throwable failure) {
+            CameraGpuOutput.unregister(cameraSurface);
+            if (cameraSurface != null) cameraSurface.release();
+            cameraSurface = null;
+            reportStopped(failure);
+        }
     }
 
     void setRawMirror(SurfaceTexture texture) {
@@ -428,6 +446,10 @@ final class CameraDewarpRenderer {
         MappingRequest current = request;
         if (requestToken <= current.token) return;
         request = new MappingRequest(value, requestToken);
+        if (fusedOutput != null) {
+            fusedOutput.update(value, requestToken);
+            return;
+        }
         Handler activeHandler = handler;
         if (activeHandler != null && mappingUpdatePosted.compareAndSet(false, true)) {
             activeHandler.post(this::applyLatestMapping);
@@ -446,6 +468,16 @@ final class CameraDewarpRenderer {
 
     void releaseAsync() {
         if (!released.compareAndSet(false, true)) return;
+        if (fusedOutput != null) {
+            CameraGpuOutput.unregister(cameraSurface);
+            fusedOutput.release(() -> {
+                Surface surface = cameraSurface;
+                cameraSurface = null;
+                if (surface != null) surface.release();
+                reportStopped(null);
+            });
+            return;
+        }
         Handler activeHandler = handler;
         if (activeHandler == null) {
             reportStopped(null);

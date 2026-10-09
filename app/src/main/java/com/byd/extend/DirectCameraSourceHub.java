@@ -19,6 +19,7 @@ import android.view.Surface;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.nio.ShortBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.IdentityHashMap;
@@ -53,17 +54,24 @@ final class DirectCameraSourceHub
             "attribute vec2 aPosition;\n"
                     + "attribute vec2 aTexCoord;\n"
                     + "uniform mat4 uTextureMatrix;\n"
+                    + "varying vec2 vRawTexCoord;\n"
                     + "varying vec2 vTexCoord;\n"
                     + "void main(){\n"
                     + " gl_Position=vec4(aPosition,0.0,1.0);\n"
+                    + " vRawTexCoord=aTexCoord;\n"
                     + " vTexCoord=(uTextureMatrix*vec4(aTexCoord,0.0,1.0)).xy;\n"
                     + "}\n";
     private static final String FRAGMENT_SHADER =
             "#extension GL_OES_EGL_image_external : require\n"
                     + "precision mediump float;\n"
                     + "uniform samplerExternalOES uTexture;\n"
+                    + "varying vec2 vRawTexCoord;\n"
                     + "varying vec2 vTexCoord;\n"
-                    + "void main(){ gl_FragColor=texture2D(uTexture,vTexCoord); }\n";
+                    + "void main(){\n"
+                    + " if(vRawTexCoord.x<0.0||vRawTexCoord.x>1.0||vRawTexCoord.y<0.0||vRawTexCoord.y>1.0"
+                    + "||vTexCoord.x<0.0||vTexCoord.x>1.0||vTexCoord.y<0.0||vTexCoord.y>1.0)"
+                    + "{gl_FragColor=vec4(0.0,0.0,0.0,1.0);return;}\n"
+                    + " gl_FragColor=texture2D(uTexture,vTexCoord); }\n";
 
     /** The coordinator owns the shared display/config and all identity routing. */
     private final HandlerThread coordinatorThread =
@@ -360,21 +368,45 @@ final class DirectCameraSourceHub
         Target attachTarget(Surface value, int targetIndex) throws Exception {
             return call(() -> {
                 require(value != null && value.isValid(), "downstream Surface is invalid");
-                EGLSurface eglSurface = EGL14.eglCreateWindowSurface(display, config, value,
-                        new int[]{EGL14.EGL_NONE}, 0);
-                require(eglSurface != EGL14.EGL_NO_SURFACE, "downstream EGL surface failed");
+                // Lease first: the owner must not abandon its TextureView during EGL attachment.
+                CameraGpuOutput.Binding mapping = CameraGpuOutput.bind(value, () -> postCoordinator(() -> {
+                    try {
+                        DirectCameraSourceHub.this.detach(new Surface[]{value});
+                    } catch (Exception error) {
+                        handler.post(() -> reportSourceFailure(error));
+                    }
+                }));
+                EGLSurface eglSurface;
+                try {
+                    eglSurface = EGL14.eglCreateWindowSurface(display, config, value,
+                            new int[]{EGL14.EGL_NONE}, 0);
+                    require(eglSurface != EGL14.EGL_NO_SURFACE, "downstream EGL surface failed");
+                } catch (Throwable failure) {
+                    if (mapping != null) mapping.close();
+                    throw failure;
+                }
                 Target target = new Target(this, value, targetIndex, eglSurface);
+                target.mapping = mapping;
                 targets.add(target);
+                Log.i(LOG_TAG, "{\"kind\":\"camera_gpu_output_attached\",\"source_index\":"
+                        + targetIndex + ",\"fused\":" + (target.mapping != null) + "}");
                 return target;
             });
         }
 
         void detachTarget(Target target) throws Exception {
             call(() -> {
-                if (!targets.remove(target)) return null;
-                EGL14.eglDestroySurface(display, target.eglSurface);
+                if (!targets.contains(target)) return null;
+                destroyTarget(target);
+                targets.remove(target);
                 return null;
             });
+        }
+
+        private void destroyTarget(Target target) {
+            makeCurrent(idleSurface);
+            require(EGL14.eglDestroySurface(display, target.eglSurface), "downstream EGL release failed");
+            if (target.mapping != null) target.mapping.close();
         }
 
         void setTargetActive(Target target, boolean active) throws Exception {
@@ -555,7 +587,8 @@ final class DirectCameraSourceHub
                     }
                     swapCount++;
                 } catch (Throwable error) {
-                    EGL14.eglDestroySurface(display, target.eglSurface);
+                    try { destroyTarget(target); }
+                    catch (Throwable cleanup) { error.addSuppressed(cleanup); }
                     targets.remove(i);
                     forgetTargetFromWorker(target);
                     Surface failedSurface = target.surface;
@@ -618,7 +651,7 @@ final class DirectCameraSourceHub
             postCoordinator(() -> listener.onSourceFailure(index, error));
         }
 
-        private DrawTiming draw(Target target, long acquiredFrameTimestampNanos) {
+        private DrawTiming draw(Target target, long acquiredFrameTimestampNanos) throws Exception {
             long startedNs = SystemClock.elapsedRealtimeNanos();
             makeCurrent(target.eglSurface);
             int[] width = new int[1];
@@ -627,22 +660,36 @@ final class DirectCameraSourceHub
                     && EGL14.eglQuerySurface(display, target.eglSurface,
                     EGL14.EGL_HEIGHT, height, 0), "downstream size query failed");
             GLES20.glViewport(0, 0, width[0], height[0]);
+            GLES20.glClearColor(0, 0, 0, 1);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
             GLES20.glUseProgram(program);
             positions.position(0);
             texCoords.position(0);
             GLES20.glEnableVertexAttribArray(positionLocation);
             GLES20.glEnableVertexAttribArray(texCoordLocation);
-            GLES20.glVertexAttribPointer(positionLocation, 2, GLES20.GL_FLOAT,
-                    false, 0, positions);
-            GLES20.glVertexAttribPointer(texCoordLocation, 2, GLES20.GL_FLOAT,
-                    false, 0, texCoords);
+            CameraDewarpRenderer.MappingRequest rendered = target.mapping == null ? null
+                    : target.mesh.prepare(target.mapping.request, target.mapping.width, target.mapping.height);
+            if (rendered == null) {
+                GLES20.glVertexAttribPointer(positionLocation, 2, GLES20.GL_FLOAT, false, 0, positions);
+                GLES20.glVertexAttribPointer(texCoordLocation, 2, GLES20.GL_FLOAT, false, 0, texCoords);
+            } else {
+                target.mesh.vertices.position(0);
+                GLES20.glVertexAttribPointer(positionLocation, 2, GLES20.GL_FLOAT, false, 16, target.mesh.vertices);
+                target.mesh.vertices.position(2);
+                GLES20.glVertexAttribPointer(texCoordLocation, 2, GLES20.GL_FLOAT, false, 16, target.mesh.vertices);
+            }
             GLES20.glUniformMatrix4fv(matrixLocation, 1, false, matrix, 0);
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureName);
             GLES20.glUniform1i(textureLocation, 0);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+            if (rendered == null) GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+            else {
+                target.mesh.indices.position(0);
+                GLES20.glDrawElements(GLES20.GL_TRIANGLES, target.mesh.indices.capacity(),
+                        GLES20.GL_UNSIGNED_SHORT, target.mesh.indices);
+            }
             require(GLES20.glGetError() == GLES20.GL_NO_ERROR, "GPU fanout draw failed");
-            if (target.timestampFrames) {
+            if (target.timestampFrames || rendered != null) {
                 // Local monotonic time travels with the buffer, independent of the vendor clock.
                 require(EGLExt.eglPresentationTimeANDROID(
                         display, target.eglSurface, acquiredFrameTimestampNanos),
@@ -652,6 +699,11 @@ final class DirectCameraSourceHub
             require(EGL14.eglSwapBuffers(display, target.eglSurface),
                     "downstream buffer swap failed");
             long swapWaitNs = SystemClock.elapsedRealtimeNanos() - swapStartedNs;
+            if (rendered != null && target.acknowledgedToken != rendered.token) {
+                target.mapping.applied(rendered.token, target.mesh.rawFallback,
+                        target.mesh.vertices.capacity() / 4, target.mesh.generationNs);
+                target.acknowledgedToken = rendered.token;
+            }
             if (swapWaitNs >= TimeUnit.MILLISECONDS.toNanos(100)
                     && swapStartedNs - target.lastStallReportNs >= STALL_REPORT_INTERVAL_NS) {
                 target.lastStallReportNs = swapStartedNs;
@@ -683,7 +735,7 @@ final class DirectCameraSourceHub
             }
             for (Target target : new ArrayList<>(targets)) {
                 try {
-                    EGL14.eglDestroySurface(display, target.eglSurface);
+                    destroyTarget(target);
                 } catch (Throwable error) {
                     if (first == null) first = error;
                 }
@@ -1220,6 +1272,9 @@ final class DirectCameraSourceHub
         long lastStallReportNs;
         boolean active = true;
         boolean timestampFrames;
+        CameraGpuOutput.Binding mapping;
+        final MappingMesh mesh = new MappingMesh();
+        long acknowledgedToken = -1;
 
         Target(SourceWorker worker, Surface surface, int index, EGLSurface eglSurface) {
             this.worker = worker;
@@ -1227,5 +1282,38 @@ final class DirectCameraSourceHub
             this.index = index;
             this.eglSurface = eglSurface;
         }
+    }
+
+    static final class MappingMesh {
+        CameraDewarpRenderer.MappingRequest applied;
+        FloatBuffer vertices;
+        ShortBuffer indices;
+        boolean rawFallback;
+        long generationNs;
+
+        CameraDewarpRenderer.MappingRequest prepare(
+                CameraDewarpRenderer.MappingRequest next, int width, int height) {
+            if (next == applied) return applied;
+            if (applied == null || !applied.config.sameMapping(next.config)) {
+                long started = System.nanoTime();
+                CameraFisheyeMapping.Mesh mesh;
+                try {
+                    mesh = CameraFisheyeMapping.buildMesh(next.config, width, height);
+                    rawFallback = false;
+                } catch (CameraFisheyeMapping.CalibratedDomainException unsupported) {
+                    mesh = CameraFisheyeMapping.buildMesh(CameraDewarpConfig.disabled(next.config.lens),
+                            width, height);
+                    rawFallback = true;
+                }
+                vertices = buffer(mesh.vertices);
+                indices = ByteBuffer.allocateDirect(mesh.indices.length * 2)
+                        .order(ByteOrder.nativeOrder()).asShortBuffer();
+                indices.put(mesh.indices).position(0);
+                generationNs = System.nanoTime() - started;
+            } else generationNs = 0;
+            applied = next;
+            return applied;
+        }
+
     }
 }

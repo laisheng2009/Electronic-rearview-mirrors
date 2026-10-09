@@ -20,9 +20,10 @@ public final class ReverseSteeringBootstrapContractTest {
         assertBefore(model, "Looper.myLooper() != Looper.getMainLooper()", "context.createPackageContext");
         assertTrue(model.contains("throw new IllegalStateException(\"OEM steering model requires"));
         assertBefore(model, "invokeStatic(loader, CAR_STATUS, \"initBootBoard\"",
-                "invokeStatic(loader, RENDER_SDK_HELPER");
-        assertBefore(model, "invokeStatic(loader, PANO_RESOURCE_CONTROLLER",
-                "return new Selection(");
+                "return new PreparedModel(");
+        assertFalse("must not initialize OEM ADAS just to select steering bounds",
+                model.contains("getSDKTypeName") || model.contains("getCarParamPath"));
+        assertBefore(model, "Selection resolve() throws Exception", "getAssets().list(bydRoot)");
         assertBefore(model, "Capture load() throws Exception", "getAssets().open(configurationPath)");
         assertTrue(model.contains("Looper.myLooper() == Looper.getMainLooper()"));
         assertTrue(model.contains("final String externalConfigurationPath"));
@@ -47,6 +48,8 @@ public final class ReverseSteeringBootstrapContractTest {
         assertBefore(prepare, "ReverseSteeringModelConfig.prepareLoad(context)", "worker.execute(");
         String finish = between(controller, "private void finishSteeringModelSelection(",
                 "private void configureSteeringModel(");
+        assertBefore(finish, "if (stopped) return", "prepared.resolve()");
+        assertBefore(finish, "prepared.resolve()", "selection.load()");
         assertBefore(finish, "selection.load()", "steeringCapture.toConfig()");
         assertBefore(finish, "shouldLoadAfterCachedFailure(", "selection.load()");
         assertTrue(finish.contains("boolean changed = steeringSelection == null"));
