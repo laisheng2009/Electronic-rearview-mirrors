@@ -186,6 +186,7 @@
     <string name="check_for_updates_2">"Check for updates"</string>
     <string name="check_for_updates_automatically">"Check for updates automatically"</string>
     <string name="image_quality">"Image quality"</string>
+    <string name="frame_rate">"Frame rate"</string>
     <string name="camera_corner_radius">"Camera corner radius"</string>
     <string name="camera_transparency">"Camera transparency"</string>
     <string name="diagnostic_logs">"Diagnostic logs"</string>

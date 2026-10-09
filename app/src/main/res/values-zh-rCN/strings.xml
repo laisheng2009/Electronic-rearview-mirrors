@@ -186,6 +186,7 @@
     <string name="check_for_updates_2">"检查更新"</string>
     <string name="check_for_updates_automatically">"自动检查更新"</string>
     <string name="image_quality">"图像质量"</string>
+    <string name="frame_rate">"帧率"</string>
     <string name="camera_corner_radius">"摄像头圆角"</string>
     <string name="camera_transparency">"摄像头透明度"</string>
     <string name="diagnostic_logs">"诊断日志"</string>

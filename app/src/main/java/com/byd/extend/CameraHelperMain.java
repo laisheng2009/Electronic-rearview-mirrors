@@ -88,6 +88,9 @@ final class CameraHelperMain {
         private int producerCameraId = -1;
         private int producerEpoch;
         private int sourceHubGeneration;
+        private int requestedFrameRate = CameraFrameRate.DEFAULT;
+        private boolean frameRateRequestAccepted;
+        private long frameRateRequestElapsedMs;
         private DirectCameraSourceHub rawSourceHub;
         private boolean unconfirmedOneShotOwner;
         private Surface surface;
@@ -691,6 +694,7 @@ final class CameraHelperMain {
                         new Class<?>[]{Surface.class, int.class}, requestedSurface, requestedIndex);
                 boolean set = invokeBoolean(avm, opened, "setPreviewSurface",
                         new Class<?>[]{Surface.class, int.class}, requestedSurface, requestedIndex);
+                requestCameraFrameRate(opened, requestedCameraId, requestedCameraTag, "open");
                 boolean started = invokeBoolean(avm, opened, "startPreview", new Class<?>[0]);
                 if (!set || !started) {
                     throw new IllegalStateException(
@@ -1118,6 +1122,7 @@ final class CameraHelperMain {
                         }
                     }
                 }
+                requestCameraFrameRate(opened, requestedCameraId, "pano_h", "open_multi");
                 boolean started = invokeBoolean(avm, opened,
                         "startPreview", new Class<?>[0]);
                 if (!started) throw new IllegalStateException("startPreview returned false");
@@ -1587,6 +1592,41 @@ final class CameraHelperMain {
             if (persistentPanoProducer) tearDownPersistentProducer(VEHICLE_WAKE_RECOVERY, null);
         }
 
+        private void requestCameraFrameRate(Object opened, int id, String tag, String reason) {
+            requestedFrameRate = CameraFrameRate.load(settings);
+            frameRateRequestElapsedMs = SystemClock.elapsedRealtime();
+            frameRateRequestAccepted = false;
+            String error = "";
+            try {
+                frameRateRequestAccepted = CameraFrameRate.request(opened, requestedFrameRate);
+            } catch (ReflectiveOperationException | RuntimeException failure) {
+                error = summary(failure);
+            }
+            emit("camera_frame_rate_request", "camera_id", id, "camera_tag", tag,
+                    "requested_fps", requestedFrameRate, "api_accepted", frameRateRequestAccepted,
+                    "effective_fps_verified", false, "reason", reason,
+                    "request_elapsed_ms", frameRateRequestElapsedMs, "error", error);
+        }
+
+        synchronized void applyCameraFrameRate() {
+            if (camera == null || requestedFrameRate == CameraFrameRate.load(settings)) return;
+            try {
+                PersistentCameraPort port = new ReflectivePersistentCameraPort(camera);
+                if (!invokeBoolean(camera.getClass(), camera, "stopPreview", new Class<?>[0])) {
+                    throw new IllegalStateException("FPS restart: stopPreview returned false");
+                }
+                requestCameraFrameRate(camera, activeCameraId, activeCameraTag, "settings_changed");
+                if (!port.start()) throw new IllegalStateException("FPS restart: startPreview returned false");
+                emit("camera_frame_rate_restarted", "requested_fps", requestedFrameRate,
+                        "api_accepted", frameRateRequestAccepted, "producer_epoch", producerEpoch);
+            } catch (Throwable failure) {
+                emit("camera_frame_rate_restart_failed", "requested_fps", CameraFrameRate.load(settings),
+                        "error", summary(failure));
+                if (persistentPanoProducer) tearDownPersistentProducer("frame_rate_restart_failed", failure);
+                else closeOneShotCamera("frame_rate_restart_failed", false);
+            }
+        }
+
         synchronized String closeCamera(String reason) {
             if (CameraTransition.reasonEquals(reason, ACTIVITY_RESUME_COLD_RESET)
                     || "service_destroyed".equals(reason)) {
@@ -1994,10 +2034,24 @@ final class CameraHelperMain {
                     @Override
                     public void onStats(int index, DirectCameraSourceHub.Stats stats) {
                         if (!DiagnosticLogPolicy.extended()) return;
+                        long observedAt = SystemClock.elapsedRealtime();
+                        long processCpuMs = Process.getElapsedCpuTime();
                         callbackHandler.post(() -> {
                             if (sourceHubGeneration != openedHubGeneration
                                     || !persistentPanoProducer) return;
                             emit("camera_source_hub_stats",
+                                "requested_fps", requestedFrameRate,
+                                "fps_api_accepted", frameRateRequestAccepted,
+                                "fps_request_elapsed_ms", frameRateRequestElapsedMs,
+                                "sample_elapsed_ms", observedAt,
+                                "fps_window_stable", observedAt - frameRateRequestElapsedMs
+                                        >= milliseconds(stats.intervalNs),
+                                "process_cpu_time_ms", processCpuMs,
+                                "process_pid", Process.myPid(),
+                                "new_buffer_fps", ratePerSecond(stats.callbacks
+                                        - stats.producerTimestampRepeated - stats.producerTimestampInvalid,
+                                        stats.intervalNs),
+                                "new_buffer_fps_valid", stats.producerTimestampInvalid == 0,
                                 "producer_epoch", producerEpoch,
                                 "preview_index", index,
                                 "source_width", stats.sourceWidth,
@@ -2065,6 +2119,7 @@ final class CameraHelperMain {
                     }
                 });
                 rawSourceHub = openedHub;
+                requestCameraFrameRate(opened, requestedCameraId, "pano_h", "open_persistent");
                 persistentSession.startProducer(
                         port, openedHub, target, requestedSurfaces, requestedIndexes,
                         requestId, requestedView, exclusive, shellOwned,

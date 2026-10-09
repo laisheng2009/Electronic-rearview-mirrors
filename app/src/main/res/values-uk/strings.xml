@@ -186,6 +186,7 @@
     <string name="check_for_updates_2">"Перевірити оновлення"</string>
     <string name="check_for_updates_automatically">"Перевіряти оновлення автоматично"</string>
     <string name="image_quality">"Якість зображення"</string>
+    <string name="frame_rate">"Частота кадрів"</string>
     <string name="camera_corner_radius">"Заокруглення камер"</string>
     <string name="camera_transparency">"Прозорість камер"</string>
     <string name="diagnostic_logs">"Діагностичні логи"</string>

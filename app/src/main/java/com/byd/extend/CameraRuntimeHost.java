@@ -86,6 +86,7 @@ final class CameraRuntimeHost {
                     linkClient(callback);
                     context.overlayAllowed = flag;
                     Bundle changes = context.settings.reconcile(settings);
+                    helper.applyCameraFrameRate();
                     if (!lifetime.started()) {
                         visible = initialVisible; preview = initialPreview;
                         context.uiVisible = visible;
@@ -99,6 +100,7 @@ final class CameraRuntimeHost {
                 case SETTINGS:
                     context.overlayAllowed = flag;
                     Bundle unsaved = context.settings.updateFromClient(settings);
+                    helper.applyCameraFrameRate();
                     if (!"sync".equals(scope)) applySettings(scope);
                     return unsaved;
                 case ACK_SETTINGS: context.settings.acknowledge(settings); break;
