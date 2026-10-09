@@ -36,7 +36,7 @@ final class RequiredPermissions {
             camera |= ParkingCameraSettings.readRule(preferences, profile).enabled;
         }
         boolean hint = preferences.getBoolean(UpdateHintRuntime.PREF_ENABLED, true);
-        boolean adbRecovery = preferences.getBoolean("adb_recovery_enabled", true);
+        boolean adbRecovery = preferences.getBoolean("adb_recovery_enabled", false);
         boolean adbReminder = adbRecovery && preferences.getBoolean("adb_reminder_enabled", true);
         // These three accesses are provisioned and read back independently of runtime switches.
         return new RequiredPermissions(camera, mirror || hint || adbReminder, true, installRequested,

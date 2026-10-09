@@ -1235,6 +1235,9 @@ public final class CameraProbeActivity extends ComponentActivity
     @Override
     protected void onResume() {
         super.onResume();
+        if (LocalAdbClient.AUTHORIZATION.rearmUnsentAutomaticRequest()) {
+            reconcileForegroundAdbAuthorization();
+        }
         finishOverlaySettingsReturn();
         if (updateInstallerOpened) {
             updateInstallerOpened = false;
@@ -14620,9 +14623,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 || shutdownRequested || activityDestroyed || isFinishing()
                 || cameraPermissionPending || backgroundStartSettingsPending()
                 || automatic && !foregroundAdbAuthorizationReady()
-                || automatic && adbAuthPending
-                || !automatic && adbAuthPending
-                && adbAuthMode == LocalAdbClient.PromptMode.FORCE) {
+                || automatic && adbAuthPending) {
             return false;
         }
         cancelPendingForegroundAdbAuthorization();
@@ -16195,8 +16196,7 @@ public final class CameraProbeActivity extends ComponentActivity
             boolean uiReady,
             boolean authorizationPending,
             LocalAdbClient.PromptMode mode) {
-        return uiReady
-                && (!authorizationPending || mode != LocalAdbClient.PromptMode.FORCE);
+        return uiReady;
     }
 
     static boolean shouldRetryCalibrationCopy(boolean active, int width, int height) {

@@ -180,7 +180,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
     }
 
     private void recover(Reason reason) {
-        boolean enabled = settings.getBoolean(RECOVERY_ENABLED, true);
+        boolean enabled = settings.getBoolean(RECOVERY_ENABLED, false);
         coordinator.configure(enabled);
         if (!enabled) {
             applyDisabled();
@@ -247,7 +247,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         boolean requestReady = reason == Reason.MANUAL
                 ? requestWirelessDebugging(true) : requestWirelessDebugging(false);
         if (!requestReady) return;
-        if (closed || !settings.getBoolean(RECOVERY_ENABLED, true)
+        if (closed || !settings.getBoolean(RECOVERY_ENABLED, false)
                 || deferForPrerequisite()) return;
         coordinator.stage(AdbRecoverySnapshot.Stage.DISCOVERING_TLS);
         publish();
@@ -325,7 +325,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
     }
 
     private void tryTlsPort(int port, long generation) {
-        if (closed || !settings.getBoolean(RECOVERY_ENABLED, true)
+        if (closed || !settings.getBoolean(RECOVERY_ENABLED, false)
                 || deferForPrerequisite()) return;
         try (AdbAuthorizationSession.RecoveryOperation admitted =
                      LocalAdbClient.AUTHORIZATION.beginRecovery()) {
@@ -341,7 +341,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
     }
 
     private void tryTlsPortAdmitted(int port) {
-        if (closed || !settings.getBoolean(RECOVERY_ENABLED, true)
+        if (closed || !settings.getBoolean(RECOVERY_ENABLED, false)
                 || consentPaused || !wifiConnected()
                 || coordinator.snapshot().authenticated5555()) return;
         consentPaused = true;
@@ -350,10 +350,10 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         publish();
         try (LocalAdbTlsClient tls = LocalAdbTlsClient.connect(port,
                 AdbTlsIdentity.load(context), operation)) {
-            if (closed || !settings.getBoolean(RECOVERY_ENABLED, true)
+            if (closed || !settings.getBoolean(RECOVERY_ENABLED, false)
                     || !wifiConnected() || deferForPrerequisite()) {
                 consentPaused = false;
-                if (!closed && !settings.getBoolean(RECOVERY_ENABLED, true)) applyDisabled();
+                if (!closed && !settings.getBoolean(RECOVERY_ENABLED, false)) applyDisabled();
                 return;
             }
             log.log("adb_tls_authenticated", "port", port);
@@ -368,7 +368,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
                     "category", LocalAdbTlsClient.failureCategory(error),
                     "reason", LocalAdbTlsClient.failureReason(error));
             consentPaused = false;
-            if (!settings.getBoolean(RECOVERY_ENABLED, true)) {
+            if (!settings.getBoolean(RECOVERY_ENABLED, false)) {
                 applyDisabled();
                 return;
             }
@@ -379,7 +379,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         publish();
         boolean verified = false;
         for (int attempt = 0; attempt < 12 && !closed
-                && settings.getBoolean(RECOVERY_ENABLED, true)
+                && settings.getBoolean(RECOVERY_ENABLED, false)
                 && wifiConnected(); attempt++) {
             if (deferForPrerequisite()) { consentPaused = false; return; }
             AdbRecoveryPolicy.Proof proof = freshClassicProof();
@@ -399,7 +399,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         }
         consentPaused = false;
         if (closed) return;
-        if (!settings.getBoolean(RECOVERY_ENABLED, true)) {
+        if (!settings.getBoolean(RECOVERY_ENABLED, false)) {
             applyDisabled();
             return;
         }
@@ -525,7 +525,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         if (deferForPrerequisite()) return;
         AdbRecoverySnapshot snapshot = coordinator.snapshot();
         if (closed || !AdbRecoveryPolicy.shouldScheduleConsentRetry(
-                settings.getBoolean(RECOVERY_ENABLED, true), wifiConnected(),
+                settings.getBoolean(RECOVERY_ENABLED, false), wifiConnected(),
                 snapshot.authenticated5555(), consentPaused)) return;
         mainHandler.removeCallbacks(consentRetry);
         mainHandler.postDelayed(consentRetry, AdbRecoveryPolicy.CONSENT_RETRY_MS);

@@ -130,7 +130,7 @@ private fun FormScope.PermissionsSettings(state: SettingsUiState, strings: UiStr
                 "Self-check grants required nav capture permissions automatically when ADB is authorized"),
             colors, verticalPadding = 14.dp) {
             ActionButton(strings.text("Видати ADB", "Grant ADB"), colors, Modifier.width(190.dp), primary = true,
-                enabled = state.adbOperation.enabled && !state.adbOperation.pending) {
+                enabled = state.adbOperation.enabled) {
                 onAction(BydExtendUiAction.Run(CommandId.GrantAdb))
             }
         } }

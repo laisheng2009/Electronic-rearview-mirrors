@@ -7,6 +7,13 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public final class TurnSignalAvasReadinessTest {
+    @Test public void freshInstallAndPendingRsaAreNotAutomaticAvasFailures() {
+        assertTrue(TurnSignalController.shouldDeferAvasReadiness(false, false));
+        assertTrue(TurnSignalController.shouldDeferAvasReadiness(false, true));
+        assertTrue(TurnSignalController.shouldDeferAvasReadiness(true, true));
+        assertFalse(TurnSignalController.shouldDeferAvasReadiness(true, false));
+    }
+
     @Test
     public void pendingConfigurationAndStatusCoalesceAndFlushAfterAttachSync() {
         TurnSignalController.PendingAvasOperations pending =

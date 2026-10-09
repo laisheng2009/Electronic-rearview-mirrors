@@ -15,13 +15,13 @@ public class AvasNotificationAccessTest {
     private static final String FULL =
             "com.byd.extend/com.byd.extend.RecoveryNotificationListener";
 
-    @Test public void adbRecoveryIsRequiredByDefaultWhenAutoStartIsEnabled() {
+    @Test public void adbRecoveryRequirementIsOptInAndPreservesExplicitSetting() {
         TestSharedPreferences prefs = new TestSharedPreferences();
-        assertTrue(AvasNotificationAccess.required(prefs));
+        assertFalse(AvasNotificationAccess.required(prefs));
         assertFalse(prefs.contains(AvasAudioLibrary.PREF_CONFIG));
 
-        prefs.edit().putBoolean("adb_recovery_enabled", false).apply();
-        assertFalse(AvasNotificationAccess.required(prefs));
+        prefs.edit().putBoolean("adb_recovery_enabled", true).apply();
+        assertTrue(AvasNotificationAccess.required(prefs));
         prefs.edit().putBoolean("adb_recovery_enabled", true)
                 .putBoolean(GuardRecovery.KEY_AUTO_START, false).apply();
         assertFalse(AvasNotificationAccess.required(prefs));

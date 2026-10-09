@@ -372,7 +372,19 @@ public final class CameraHelperService extends Service {
     }
 
     private void provisionAppPermissions(String reason) {
-        if (!permissionsProvisioning.compareAndSet(false, true)) return;
+        if (!permissionsProvisioning.compareAndSet(false, true)) {
+            // A pre-authorization check must not swallow the successful RSA follow-up.
+            if ("foreground_adb_authorized".equals(reason)) {
+                try {
+                    weatherAccessibilityExecutor.execute(() -> {
+                        AppPermissionProvisioner.ensure(this, reason, this::avasRecoveryEvent);
+                        if (adbRecovery != null) adbRecovery.onPermissionsChecked();
+                        publishAdbRecoveryUi();
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException stopped) { }
+            }
+            return;
+        }
         try {
             weatherAccessibilityExecutor.execute(() -> {
                 try { AppPermissionProvisioner.ensure(this, reason, this::avasRecoveryEvent); }

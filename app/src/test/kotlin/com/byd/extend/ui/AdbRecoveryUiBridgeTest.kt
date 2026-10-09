@@ -10,7 +10,7 @@ import org.junit.Test
 
 class AdbRecoveryUiBridgeTest {
     @Test fun onboardingKeepsStatusButDisablesRetryAndWifiReminder() {
-        val settings = AdbReminderSettings(TestSharedPreferences())
+        val settings = AdbReminderSettings(TestSharedPreferences()).apply { setRecoveryEnabled(true) }
         listOf(
             AdbRecoverySnapshot.Stage.WAITING_FOR_AUTHORIZATION to AdbRecoveryStage.WAIT_AUTHORIZATION,
             AdbRecoverySnapshot.Stage.WAITING_FOR_PERMISSIONS to AdbRecoveryStage.WAIT_PERMISSIONS,
@@ -29,7 +29,7 @@ class AdbRecoveryUiBridgeTest {
     @Test fun nullSnapshotUsesPersistedDefaultsWithoutInventingRuntimeStatus() {
         val state = AdbRecoveryUiBridge.state(null,
             AdbReminderSettings(TestSharedPreferences()))
-        assertTrue(state.enabled)
+        assertFalse(state.enabled)
         assertFalse(state.authenticated5555)
         assertEquals(AdbRecoveryStage.PREPARING, state.stage)
         assertEquals(AdbReminderAppearance(), state.appearance)
@@ -39,7 +39,7 @@ class AdbRecoveryUiBridgeTest {
         val snapshot = AdbRecoverySnapshot(AdbRecoverySnapshot.Stage.WAITING_FOR_WIFI,
             true, false, false, 1234L, 17L, false,
             AdbRecoverySnapshot.ReadyOutcome.NONE)
-        val settings = AdbReminderSettings(TestSharedPreferences())
+        val settings = AdbReminderSettings(TestSharedPreferences()).apply { setRecoveryEnabled(true) }
         val state = AdbRecoveryUiBridge.state(snapshot, settings)
         assertEquals(AdbRecoveryStage.WAIT_WIFI, state.stage)
         assertTrue(state.retryAllowed)

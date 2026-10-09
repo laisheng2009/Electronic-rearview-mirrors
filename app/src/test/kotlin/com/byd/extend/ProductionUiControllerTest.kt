@@ -49,6 +49,17 @@ import org.junit.Before
 import org.junit.Test
 
 class ProductionUiControllerTest {
+    @Test fun pendingAdbRemainsClickableWhileOtherPendingOperationsAreDisabled() {
+        val preferences = TestSharedPreferences()
+        val controller = ProductionUiController(preferences, FakeBackend(preferences))
+        val status = StatusUiState()
+        controller.setSettingsOperation(SettingsOperation.Adb, status, true)
+        assertTrue(controller.state.settings.adbOperation.pending)
+        assertTrue(controller.state.settings.adbOperation.enabled)
+        controller.setSettingsOperation(SettingsOperation.Logs, status, true)
+        assertFalse(controller.state.settings.logOperation.enabled)
+    }
+
     @Before
     fun clearProcessUiSession() {
         RuntimeUiSession.clearProcessState()

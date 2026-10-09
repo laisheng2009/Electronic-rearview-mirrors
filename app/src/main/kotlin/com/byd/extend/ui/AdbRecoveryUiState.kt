@@ -10,7 +10,7 @@ enum class AdbRecoveryStage {
 
 @Immutable
 data class AdbRecoveryUiState @JvmOverloads constructor(
-    val enabled: Boolean = true,
+    val enabled: Boolean = false,
     val authenticated5555: Boolean = false,
     val wifiConnected: Boolean = false,
     val stage: AdbRecoveryStage = AdbRecoveryStage.PREPARING,

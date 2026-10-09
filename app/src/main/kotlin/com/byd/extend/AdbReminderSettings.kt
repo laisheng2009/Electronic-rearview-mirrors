@@ -53,7 +53,7 @@ class AdbReminderSettings {
         this.preferences = preferences
     }
 
-    fun recoveryEnabled(): Boolean = preferences.getBoolean(PREF_RECOVERY_ENABLED, true)
+    fun recoveryEnabled(): Boolean = preferences.getBoolean(PREF_RECOVERY_ENABLED, false)
 
     fun setRecoveryEnabled(enabled: Boolean) {
         preferences.edit().putBoolean(PREF_RECOVERY_ENABLED, enabled).apply()

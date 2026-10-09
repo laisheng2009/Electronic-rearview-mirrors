@@ -458,14 +458,14 @@ public final class AdbCoreTest {
     }
 
     @Test
-    public void manualAuthorizationCanReplaceAutoButNotDuplicateForce() {
+    public void manualAuthorizationCanRestartEitherPendingMode() {
         assertTrue(CameraProbeActivity.shouldEnableManualAdbAuthorization(
                 true, false, null));
         assertTrue(CameraProbeActivity.shouldEnableManualAdbAuthorization(
                 true, true, LocalAdbClient.PromptMode.AUTO_ONCE));
         assertTrue(CameraProbeActivity.shouldEnableManualAdbAuthorization(
                 true, true, LocalAdbClient.PromptMode.NEVER));
-        assertFalse(CameraProbeActivity.shouldEnableManualAdbAuthorization(
+        assertTrue(CameraProbeActivity.shouldEnableManualAdbAuthorization(
                 true, true, LocalAdbClient.PromptMode.FORCE));
         assertFalse(CameraProbeActivity.shouldEnableManualAdbAuthorization(
                 false, false, null));

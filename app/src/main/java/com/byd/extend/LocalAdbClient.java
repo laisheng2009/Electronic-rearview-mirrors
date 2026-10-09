@@ -400,6 +400,8 @@ final class LocalAdbClient {
                     : Result.ok("", 0, open.fingerprint, open.publicKeySent);
         } catch (AuthorizationSupersededException superseded) {
             return Result.superseded();
+        } catch (HandshakeFailureException failure) {
+            return failure.result;
         } catch (Throwable error) {
             return Result.failed(summary(error), "", -1, "unavailable");
         } finally {
@@ -587,9 +589,14 @@ final class LocalAdbClient {
                 OperationCancellation cancellation) throws Exception {
             KeyPair keys;
             String fingerprint = "unavailable";
+            boolean publicKeySent = false;
+            boolean publicKeyWriteStarted = false;
             Socket socket = socketFactory.create();
             if (cancellation != null) cancellation.registerActiveSocket(socket);
             try {
+                if (mode != PromptMode.NEVER && !trackPending(socket, authGeneration)) {
+                    throw new AuthorizationSupersededException();
+                }
                 keys = loadOrCreateKeys(context);
                 fingerprint = fingerprint(keys);
                 invalidateCacheForIdentity(context, fingerprint, operationGeneration);
@@ -608,14 +615,14 @@ final class LocalAdbClient {
                     throw new TransportUnavailableException(unavailable);
                 }
                 socket.setSoTimeout(READ_TIMEOUT_MS);
-                socket.setTcpNoDelay(true);
+                // Match the verified registration probe during the RSA handshake.
+                socket.setTcpNoDelay(mode == PromptMode.NEVER);
                 emitStage(eventSink, "socket_connected", "fingerprint", fingerprint,
                         "endpoint", endpointForTest());
                 Connection connection = new Connection(socket, cancellation);
                 AdbPacket.write(connection.out, AdbPacket.A_CNXN, AdbPacket.VERSION,
                         AdbPacket.MAX_DATA, nul("host::"));
                 boolean signatureSent = false;
-                boolean publicKeySent = false;
                 while (true) {
                     AdbPacket packet;
                     try {
@@ -642,6 +649,7 @@ final class LocalAdbClient {
                         emitStage(eventSink, "cnxn_received", "fingerprint", fingerprint,
                                 "public_key_sent", publicKeySent);
                         clearPending(socket);
+                        socket.setTcpNoDelay(true);
                         recordAccessSuccess(context, fingerprint);
                         return OpenResult.connected(connection, publicKeySent, fingerprint);
                     }
@@ -703,6 +711,7 @@ final class LocalAdbClient {
                         if (!markPromptWriteStarted(socket, authGeneration, prompt)) {
                             throw new AuthorizationSupersededException();
                         }
+                        publicKeyWriteStarted = true;
                         AdbPacket.write(connection.out, AdbPacket.A_AUTH,
                                 AdbPacket.AUTH_RSAPUBLICKEY, 0, nul(publicKey));
                         publicKeySent = true;
@@ -729,6 +738,11 @@ final class LocalAdbClient {
                     throw new AuthorizationSupersededException();
                 }
                 recordAccessError(context, fingerprint, operationGeneration);
+                if (mode != PromptMode.NEVER) {
+                    throw new HandshakeFailureException(new Result(false, false, publicKeySent,
+                            false, false, "", -1, summary(error), fingerprint,
+                            error instanceof TransportUnavailableException, publicKeyWriteStarted));
+                }
                 throw error;
             }
         }
@@ -867,6 +881,7 @@ final class LocalAdbClient {
         final boolean ok;
         final boolean authorizationRequired;
         final boolean publicKeySent;
+        final boolean publicKeyWriteStarted;
         final boolean superseded;
         final boolean commandReadTimeout;
         final boolean transportUnavailable;
@@ -886,9 +901,18 @@ final class LocalAdbClient {
                 boolean superseded, boolean commandReadTimeout,
                 String output, int exitCode, String error, String fingerprint,
                 boolean transportUnavailable) {
+            this(ok, authorizationRequired, publicKeySent, superseded, commandReadTimeout,
+                    output, exitCode, error, fingerprint, transportUnavailable, publicKeySent);
+        }
+
+        private Result(boolean ok, boolean authorizationRequired, boolean publicKeySent,
+                boolean superseded, boolean commandReadTimeout,
+                String output, int exitCode, String error, String fingerprint,
+                boolean transportUnavailable, boolean publicKeyWriteStarted) {
             this.ok = ok;
             this.authorizationRequired = authorizationRequired;
             this.publicKeySent = publicKeySent;
+            this.publicKeyWriteStarted = publicKeyWriteStarted;
             this.superseded = superseded;
             this.commandReadTimeout = commandReadTimeout;
             this.transportUnavailable = transportUnavailable;
@@ -932,6 +956,14 @@ final class LocalAdbClient {
         static Result transportUnavailable(String error) {
             return new Result(false, false, false, false, false,
                     "", -1, error, "unavailable", true);
+        }
+    }
+
+    private static final class HandshakeFailureException extends IOException {
+        final Result result;
+        HandshakeFailureException(Result result) {
+            super(result.error);
+            this.result = result;
         }
     }
 

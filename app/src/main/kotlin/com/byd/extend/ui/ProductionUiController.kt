@@ -755,7 +755,8 @@ class ProductionUiController @JvmOverloads constructor(
         claimFeedback: Boolean = false,
     ) {
         val updateFeedback = claimFeedback || state.settings.feedbackOperation == operation
-        fun next() = OperationUiState(enabled = !pending, pending = pending, status = status)
+        fun next() = OperationUiState(enabled = operation == SettingsOperation.Adb || !pending,
+            pending = pending, status = status)
         val settings = when (operation) {
             SettingsOperation.AutoStart -> state.settings.copy(automaticStartOperation = next())
             SettingsOperation.Adb -> state.settings.copy(adbOperation = next())

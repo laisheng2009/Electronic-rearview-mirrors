@@ -72,6 +72,18 @@ final class AdbAuthorizationSession {
 
     synchronized RequestSnapshot foregroundSnapshot() { return foregroundSnapshot; }
 
+    // A new foreground visit may retry only a failure that never started sending a key.
+    synchronized boolean rearmUnsentAutomaticRequest() {
+        RequestSnapshot snapshot = foregroundSnapshot;
+        if (snapshot == null || snapshot.isActive()
+                || snapshot.mode != LocalAdbClient.PromptMode.AUTO_ONCE) return false;
+        LocalAdbClient.Result result = snapshot.result;
+        if (result == null || result.ok || result.superseded || result.authorizationRequired
+                || result.publicKeyWriteStarted || attemptedKeys.contains(result.fingerprint)) return false;
+        foregroundSnapshot = null;
+        return true;
+    }
+
     Submission requestForeground(LocalAdbClient.PromptMode mode,
             Runnable cancelAuthorization, ForegroundWork work) {
         if (mode == null || mode == LocalAdbClient.PromptMode.NEVER) {
@@ -87,8 +99,7 @@ final class AdbAuthorizationSession {
         RuntimeException admissionError = null;
         synchronized (this) {
             if (foregroundRequest != null) {
-                if (mode == LocalAdbClient.PromptMode.AUTO_ONCE
-                        || foregroundRequest.mode == LocalAdbClient.PromptMode.FORCE) {
+                if (mode == LocalAdbClient.PromptMode.AUTO_ONCE) {
                     return new Submission(foregroundRequest.snapshot, Disposition.COALESCED);
                 }
                 replaced = foregroundRequest;
@@ -99,7 +110,8 @@ final class AdbAuthorizationSession {
                 replaced.snapshot = new RequestSnapshot(replaced.id, replaced.mode,
                         RequestState.TERMINAL, LocalAdbClient.Result.superseded(), null);
                 previousSnapshot = replaced.snapshot;
-                disposition = Disposition.REPLACED_AUTO;
+                disposition = replaced.mode == LocalAdbClient.PromptMode.AUTO_ONCE
+                        ? Disposition.REPLACED_AUTO : Disposition.REPLACED_FORCE;
             } else {
                 previousSnapshot = foregroundSnapshot;
                 disposition = Disposition.ACCEPTED;
@@ -214,7 +226,7 @@ final class AdbAuthorizationSession {
                 long cancellationToken) throws Exception;
     }
 
-    enum Disposition { ACCEPTED, REPLACED_AUTO, COALESCED }
+    enum Disposition { ACCEPTED, REPLACED_AUTO, REPLACED_FORCE, COALESCED }
 
     enum RequestState { QUEUED, RUNNING, TERMINAL }
 

@@ -1318,6 +1318,7 @@ final class TurnSignalController {
         return switch (submission.disposition) {
             case ACCEPTED -> AuthorizationRequestAction.ACCEPTED;
             case REPLACED_AUTO -> AuthorizationRequestAction.REPLACED_AUTO;
+            case REPLACED_FORCE -> AuthorizationRequestAction.REPLACED_FORCE;
             case COALESCED -> AuthorizationRequestAction.COALESCED;
         };
     }
@@ -1898,22 +1899,31 @@ final class TurnSignalController {
 
     private boolean deferPendingAvasConfiguration() {
         synchronized (this) {
-            return !stopped && (authorizationPending || requestedForegroundMode() != null)
+            return !stopped && shouldDeferAvasReadiness(LocalAdbClient.hasAuthorizedIdentity(context),
+                    authorizationPending || requestedForegroundMode() != null)
                     && pendingAvas.deferConfigurationIf(true);
         }
     }
 
     private boolean deferPendingAvasStatus() {
         synchronized (this) {
-            return !stopped && (authorizationPending || requestedForegroundMode() != null)
+            return !stopped && shouldDeferAvasReadiness(LocalAdbClient.hasAuthorizedIdentity(context),
+                    authorizationPending || requestedForegroundMode() != null)
                     && pendingAvas.deferStatusIf(true);
         }
     }
 
     private void failPendingAvas(String error) {
+        // Automatic configuration/status wait for authorization; playback errors remain explicit.
+        if (shouldDeferAvasReadiness(LocalAdbClient.hasAuthorizedIdentity(context),
+                requestedForegroundMode() != null)) return;
         for (String stage : pendingAvas.takeFailureStages()) {
             emitAvasError(stage, null, null, error);
         }
+    }
+
+    static boolean shouldDeferAvasReadiness(boolean authorizedIdentity, boolean authorizationPending) {
+        return !authorizedIdentity || authorizationPending;
     }
 
     static final class PendingAvasOperations {
@@ -3932,6 +3942,7 @@ final class TurnSignalController {
     enum AuthorizationRequestAction {
         ACCEPTED("accepted"),
         REPLACED_AUTO("accepted"),
+        REPLACED_FORCE("accepted"),
         COALESCED("coalesced");
 
         private final String wireName;

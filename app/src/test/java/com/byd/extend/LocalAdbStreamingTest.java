@@ -190,6 +190,71 @@ public final class LocalAdbStreamingTest {
         }
     }
 
+    @Test
+    public void disconnectAfterPublicKeyKeepsSendEvidenceAndFingerprint() throws Exception {
+        Path filesDir = Files.createTempDirectory("byd-adb-sent-disconnect-");
+        ExecutorService peers = Executors.newSingleThreadExecutor();
+        LocalAdbClient.setStorageForTest(filesDir.toFile(), new TestSharedPreferences());
+        try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            LocalAdbClient.setSocketFactoryForTest(() -> new Socket(
+                    InetAddress.getLoopbackAddress(), server.getLocalPort()));
+            Future<?> peer = peers.submit(() -> {
+                try (Socket socket = server.accept()) {
+                    AdbPacket.read(socket.getInputStream());
+                    writeToken(socket);
+                    assertEquals(AdbPacket.AUTH_SIGNATURE, AdbPacket.read(socket.getInputStream()).arg0);
+                    writeToken(socket);
+                    assertEquals(AdbPacket.AUTH_RSAPUBLICKEY, AdbPacket.read(socket.getInputStream()).arg0);
+                }
+                return null;
+            });
+            LocalAdbClient.Result result = LocalAdbClient.authorize(
+                    null, LocalAdbClient.PromptMode.FORCE, null);
+            peer.get(5, TimeUnit.SECONDS);
+            assertFalse(result.ok);
+            assertTrue(result.publicKeySent);
+            assertTrue(result.publicKeyWriteStarted);
+            assertEquals(LocalAdbClient.readAccessState(null).fingerprint, result.fingerprint);
+            assertFalse("unavailable".equals(result.fingerprint));
+        } finally {
+            peers.shutdownNow();
+            LocalAdbClient.setSocketFactoryForTest(null);
+            LocalAdbClient.setStorageForTest(null, null);
+            deleteTestFiles(filesDir);
+        }
+    }
+
+    @Test
+    public void cancellationClosesSocketBeforeFirstAuthToken() throws Exception {
+        Path filesDir = Files.createTempDirectory("byd-adb-early-cancel-");
+        ExecutorService peers = Executors.newCachedThreadPool();
+        CountDownLatch connected = new CountDownLatch(1);
+        LocalAdbClient.setStorageForTest(filesDir.toFile(), new TestSharedPreferences());
+        try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            LocalAdbClient.setSocketFactoryForTest(() -> new Socket(
+                    InetAddress.getLoopbackAddress(), server.getLocalPort()));
+            Future<Integer> peer = peers.submit(() -> {
+                try (Socket socket = server.accept()) {
+                    socket.setSoTimeout(3000);
+                    AdbPacket.read(socket.getInputStream());
+                    connected.countDown();
+                    return socket.getInputStream().read();
+                }
+            });
+            Future<LocalAdbClient.Result> result = peers.submit(() -> LocalAdbClient.authorize(
+                    null, LocalAdbClient.PromptMode.FORCE, null));
+            assertTrue(connected.await(5, TimeUnit.SECONDS));
+            assertTrue(LocalAdbClient.cancelPendingAuthorization());
+            assertTrue(result.get(3, TimeUnit.SECONDS).superseded);
+            assertEquals(-1, peer.get(3, TimeUnit.SECONDS).intValue());
+        } finally {
+            peers.shutdownNow();
+            LocalAdbClient.setSocketFactoryForTest(null);
+            LocalAdbClient.setStorageForTest(null, null);
+            deleteTestFiles(filesDir);
+        }
+    }
+
     private static void serveBlockedStream(ServerSocket server) throws Exception {
         try (Socket socket = server.accept()) {
             assertCommand(AdbPacket.A_CNXN, AdbPacket.read(socket.getInputStream()).command);

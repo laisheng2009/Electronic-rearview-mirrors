@@ -44,7 +44,9 @@ final class ForegroundAdbAuthorization {
                                 app, requestedMode, cancellationToken, events);
                         events.accept("adb_foreground_result", new Object[]{
                                 "ok", result.ok, "error", result.error,
-                                "public_key_sent", result.publicKeySent});
+                                "public_key_sent", result.publicKeySent,
+                                "public_key_write_started", result.publicKeyWriteStarted,
+                                "fingerprint", result.fingerprint});
                         return result;
                     } finally {
                         log.close();

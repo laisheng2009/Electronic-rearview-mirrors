@@ -53,7 +53,7 @@ public final class AdbRecoveryRuntimeContractTest {
         int end = source.indexOf("    private AdbRecoveryPolicy.Proof freshClassicProof()", start);
         assertTrue(start >= 0 && end > start);
         String method = source.substring(start, end);
-        String enabledRead = "settings.getBoolean(RECOVERY_ENABLED, true)";
+        String enabledRead = "settings.getBoolean(RECOVERY_ENABLED, false)";
         assertTrue(occurrences(method, enabledRead) >= 4);
         assertTrue(method.indexOf(enabledRead) < method.indexOf("LocalAdbTlsClient.connect"));
         assertTrue(method.indexOf(enabledRead, method.indexOf("LocalAdbTlsClient.connect"))

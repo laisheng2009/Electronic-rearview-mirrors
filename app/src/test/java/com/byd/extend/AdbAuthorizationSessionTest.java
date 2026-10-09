@@ -150,11 +150,11 @@ public final class AdbAuthorizationSessionTest {
         assertTrue(forceStarted.await(10, TimeUnit.SECONDS));
         assertTrue(process.pending());
 
-        AdbAuthorizationSession.Submission duplicateForce = process.requestForeground(
+        AdbAuthorizationSession.Submission restartedForce = process.requestForeground(
                 LocalAdbClient.PromptMode.FORCE, LocalAdbClient::cancelPendingAuthorization,
-                (requestId, mode, token) -> { fail("coalesced work must not run"); return null; });
-        assertEquals(AdbAuthorizationSession.Disposition.COALESCED, duplicateForce.disposition);
-        assertEquals(forced.snapshot.requestId, duplicateForce.snapshot.requestId);
+                (requestId, mode, token) -> LocalAdbClient.Result.ok("restarted", 0, "key", false));
+        assertEquals(AdbAuthorizationSession.Disposition.REPLACED_FORCE, restartedForce.disposition);
+        assertTrue(restartedForce.snapshot.requestId > forced.snapshot.requestId);
         AdbAuthorizationSession.Submission lowerPriority = process.requestForeground(
                 LocalAdbClient.PromptMode.AUTO_ONCE, null,
                 (requestId, mode, token) -> { fail("AUTO must coalesce with FORCE"); return null; });
@@ -163,8 +163,8 @@ public final class AdbAuthorizationSessionTest {
         releaseForce.countDown();
         assertTrue(forceTerminal.await(10, TimeUnit.SECONDS));
         AdbAuthorizationSession.RequestSnapshot finalSnapshot = process.foregroundSnapshot();
-        assertEquals(forced.snapshot.requestId, finalSnapshot.requestId);
-        assertEquals("force", finalSnapshot.result.output);
+        assertEquals(restartedForce.snapshot.requestId, finalSnapshot.requestId);
+        assertEquals("restarted", finalSnapshot.result.output);
         assertFalse(process.pending());
         assertTrue(automatic.snapshot.requestId < forced.snapshot.requestId);
     }
@@ -216,6 +216,29 @@ public final class AdbAuthorizationSessionTest {
         assertEquals(reopened.snapshot.requestId, process.foregroundSnapshot().requestId);
         assertEquals("reopened", process.foregroundSnapshot().result.output);
         assertFalse(process.pending());
+    }
+
+    @Test public void foregroundResumeRetriesUnsentFailureButNotAPartialKeyWrite() throws Exception {
+        for (boolean writeStarted : new boolean[] {false, true}) {
+            AdbAuthorizationSession process = new AdbAuthorizationSession();
+            CountDownLatch terminal = new CountDownLatch(1);
+            process.addForegroundListener(() -> {
+                if (!process.foregroundSnapshot().isActive()) terminal.countDown();
+            });
+            process.requestForeground(LocalAdbClient.PromptMode.AUTO_ONCE, null,
+                    (id, mode, token) -> {
+                        if (writeStarted) {
+                            try (AdbAuthorizationSession.PromptReservation prompt =
+                                         process.reservePrompt("key", false)) {
+                                assertTrue(prompt.markWriteStarted());
+                            }
+                        }
+                        return LocalAdbClient.Result.failed("socket_closed", "", -1, "key");
+                    });
+            assertTrue(terminal.await(5, TimeUnit.SECONDS));
+            assertEquals(!writeStarted, process.rearmUnsentAutomaticRequest());
+            assertFalse(process.rearmUnsentAutomaticRequest());
+        }
     }
 
     @Test public void rejectedWorkerAdmissionDoesNotConsumeStartupOrPriority() throws Exception {

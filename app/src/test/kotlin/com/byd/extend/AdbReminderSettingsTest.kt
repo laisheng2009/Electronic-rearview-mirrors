@@ -24,8 +24,10 @@ class AdbReminderSettingsTest {
     @Test fun helperReadsDefaultsAndRoundTripsExplicitValues() {
         val preferences = TestSharedPreferences()
         val settings = AdbReminderSettings(preferences)
-        assertTrue(settings.recoveryEnabled())
+        assertFalse(settings.recoveryEnabled())
         assertEquals(AdbReminderAppearance(), settings.readAppearance())
+        settings.setRecoveryEnabled(true)
+        assertTrue(AdbReminderSettings(preferences).recoveryEnabled())
         settings.setRecoveryEnabled(false)
         val expected = AdbReminderAppearance(false, 19, 73, false, 0xFF123456.toInt(),
             5, 77, 22, .2f, .8f)

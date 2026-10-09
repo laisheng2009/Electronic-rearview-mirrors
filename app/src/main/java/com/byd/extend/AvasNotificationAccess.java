@@ -21,7 +21,7 @@ final class AvasNotificationAccess {
         try {
             return preferences.getBoolean(GuardRecovery.KEY_AUTO_START, true)
                     && (hasEnabledAvasAudio(preferences)
-                        || preferences.getBoolean("adb_recovery_enabled", true));
+                        || preferences.getBoolean("adb_recovery_enabled", false));
         } catch (RuntimeException ignored) {
             return false;
         }
