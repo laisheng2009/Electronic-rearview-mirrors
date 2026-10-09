@@ -5,6 +5,7 @@ final class CameraRuntimeLifetime<T> {
     private volatile T client;
     private boolean started;
     private volatile boolean stopped;
+    private long awakeSession = -1;
 
     boolean attach(T next, Runnable initialize) {
         if (next == null) throw new IllegalArgumentException("client is null");
@@ -24,6 +25,14 @@ final class CameraRuntimeLifetime<T> {
     T client() { return client; }
     boolean started() { return started; }
     boolean stopped() { return stopped; }
+
+    boolean updateAwakeSession(long generation, boolean interactive) {
+        if (!started || stopped || generation < 0 || generation <= awakeSession) return false;
+        // The first snapshot is a baseline; app reattachment in the same session is not a wake.
+        boolean recover = awakeSession >= 0 && interactive;
+        awakeSession = generation;
+        return recover;
+    }
 
     void shutdown(Runnable close) {
         if (stopped) return;

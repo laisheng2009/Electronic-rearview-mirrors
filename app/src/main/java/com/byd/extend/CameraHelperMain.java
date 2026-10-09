@@ -57,6 +57,7 @@ final class CameraHelperMain {
     static final String CAMERA_OWNER_MIRROR = "mirror";
     static final String CAMERA_OWNER_REVERSE = "reverse";
     static final String ACTIVITY_RESUME_COLD_RESET = "activity_resume_cold_reset";
+    static final String VEHICLE_WAKE_RECOVERY = "vehicle_wake_recovery";
     static final String COLD_RESET_DEFERRED_REVERSE = "camera_close_deferred_reverse";
 
     private static final String TAG = "BydCameraProbe";
@@ -1580,6 +1581,10 @@ final class CameraHelperMain {
                 // The SDK is already open even when its input cannot join our producer.
                 if (!attached) cancelPendingStock("stock_avm_input_attach_failed", requestId);
             }
+        }
+
+        synchronized void recoverCameraSourceAfterWake() {
+            if (persistentPanoProducer) tearDownPersistentProducer(VEHICLE_WAKE_RECOVERY, null);
         }
 
         synchronized String closeCamera(String reason) {

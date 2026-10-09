@@ -662,15 +662,20 @@ final class TurnSignalController {
             throw new IllegalArgumentException("viewpoint not whitelisted");
         }
         StockAvmOpenState openState = beginStockAvmOpen(requestId);
-        if (!handler.post(() -> readCameraConfigAndOpen(
+        Runnable readConfig = () -> readCameraConfigAndOpen(
                 openState, surface, viewpoint, horizontal, stockDewarp,
-                requestId, inputSurfaceSink))) {
+                requestId, inputSurfaceSink);
+        try {
+            // The app callback needs its main thread; keep the helper runtime handler free for IPC.
+            if (cameraRuntimeHost) worker.execute(readConfig);
+            else if (!handler.post(readConfig)) throw new IllegalStateException("main handler rejected task");
+        } catch (RuntimeException error) {
             surface.release();
             cancelStockAvmOpen(openState);
             emit("camera_error", "renderer", "stock_avm_shell",
                     "stage", "config_main_handler_unavailable",
                     "viewpoint", viewpoint, "request_id", requestId,
-                    "error", "main handler rejected task");
+                    "error", summary(error));
         }
     }
 
@@ -684,7 +689,8 @@ final class TurnSignalController {
         }
         final StockAvmPreview.Config config;
         try {
-            config = StockAvmPreview.readConfig(context,
+            config = cameraRuntimeHost ? ((CameraRuntimeContext) context).avmConfig.call()
+                    : StockAvmPreview.readConfig(context,
                     (stage, detail) -> emit("stock_avm_config_stage",
                             "stage", stage, "detail", detail));
             emit("camera_config_read", "ok", true,

@@ -14997,6 +14997,14 @@ public final class CameraProbeActivity extends ComponentActivity
                     if (!accepted) {
                         recordIgnoredActivityCameraEvent(kind, json);
                     } else {
+                        if (CameraHelperMain.VEHICLE_WAKE_RECOVERY.equals(json.optString("stage"))) {
+                            if (!cameraTransition.pending()) {
+                                retryStockViewpoint = activePreview == debugPreview ? activeCameraViewpoint : -1;
+                                retryStockDebug = activePreview == debugPreview;
+                                closeCameraForTransition(CameraHelperMain.VEHICLE_WAKE_RECOVERY);
+                            }
+                            return;
+                        }
                         if (selectedTab == TAB_REVERSE_CAMERAS
                                 && activePreview == reverseCameraPreview) {
                             clearResumeAutoPreview();

@@ -18,7 +18,7 @@ final class CameraRuntimeHost {
             TOGGLE_REVERSE = 5, ACK_SETTINGS = 6, STOP = 7, STATUS = 8, DETACH = 9,
             PANO = 10, POWER = 11, NAV_VOLUME = 12;
     static final String CALLBACK = "com.byd.extend.ICameraRuntimeClient";
-    static final int EVENT = 1, PREFERENCES = 2;
+    static final int EVENT = 1, PREFERENCES = 2, AVM_CONFIG = 3;
     private final HandlerThread thread = new HandlerThread("camera-runtime");
     private final Handler handler;
     private final CameraRuntimeContext context;
@@ -55,7 +55,7 @@ final class CameraRuntimeHost {
         this.appUid = appUid;
         this.journal = journal;
         this.platformSignal = platformSignal;
-        context = new CameraRuntimeContext(system, appUid);
+        context = new CameraRuntimeContext(system, appUid, this::readAvmConfig);
         CameraShellMain.initializeSystemFontsForShell();
         thread.start();
         handler = new Handler(thread.getLooper());
@@ -207,7 +207,36 @@ final class CameraRuntimeHost {
     }
 
     void acceptTelemetry(String line) {
-        handler.post(() -> { if (!lifetime.stopped() && lifetime.started()) dispatch(line); });
+        handler.post(() -> {
+            if (lifetime.stopped() || !lifetime.started()) return;
+            if ("shell_power_state".equals(DiagnosticLogPolicy.kind(line))) try {
+                JSONObject event = new JSONObject(line);
+                if (lifetime.updateAwakeSession(event.optLong("awake_session_id", -1),
+                                event.optBoolean("interactive"))) {
+                    helper.recoverCameraSourceAfterWake();
+                }
+            } catch (org.json.JSONException ignored) { /* Controllers validate their own events. */ }
+            dispatch(line);
+        });
+    }
+
+    private StockAvmPreview.Config readAvmConfig() throws Exception {
+        // Called on the camera worker, never while the runtime handler waits for the app main thread.
+        IBinder target = call(lifetime::client);
+        if (target == null) throw new IllegalStateException("AVM config app unavailable");
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(CALLBACK);
+            if (!target.transact(AVM_CONFIG, data, reply, 0))
+                throw new IllegalStateException("AVM config callback unavailable");
+            reply.readException();
+            if (target != lifetime.client() || lifetime.stopped())
+                throw new IllegalStateException("AVM config client attachment expired");
+            if (reply.readInt() != 1)
+                throw new StockAvmPreview.StageException(reply.readString(),
+                        new IllegalStateException(reply.readString()));
+            return StockAvmPreview.Config.readFromParcel(reply);
+        } finally { data.recycle(); reply.recycle(); }
     }
 
     private void dispatch(String line) {

@@ -6,6 +6,27 @@ import static com.byd.extend.CameraRuntimeContinuityTest.source;
 
 /** Guards the real app/shell boundary which arithmetic-only camera tests cannot cover. */
 public class AppPlatformOwnershipTest {
+    @Test public void avmConfigUsesAppMainThreadAndValidatedTypedReplyWithoutBlockingRuntime() throws Exception {
+        String client = source("CameraRuntimeClient"), host = source("CameraRuntimeHost"),
+                controller = source("TurnSignalController"), config = source("StockAvmPreview");
+        assertTrue(client.contains("Binder.getCallingUid() != 2000"));
+        assertTrue(client.contains("data.enforceInterface(CameraRuntimeHost.CALLBACK)"));
+        assertTrue(client.contains("code == CameraRuntimeHost.AVM_CONFIG"));
+        assertTrue(client.contains("new Handler(Looper.getMainLooper())"));
+        assertTrue(client.contains("StockAvmPreview.readConfig(context,"));
+        assertTrue(client.contains("mainHandler.post(task)"));
+        assertTrue(client.contains("task.get(10, TimeUnit.SECONDS)"));
+        assertTrue(client.contains("mainHandler.removeCallbacks(task)"));
+        assertTrue(client.contains("task.cancel(false)"));
+        assertTrue(client.contains("config.writeToParcel(reply)"));
+        assertTrue(host.contains("target != lifetime.client() || lifetime.stopped()"));
+        assertTrue(host.contains("StockAvmPreview.Config.readFromParcel(reply)"));
+        assertFalse(host.contains("StockAvmPreview.readConfig("));
+        assertTrue(controller.contains("if (cameraRuntimeHost) worker.execute(readConfig)"));
+        assertTrue(controller.contains("config = cameraRuntimeHost ? ((CameraRuntimeContext) context).avmConfig.call()"));
+        assertTrue(config.contains("validate();"));
+    }
+
     @Test public void androidRegistrationsAndClusterBindingBelongToTheApp() throws Exception {
         String client = source("CameraRuntimeClient"), host = source("CameraRuntimeHost");
         assertTrue(client.contains("this.context = context.getApplicationContext()"));

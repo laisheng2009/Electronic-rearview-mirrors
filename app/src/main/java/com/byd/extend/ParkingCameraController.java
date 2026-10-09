@@ -175,7 +175,9 @@ final class ParkingCameraController {
                 }
             } else if ("camera_error".equals(kind)
                     && CameraHelperMain.CAMERA_OWNER_PARKING.equals(
-                    event.optString("camera_owner"))) {
+                    event.optString("camera_owner"))
+                    && attachedGroupRequestId > 0
+                    && event.optInt("request_id", -1) == attachedGroupRequestId) {
                 resetAfterAttachFailure();
             } else if (isRadarHelperLossEvent(kind)) {
                 resetRadarSession(true);

@@ -23,6 +23,46 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class PersistentCameraSessionTest {
+    @Test public void wakeTeardownReleasesAllConsumersAndReopensFreshProducerWithStandbyDemand()
+            throws Exception {
+        Trace trace = new Trace();
+        FakeCameraPort camera = new FakeCameraPort(trace);
+        FakeFanout fanout = new FakeFanout(trace);
+        CameraHelperMain.HelperBinder.PersistentSession session = session();
+        FakeEventSink events = new FakeEventSink(trace, session);
+        session.blindStandbyDemandMask = (1 << 2) | (1 << 3);
+        session.startProducer(camera, fanout, session.overlayGroup,
+                surfaces(1), new int[]{2}, 101, "overlay", false, false);
+        session.attach(camera, session.parkingGroup, surfaces(1), new int[]{3}, 102,
+                "parking", false, false, events, new FakeShellClose(trace), 7, 1);
+        session.attach(camera, session.mirrorGroup, surfaces(1), new int[]{1}, 103,
+                "mirror", false, false, events, new FakeShellClose(trace), 7, 1);
+
+        session.tearDown(camera, CameraHelperMain.VEHICLE_WAKE_RECOVERY, null,
+                false, 0, false, new FakeShellClose(trace), events, 1);
+
+        assertEquals(1, count(trace.values, "stop"));
+        assertEquals(1, count(trace.values, "close"));
+        assertEquals(1, count(trace.values, "fanout-close"));
+        assertFalse(session.producerOpen);
+        assertFalse(session.overlayGroup.has());
+        assertFalse(session.parkingGroup.has());
+        assertFalse(session.mirrorGroup.has());
+        for (int request = 101; request <= 103; request++) {
+            assertEquals(1, events.count("camera_error", request));
+            assertEquals(CameraHelperMain.VEHICLE_WAKE_RECOVERY,
+                    events.byKindAndRequest("camera_error", request).field("stage"));
+        }
+        assertEquals((1 << 2) | (1 << 3), session.blindStandbyDemandMask);
+        Trace fresh = new Trace();
+        session.startProducer(new FakeCameraPort(fresh), new FakeFanout(fresh),
+                session.overlayGroup, surfaces(1), new int[]{2}, 104, "overlay", false, false);
+        assertTrue(session.producerOpen);
+        assertEquals(1, count(fresh.values, "start"));
+        assertTrue(fresh.values.contains("add:3"));
+        assertEquals(104, session.overlayGroup.requestId);
+    }
+
     @Test
     public void reverseShellAllowsOnlyParkingOverlayCoexistence() {
         for (int cameraId = 0; cameraId < CameraOverlayProfile.BLIND_COUNT; cameraId++) {

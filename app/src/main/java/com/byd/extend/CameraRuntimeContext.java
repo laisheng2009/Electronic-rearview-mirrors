@@ -14,11 +14,14 @@ final class CameraRuntimeContext extends ContextWrapper {
     private final ApplicationInfo application;
     private final Resources resources;
     private final Context resourceContext;
+    final java.util.concurrent.Callable<StockAvmPreview.Config> avmConfig;
     volatile boolean overlayAllowed;
     volatile boolean uiVisible;
 
-    CameraRuntimeContext(Context system, int appUid) throws Exception {
+    CameraRuntimeContext(Context system, int appUid,
+            java.util.concurrent.Callable<StockAvmPreview.Config> avmConfig) throws Exception {
         super(TurnSignalShellMain.shellContext(system));
+        this.avmConfig = avmConfig;
         application = system.getPackageManager().getApplicationInfo(CameraHelperMain.PACKAGE_NAME, 0);
         if (application.uid != appUid) throw new SecurityException("camera owner uid mismatch");
         resources = system.getPackageManager().getResourcesForApplication(application);

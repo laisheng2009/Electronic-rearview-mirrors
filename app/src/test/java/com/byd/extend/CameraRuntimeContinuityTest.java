@@ -9,6 +9,60 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class CameraRuntimeContinuityTest {
+    @Test public void vehicleWakeRetiresSourceOnceButUiReattachDoesNot() {
+        CameraRuntimeLifetime<Object> session = new CameraRuntimeLifetime<>();
+        Object first = new Object(), second = new Object();
+        AtomicInteger resets = new AtomicInteger();
+        session.attach(first, () -> {});
+        assertFalse(session.updateAwakeSession(73, true));
+        assertFalse(session.updateAwakeSession(73, false));
+        session.detach(first);
+        session.attach(second, () -> fail("must not recreate runtime"));
+        assertFalse(session.updateAwakeSession(73, false));
+        if (session.updateAwakeSession(74, true)) resets.incrementAndGet();
+        assertFalse(session.updateAwakeSession(74, true)); // paired screen-on/quickboot/status replay
+        session.detach(second);
+        session.attach(first, () -> fail("must not recreate runtime"));
+        assertFalse(session.updateAwakeSession(74, true)); // Recents
+        assertFalse(session.updateAwakeSession(74, false));
+        if (session.updateAwakeSession(75, true)) resets.incrementAndGet();
+        assertEquals(2, resets.get());
+        assertFalse(session.updateAwakeSession(74, true)); // obsolete snapshot
+        assertFalse(session.updateAwakeSession(-1, true));
+        session.shutdown(() -> {});
+        assertFalse(session.updateAwakeSession(76, true));
+    }
+
+    @Test public void wakeRecoveryWorksWithoutClientAndWithoutReceivingSleepEdge() {
+        CameraRuntimeLifetime<Object> session = new CameraRuntimeLifetime<>();
+        Object client = new Object();
+        assertFalse(session.updateAwakeSession(70, true));
+        session.attach(client, () -> {});
+        assertFalse(session.updateAwakeSession(73, true));
+        session.detach(client);
+        assertTrue(session.updateAwakeSession(75, true));
+        assertFalse(session.updateAwakeSession(75, true));
+        assertNull(session.client());
+        assertTrue(session.started());
+    }
+
+    @Test public void wakeUsesFullGraphTeardownAndConsumersKeepRecoveryIntent() throws Exception {
+        String host = source("CameraRuntimeHost"), helper = source("CameraHelperMain");
+        String telemetry = host.substring(host.indexOf("void acceptTelemetry"),
+                host.indexOf("private StockAvmPreview.Config readAvmConfig"));
+        assertTrue(telemetry.contains("\"shell_power_state\".equals(DiagnosticLogPolicy.kind(line))"));
+        assertTrue(telemetry.contains("lifetime.updateAwakeSession("));
+        assertTrue(telemetry.contains("helper.recoverCameraSourceAfterWake()"));
+        String recover = helper.substring(helper.indexOf("synchronized void recoverCameraSourceAfterWake()"),
+                helper.indexOf("synchronized String closeCamera(String reason)"));
+        assertTrue(recover.contains("tearDownPersistentProducer(VEHICLE_WAKE_RECOVERY, null)"));
+        assertFalse(recover.contains("shutdown("));
+        assertTrue(source("RearviewMirrorController").contains("fail(wake ? CameraHelperMain.VEHICLE_WAKE_RECOVERY : \"camera_error\", wake)"));
+        assertTrue(source("CameraProbeActivity").contains("closeCameraForTransition(CameraHelperMain.VEHICLE_WAKE_RECOVERY)"));
+        assertTrue(source("ParkingCameraController").contains("event.optInt(\"request_id\", -1) == attachedGroupRequestId"));
+        assertTrue(helper.contains("sourceHubGeneration != openedHubGeneration"));
+    }
+
     @Test public void uiDeathAndRepeatedAttachNeverRestartLiveSource() {
         CameraRuntimeLifetime<Object> session = new CameraRuntimeLifetime<>();
         AtomicInteger opens = new AtomicInteger(), closes = new AtomicInteger(), frames = new AtomicInteger();

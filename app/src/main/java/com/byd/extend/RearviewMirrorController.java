@@ -420,7 +420,9 @@ final class RearviewMirrorController {
                     || "camera_error".equals(kind)
                     && CameraHelperMain.CAMERA_OWNER_MIRROR.equals(event.optString("camera_owner")))
                     && requestId > 0 && event.optInt("request_id", -1) == requestId) {
-                fail("camera_error", false);
+                boolean wake = CameraHelperMain.VEHICLE_WAKE_RECOVERY.equals(event.optString("stage"));
+                if (wake) freshCycle();
+                fail(wake ? CameraHelperMain.VEHICLE_WAKE_RECOVERY : "camera_error", wake);
             }
         } catch (Exception error) {
             emit("mirror_error", "stage", "event", "error", error.toString());

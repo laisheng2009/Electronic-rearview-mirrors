@@ -9,14 +9,18 @@ import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.Parcel;
 import android.provider.Settings;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /** Reconnectable UI facade. It never owns a video source, controller, or overlay Surface. */
 final class CameraRuntimeClient {
     private final Context context;
     private final Handler handler;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Consumer<String> events;
     private final SharedPreferences settings;
     private IBinder shell;
@@ -54,10 +58,43 @@ final class CameraRuntimeClient {
             } else if (code == CameraRuntimeHost.PREFERENCES) {
                 data.readBundle(getClass().getClassLoader());
                 handler.post(() -> settingsChanged("sync"));
+            } else if (code == CameraRuntimeHost.AVM_CONFIG) {
+                writeAvmConfig(reply);
             } else return false;
             return true;
         }
     };
+
+    private void writeAvmConfig(Parcel reply) {
+        FutureTask<StockAvmPreview.Config> task = new FutureTask<>(() -> {
+            if (detached) throw new IllegalStateException("camera runtime detached");
+            return StockAvmPreview.readConfig(context, (stage, detail) -> {
+                try { deliverEvent(new org.json.JSONObject().put("kind", "stock_avm_config_stage")
+                        .put("stage", stage).put("detail", detail).toString()); }
+                catch (org.json.JSONException ignored) { /* fixed String fields */ }
+            });
+        });
+        try {
+            if (!mainHandler.post(task)) throw new IllegalStateException("app main handler unavailable");
+            StockAvmPreview.Config config = task.get(10, TimeUnit.SECONDS);
+            if (detached) throw new IllegalStateException("camera runtime detached");
+            reply.writeNoException();
+            reply.writeInt(1);
+            config.writeToParcel(reply);
+        } catch (Exception error) {
+            if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+            Throwable cause = error instanceof java.util.concurrent.ExecutionException
+                    ? error.getCause() : error;
+            reply.writeNoException();
+            reply.writeInt(0);
+            reply.writeString(cause instanceof StockAvmPreview.StageException
+                    ? ((StockAvmPreview.StageException) cause).stage : "camera_config_read");
+            reply.writeString(cause.toString());
+        } finally {
+            mainHandler.removeCallbacks(task);
+            task.cancel(false);
+        }
+    }
 
     CameraRuntimeClient(Context context, Handler handler, Consumer<String> events) {
         this.context = context.getApplicationContext();
