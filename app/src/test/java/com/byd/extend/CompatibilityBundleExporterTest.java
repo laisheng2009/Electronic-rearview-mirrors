@@ -134,6 +134,63 @@ public final class CompatibilityBundleExporterTest {
     }
 
     @Test
+    public void exportsNativeAndExternalConfigCandidatesWithTheirOrigins() throws Exception {
+        String nativeDir = "/system/app/AutoVideo/lib/arm64";
+        String externalConfig = "/collect2/autovideo/resource_byd/shh/CarModel/configs"
+                + "/resource/configs/vehicle_param.yaml";
+        List<CompatibilityBundleEvidence.NativeLibraryCandidate> candidates =
+                CompatibilityBundleEvidence.nativeLibraryCandidates(nativeDir);
+        assertEquals("64", candidates.get(0).abi);
+        assertEquals("autovideo_native_library_candidate", candidates.get(0).origin);
+
+        File cache = temporary.newFolder("cache-native-evidence");
+        CompatibilityBundleExporter.CollectionEvidence evidence =
+                new CompatibilityBundleExporter.CollectionEvidence(nativeDir, "64",
+                        "native_library_dir_abi_segment", "armeabi-v7a", externalConfig,
+                        candidates, java.util.Collections.emptyList());
+        byte[] nativeBytes = {0x7f, 'E', 'L', 'F'};
+        File archive = CompatibilityBundleExporter.export(
+                cache, new TestSharedPreferences(), identity(),
+                (command, limit) -> CompatibilityBundleExporter.CommandResult.success(""),
+                (command, output, limit) -> {
+                    if (command.equals(CompatibilityBundleExporter.catCommandForTest(
+                            candidates.get(0).path))) {
+                        try {
+                            output.write(nativeBytes);
+                        } catch (IOException error) {
+                            return CompatibilityBundleExporter.StreamResult.failure(
+                                    "write_failed", -1, 0);
+                        }
+                        return CompatibilityBundleExporter.StreamResult.success(
+                                0, nativeBytes.length);
+                    }
+                    if (command.equals(CompatibilityBundleExporter.catCommandForTest(
+                            "/vendor/lib64/libavmapi.so"))) {
+                        return CompatibilityBundleExporter.StreamResult.failure(
+                                "shell_exit_13", 13, 0);
+                    }
+                    return CompatibilityBundleExporter.StreamResult.failure(
+                            "shell_exit_44", 44, 0);
+                }, 1500L, new CompatibilityBundleExporter.ExportControl(),
+                new CompatibilityExportSpace.Guard(new File(cache, "shared_logs")), evidence);
+
+        String nativeEntry = "remote/system/app/AutoVideo/lib/arm64/libavmapi.so";
+        assertEquals(new String(nativeBytes, StandardCharsets.UTF_8),
+                readEntry(archive, nativeEntry));
+        String manifest = readEntry(archive, "manifest.json");
+        assertTrue(manifest.contains("\"type\":\"autovideo_native_library_candidate\""
+                + ",\"entry\":\"" + nativeEntry + "\",\"source\":\"" + nativeDir
+                + "/libavmapi.so\",\"status\":\"included\""));
+        assertTrue(manifest.contains("\"type\":\"system_native_library_candidate\""
+                + ",\"entry\":\"remote/vendor/lib64/libavmapi.so\""
+                + ",\"source\":\"/vendor/lib64/libavmapi.so\",\"status\":\"permission_denied\""));
+        assertTrue(manifest.contains("\"type\":\"external_oem_config_copy_unverified\""
+                + ",\"entry\":\"remote" + externalConfig + "\",\"source\":\""
+                + externalConfig + "\",\"status\":\"missing\""));
+        assertTrue(manifest.contains("\"schema_version\":2"));
+    }
+
+    @Test
     public void rejectsUnallowlistedPathsAndKeepsMissingRemoteFilesNonFatal() throws Exception {
         assertTrue(CompatibilityBundleExporter.isAllowedRemotePath(
                 "/system/framework/framework.jar"));
@@ -319,6 +376,10 @@ public final class CompatibilityBundleExporterTest {
             CompatibilityBundleExporter.export(cacheDuring, new TestSharedPreferences(), identity(),
                     (command, limit) -> CompatibilityBundleExporter.CommandResult.success(""),
                     (command, output, limit) -> {
+                        if (!command.contains("libavmapi.so")) {
+                            return CompatibilityBundleExporter.StreamResult.failure(
+                                    "shell_exit_44", 44, 0);
+                        }
                         try {
                             output.write(new byte[64 * 1024]);
                             during.cancel();
@@ -330,7 +391,9 @@ public final class CompatibilityBundleExporterTest {
                         }
                         return CompatibilityBundleExporter.StreamResult.success(0, 128 * 1024);
                     },
-                    6001L, during);
+                    6001L, during,
+                    new CompatibilityExportSpace.Guard(new File(cacheDuring, "shared_logs")),
+                    nativeEvidence());
             throw new AssertionError("expected cancellation");
         } catch (CompatibilityBundleExporter.CancellationException expected) {
             // expected
@@ -382,6 +445,47 @@ public final class CompatibilityBundleExporterTest {
     }
 
     @Test
+    public void cancellationBetweenEvidenceTextsCleansPartialArchiveAndTemporaryFiles() throws Exception {
+        File cache = temporary.newFolder("cache-cancel-evidence-text");
+        File shared = new File(cache, "shared_logs");
+        assertTrue(shared.mkdirs());
+        final boolean[] canceled = {false};
+        List<CompatibilityBundleExporter.EvidenceText> evidenceText = Arrays.asList(
+                new CompatibilityBundleExporter.EvidenceText("camera/evidence-first.json",
+                        "test_evidence", "test", "{}", null, 0),
+                new CompatibilityBundleExporter.EvidenceText("camera/evidence-second.json",
+                        "test_evidence", "test", "{}", null, 0));
+        CompatibilityBundleExporter.CollectionEvidence evidence =
+                new CompatibilityBundleExporter.CollectionEvidence("", "", "unavailable", "",
+                        "",
+                        java.util.Collections.emptyList(), evidenceText);
+        // Cancel after the first evidence progress callback, before the second item starts.
+        CompatibilityBundleExporter.ExportControl[] controlHolder =
+                new CompatibilityBundleExporter.ExportControl[1];
+        controlHolder[0] = new CompatibilityBundleExporter.ExportControl(progress -> {
+                    if (!canceled[0]
+                            && progress.phase == CompatibilityBundleExporter.Progress.Phase.TEXT
+                            && progress.currentPath.equals("camera/evidence-first.json")) {
+                        canceled[0] = true;
+                        controlHolder[0].cancel();
+                    }
+                });
+        try {
+            CompatibilityBundleExporter.export(cache, new TestSharedPreferences(), identity(),
+                    (command, limit) -> CompatibilityBundleExporter.CommandResult.success(""),
+                    (command, output, limit) -> CompatibilityBundleExporter.StreamResult.failure(
+                            "shell_exit_44", 44, 0),
+                    6004L, controlHolder[0],
+                    new CompatibilityExportSpace.Guard(shared), evidence);
+            throw new AssertionError("expected cancellation");
+        } catch (CompatibilityBundleExporter.CancellationException expected) {
+            // expected
+        }
+        assertTrue(canceled[0]);
+        assertNoCurrentExportArtifacts(shared);
+    }
+
+    @Test
     public void progressReportsPhaseTransitionsAndFinalizesOnlyAfterRename() throws Exception {
         List<CompatibilityBundleExporter.Progress> events = new ArrayList<>();
         CompatibilityBundleExporter.ExportControl control =
@@ -416,6 +520,14 @@ public final class CompatibilityBundleExporterTest {
         return new CompatibilityBundleExporter.Identity(
                 "com.byd.turnsignalguard.capture", "0.48.7", 77,
                 "BYD", "Sea Lion", "DiLink", "tablet", "10", 29);
+    }
+
+    private static CompatibilityBundleExporter.CollectionEvidence nativeEvidence() {
+        String nativeDir = "/system/app/AutoVideo/lib/arm64";
+        return new CompatibilityBundleExporter.CollectionEvidence(nativeDir, "64",
+                "native_library_dir_abi_segment", "arm64-v8a", "",
+                CompatibilityBundleEvidence.nativeLibraryCandidates(nativeDir),
+                java.util.Collections.emptyList());
     }
 
     private static String readEntry(File archive, String name) throws IOException {

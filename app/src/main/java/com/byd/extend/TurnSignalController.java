@@ -21,7 +21,6 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -91,9 +90,14 @@ final class TurnSignalController {
 
     private volatile boolean stopped;
     private volatile boolean healthy;
+    private ReverseSteeringModelConfig.Selection steeringSelection;
+    private ReverseSteeringModelConfig.Capture steeringCapture;
     private ReverseSteeringModelConfig steeringModel;
     private IBinder steeringModelHelper;
-    private long steeringModelAttemptAt;
+    private ReverseSteeringModelConfig.Selection steeringFailureSelection;
+    private String steeringFailureMessage = "";
+    private ReverseSteeringModelConfig.Selection steeringModelFailureCache;
+    private long steeringModelSelectionAt;
     private boolean steeringModelLoadPending;
     private volatile boolean authorizationPending;
     private volatile LocalAdbClient.PromptMode authorizationMode;
@@ -2098,74 +2102,171 @@ final class TurnSignalController {
     private void syncSteeringModel(IBinder value, boolean attaching) {
         if (stopped || value == null || helper != value || !healthy) return;
         if (steeringModelLoadPending) return;
-        if (!attaching && steeringModel != null && steeringModelHelper == value) return;
         long now = SystemClock.elapsedRealtime();
-        if (!attaching && now - steeringModelAttemptAt < RETRY_BACKOFF_MS) return;
-        steeringModelAttemptAt = now;
-        if (steeringModel == null) {
-            steeringModelLoadPending = true;
-            if (!steeringMainHandler.post(this::prepareSteeringModelOnMain)) {
-                steeringModelLoadPending = false;
-                reportSteeringModelFailure(new IllegalStateException("app main handler rejected task"));
+        if (!attaching && now - steeringModelSelectionAt < RETRY_BACKOFF_MS) {
+            if (steeringModel != null && steeringModelHelper != value) {
+                configureSteeringModel(value, steeringModel, steeringCapture);
+            } else if (!ReverseSteeringModelConfig.shouldLoadAfterCachedFailure(
+                    steeringSelection, steeringModelFailureCache)
+                    && steeringModelHelper != value) {
+                configureSteeringModel(value, null, steeringCapture);
             }
             return;
         }
-        try {
-            Parcel data = Parcel.obtain();
-            Parcel reply = Parcel.obtain();
-            try {
-                data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
-                data.writeString(steeringModel.model);
-                data.writeFloat(steeringModel.minimumDegrees);
-                data.writeFloat(steeringModel.maximumDegrees);
-                requireTransact(value, TurnSignalShellProtocol.TX_CONFIGURE_REVERSE_STEERING,
-                        data, reply);
-                steeringModelHelper = value;
-                emit("reverse_steering_model", "available", true, "model", steeringModel.model,
-                        "minimum_degrees", steeringModel.minimumDegrees,
-                        "maximum_degrees", steeringModel.maximumDegrees);
-            } finally {
-                data.recycle();
-                reply.recycle();
-            }
-        } catch (Throwable failure) {
-            // Model availability must never make the camera/AVAS helper unavailable.
-            reportSteeringModelFailure(failure);
+        steeringModelSelectionAt = now;
+        steeringModelLoadPending = true;
+        if (!steeringMainHandler.post(this::prepareSteeringModelOnMain)) {
+            steeringModelLoadPending = false;
+            reportSteeringModelFailure(
+                    new IllegalStateException("app main handler rejected task"), null);
         }
     }
 
     private void prepareSteeringModelOnMain() {
         if (stopped) return;
-        Callable<ReverseSteeringModelConfig> load = null;
+        ReverseSteeringModelConfig.Selection selection = null;
         Throwable failure = null;
         try {
-            load = ReverseSteeringModelConfig.prepareLoad(context);
+            selection = ReverseSteeringModelConfig.prepareLoad(context);
         } catch (Throwable error) {
             failure = error;
         }
-        final Callable<ReverseSteeringModelConfig> prepared = load;
+        final ReverseSteeringModelConfig.Selection prepared = selection;
         final Throwable preparationFailure = failure;
         try {
             worker.execute(() -> {
-                steeringModelLoadPending = false;
-                if (stopped) return;
-                try {
-                    if (preparationFailure != null) throw preparationFailure;
-                    steeringModel = prepared.call();
-                    // The helper can reconnect while OEM initialization is queued.
-                    syncSteeringModel(helper, true);
-                } catch (Throwable error) {
-                    reportSteeringModelFailure(error);
-                }
+                finishSteeringModelSelection(prepared, preparationFailure);
             });
         } catch (RejectedExecutionException ignored) {
             // Controller shutdown already owns cleanup; never revive a stopped worker.
         }
     }
 
-    private void reportSteeringModelFailure(Throwable failure) {
-        emit("reverse_steering_model", "available", false, "error", summary(failure),
-                "stack", Log.getStackTraceString(failure));
+    private void finishSteeringModelSelection(
+            ReverseSteeringModelConfig.Selection selection, Throwable failure) {
+        if (stopped) return;
+        if (failure != null) {
+            steeringModelLoadPending = false;
+            steeringSelection = null;
+            steeringCapture = null;
+            steeringModel = null;
+            steeringModelFailureCache = null;
+            configureSteeringModel(helper, null, null);
+            reportSteeringModelFailure(failure, null);
+            return;
+        }
+
+        boolean changed = steeringSelection == null || !steeringSelection.sameIdentity(selection);
+        steeringSelection = selection;
+        if (changed) {
+            steeringCapture = null;
+            steeringModel = null;
+            steeringModelFailureCache = null;
+            steeringFailureSelection = null;
+            steeringFailureMessage = "";
+            configureSteeringModel(helper, null, null);
+        }
+        if (!ReverseSteeringModelConfig.shouldLoadAfterCachedFailure(
+                selection, steeringModelFailureCache)) {
+            steeringModelLoadPending = false;
+            if (steeringModelHelper != helper) configureSteeringModel(helper, null, steeringCapture);
+            return;
+        }
+        if (steeringModel != null) {
+            steeringModelLoadPending = false;
+            if (steeringModelHelper != helper) {
+                configureSteeringModel(helper, steeringModel, steeringCapture);
+            }
+            return;
+        }
+
+        try {
+            steeringCapture = selection.load();
+            if (!steeringCapture.boundsAvailable) {
+                steeringModelFailureCache = selection;
+                configureSteeringModel(helper, null, steeringCapture);
+                reportSteeringModelFailure(
+                        new IllegalArgumentException(steeringCapture.parseError), steeringCapture);
+            } else {
+                steeringModel = steeringCapture.toConfig();
+                steeringModelFailureCache = null;
+                steeringFailureSelection = null;
+                steeringFailureMessage = "";
+                configureSteeringModel(helper, steeringModel, steeringCapture);
+            }
+        } catch (Throwable readFailure) {
+            steeringModelFailureCache = isDeterministicSteeringFailure(readFailure)
+                    ? selection : null;
+            configureSteeringModel(helper, null, steeringCapture);
+            reportSteeringModelFailure(readFailure, steeringCapture);
+        } finally {
+            steeringModelLoadPending = false;
+        }
+    }
+
+    private void configureSteeringModel(
+            IBinder value, ReverseSteeringModelConfig model,
+            ReverseSteeringModelConfig.Capture capture) {
+        if (stopped || value == null || helper != value || !healthy) return;
+        try {
+            Parcel data = Parcel.obtain();
+            Parcel reply = Parcel.obtain();
+            try {
+                data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
+                data.writeString(model == null ? null : model.model);
+                if (model != null) {
+                    data.writeFloat(model.minimumDegrees);
+                    data.writeFloat(model.maximumDegrees);
+                }
+                requireTransact(value, TurnSignalShellProtocol.TX_CONFIGURE_REVERSE_STEERING,
+                        data, reply);
+                steeringModelHelper = value;
+                if (model != null) {
+                    steeringFailureSelection = null;
+                    steeringFailureMessage = "";
+                    emit("reverse_steering_model", "available", true, "model", model.model,
+                            "renderer", capture.renderer, "resource_suffix", capture.resourceSuffix,
+                            "configuration_path", capture.configurationPath,
+                            "minimum_degrees", model.minimumDegrees,
+                            "maximum_degrees", model.maximumDegrees,
+                            "raw_steering_parameters", capture.rawSteeringParameters,
+                            "provisional_bounds", capture.provisionalBounds);
+                }
+            } finally {
+                data.recycle();
+                reply.recycle();
+            }
+        } catch (Throwable failure) {
+            // Model availability must never make the camera/AVAS helper unavailable.
+            reportSteeringModelFailure(failure, capture);
+        }
+    }
+
+    private static boolean isDeterministicSteeringFailure(Throwable failure) {
+        return failure instanceof IllegalArgumentException
+                || failure instanceof java.io.FileNotFoundException;
+    }
+
+    private void reportSteeringModelFailure(
+            Throwable failure, ReverseSteeringModelConfig.Capture capture) {
+        ReverseSteeringModelConfig.Selection selection = steeringSelection;
+        String message = summary(failure);
+        if (steeringFailureMessage.equals(message)
+                && ((selection == null && steeringFailureSelection == null)
+                || (selection != null && selection.sameIdentity(steeringFailureSelection)))) return;
+        steeringFailureSelection = selection;
+        steeringFailureMessage = message;
+        if (capture == null) {
+            emit("reverse_steering_model", "available", false, "error", message,
+                    "stack", Log.getStackTraceString(failure));
+            return;
+        }
+        emit("reverse_steering_model", "available", false, "error", message,
+                "stack", Log.getStackTraceString(failure), "model", capture.model,
+                "renderer", capture.renderer, "resource_suffix", capture.resourceSuffix,
+                "configuration_path", capture.configurationPath,
+                "raw_steering_parameters", capture.rawSteeringParameters,
+                "provisional_bounds", capture.provisionalBounds);
     }
 
     private void transactParkingRadarConfig(IBinder value, boolean anyEnabled) throws Exception {

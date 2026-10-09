@@ -19,8 +19,17 @@ public final class ReverseSteeringBootstrapContractTest {
         String model = source("java/com/byd/extend/ReverseSteeringModelConfig.java");
         assertBefore(model, "Looper.myLooper() != Looper.getMainLooper()", "context.createPackageContext");
         assertTrue(model.contains("throw new IllegalStateException(\"OEM steering model requires"));
-        assertBefore(model, "invokeStatic(loader, CAR_STATUS, \"initBootBoard\"", "return () ->");
-        assertBefore(model, "return () ->", "getAssets().open(assetPath)");
+        assertBefore(model, "invokeStatic(loader, CAR_STATUS, \"initBootBoard\"",
+                "invokeStatic(loader, RENDER_SDK_HELPER");
+        assertBefore(model, "invokeStatic(loader, PANO_RESOURCE_CONTROLLER",
+                "return new Selection(");
+        assertBefore(model, "Capture load() throws Exception", "getAssets().open(configurationPath)");
+        assertTrue(model.contains("Looper.myLooper() == Looper.getMainLooper()"));
+        assertTrue(model.contains("final String externalConfigurationPath"));
+        assertTrue(model.contains("final Map<String, String> rawSteeringParameters"));
+        assertTrue(model.contains("final boolean provisionalBounds"));
+        assertTrue(model.contains("private static Bounds parseYaml("));
+        assertTrue(model.contains("static ReverseSteeringModelConfig fromJson(String model, String json)"));
         assertFalse(model.contains("StockAvmPreview.readConfig"));
     }
 
@@ -29,16 +38,30 @@ public final class ReverseSteeringBootstrapContractTest {
         String sync = between(controller, "private void syncSteeringModel(",
                 "private void prepareSteeringModelOnMain()");
         String prepare = between(controller, "private void prepareSteeringModelOnMain()",
-                "private void reportSteeringModelFailure(");
+                "private void finishSteeringModelSelection(");
         assertTrue(controller.contains(
                 "private final Handler steeringMainHandler = new Handler(Looper.getMainLooper());"));
         assertTrue(sync.contains("steeringMainHandler.post(this::prepareSteeringModelOnMain)"));
         assertFalse(sync.contains("handler.post(this::prepareSteeringModelOnMain)"));
         assertFalse(sync.contains("ReverseSteeringModelConfig.load(context)"));
         assertBefore(prepare, "ReverseSteeringModelConfig.prepareLoad(context)", "worker.execute(");
-        assertBefore(prepare, "worker.execute(", "prepared.call()");
+        String finish = between(controller, "private void finishSteeringModelSelection(",
+                "private void configureSteeringModel(");
+        assertBefore(finish, "selection.load()", "steeringCapture.toConfig()");
+        assertBefore(finish, "shouldLoadAfterCachedFailure(", "selection.load()");
+        assertTrue(finish.contains("boolean changed = steeringSelection == null"));
+        String changedSelection = between(finish, "if (changed) {",
+                "if (!ReverseSteeringModelConfig.shouldLoadAfterCachedFailure(");
+        assertTrue(changedSelection.contains("steeringModelFailureCache = null"));
+        assertTrue(changedSelection.contains("steeringCapture = null"));
+        assertTrue(changedSelection.contains("steeringModel = null"));
+        assertTrue(finish.contains("steeringSelection.sameIdentity(selection)"));
+        assertTrue(finish.contains("selection, steeringModelFailureCache"));
         assertFalse(prepare.contains("requireTransact("));
-        assertTrue(sync.contains("TX_CONFIGURE_REVERSE_STEERING"));
+        String configure = between(controller, "private void configureSteeringModel(",
+                "private static boolean isDeterministicSteeringFailure(");
+        assertTrue(configure.contains("TX_CONFIGURE_REVERSE_STEERING"));
+        assertTrue(configure.contains("model == null ? null : model.model"));
         // Follow the actual three-argument service path, not the unused main-thread overload.
         String service = source("java/com/byd/extend/CameraHelperService.java");
         String create = between(service, "private synchronized void ensureHelperCreated()",
@@ -62,7 +85,10 @@ public final class ReverseSteeringBootstrapContractTest {
         assertTrue(sync.contains("steeringModelLoadPending = false"));
         assertTrue(sync.contains("if (stopped || value == null || helper != value || !healthy) return"));
         assertTrue(sync.contains("if (stopped) return"));
-        assertTrue(sync.contains("syncSteeringModel(helper, true)"));
+        assertTrue(sync.contains("shouldLoadAfterCachedFailure"));
+        assertTrue(sync.contains("steeringSelection.sameIdentity(selection)"));
+        assertTrue(sync.contains("configureSteeringModel(helper, null, steeringCapture)"));
+        assertTrue(sync.contains("steeringModelHelper != value"));
         assertTrue(sync.contains("catch (RejectedExecutionException ignored)"));
         assertTrue(sync.contains("Log.getStackTraceString(failure)"));
         assertFalse(sync.contains("failPendingAvas("));

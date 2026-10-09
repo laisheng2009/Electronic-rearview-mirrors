@@ -11,6 +11,10 @@ import android.os.PowerManager;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
 final class MusicVisualizerRuntime {
@@ -25,6 +29,12 @@ final class MusicVisualizerRuntime {
     private final AudioManager audioManager;
     private final PowerManager powerManager;
     private final MusicMetadataRuntime metadataRuntime;
+    private final MusicVisualizerAccTransport accTransport;
+    private final MusicVisualizerAccSession accSession;
+    private final ExecutorService accWorker = Executors.newSingleThreadExecutor(task ->
+            new Thread(task, "music-acc-telemetry"));
+    private final AtomicLong accEpoch = new AtomicLong();
+    private volatile AtomicLong accTelemetrySequence = new AtomicLong();
     private final AudioManager.AudioPlaybackCallback playbackCallback;
     private final Runnable deferredStop = this::finishDeferredStop;
     private final Runnable retryStop = this::retryStop;
@@ -35,12 +45,20 @@ final class MusicVisualizerRuntime {
     private boolean awake;
     private boolean callbackRegistered;
     private boolean mediaActive;
-    private boolean outputActive;
     private boolean stopPending;
     private boolean stopRetryPending;
     private boolean stopRetryMustComplete;
     private boolean stopRetryExhausted;
     private int stopRetryAttempts;
+    private long accReadSequence;
+    private long accAppliedSequence;
+    private boolean accObservationActive;
+    private boolean accUnavailableLogged;
+    private boolean accSubscriptionFailureLogged;
+    private boolean terminalStopped;
+    // Accessed only on accWorker.
+    private MusicVisualizerAccTransport.Subscription accSubscription;
+    private long accSubscriptionEpoch = Long.MIN_VALUE;
     private String error = "";
     private String lastSourceFilterStatus = "";
 
@@ -52,6 +70,24 @@ final class MusicVisualizerRuntime {
         powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         metadataRuntime = new MusicMetadataRuntime(
                 context, handler, eventSink, this::reconcileMetadataEvent);
+        accTransport = new MusicVisualizerAccTransport(context);
+        accSession = new MusicVisualizerAccSession(new MusicVisualizerAccSession.Scheduler() {
+            @Override public void postDelayed(Runnable task, long delayMs) {
+                handler.postDelayed(task, delayMs);
+            }
+            @Override public void removeCallbacks(Runnable task) {
+                handler.removeCallbacks(task);
+            }
+        }, new MusicVisualizerAccSession.Listener() {
+            @Override public void onAccOff(String reason) { invalidateAccSession(reason); }
+            @Override public void onAccOnReady(String reason) {
+                emit("music_acc_reconcile", "state", "on", "source_event", reason);
+                if (enabled && awake) queryPlaybackConfigurations("acc_on_ready");
+            }
+            @Override public void onUnavailable(String reason) {
+                reportAccUnavailable(reason);
+            }
+        });
         playbackCallback = new AudioManager.AudioPlaybackCallback() {
             @Override
             public void onPlaybackConfigChanged(
@@ -90,18 +126,24 @@ final class MusicVisualizerRuntime {
 
     void reconcilePowerState(String reason) {
         runOnHandler(() -> {
-            reconcileAwakeFromSystem(reason);
-            if (enabled && awake) refreshCurrentState(reason);
+            boolean awakeChanged = reconcileAwakeFromSystem(reason);
+            if (enabled && awake) {
+                if (!awakeChanged) refreshAcc(reason);
+                refreshCurrentState(reason);
+            }
         });
     }
 
     void stop() {
         runOnHandler(() -> {
             boolean wasEnabled = enabled;
+            terminalStopped = true;
+            stopAccObservation(true);
             metadataRuntime.stop();
             enabled = false;
             awake = false;
             deactivate("shutdown");
+            accSession.close();
             if (wasEnabled) emitConfig("shutdown");
         });
     }
@@ -115,6 +157,7 @@ final class MusicVisualizerRuntime {
 
     private void configureOnHandler(
             boolean value, boolean captureFocus, boolean engineVisualization) {
+        if (value) refreshAcc("configure");
         if (value) reconcileAwakeFromSystem("configure");
         boolean changed = enabled != value || captureFocusOnOpen != captureFocus
                 || engineVisualizationEnabled != engineVisualization;
@@ -128,6 +171,7 @@ final class MusicVisualizerRuntime {
             activate(changed ? "configure" : "configure_retry");
             if (awake) refreshCurrentState(changed ? "configure" : "configure_retry");
         } else {
+            stopAccObservation(false);
             deactivate("disabled");
         }
         if (changed) emitConfig("configure");
@@ -142,6 +186,7 @@ final class MusicVisualizerRuntime {
                 "old_awake", previous, "awake", awake,
                 "callback_registered", callbackRegistered);
         if (awake && enabled) {
+            refreshAcc("wake");
             activate("wake");
             if (refreshOnWake) refreshCurrentState("wake");
         } else if (!awake) {
@@ -173,6 +218,183 @@ final class MusicVisualizerRuntime {
     private void refreshCurrentState(String reason) {
         queryPlaybackConfigurations(reason);
         metadataRuntime.refreshSessions(reason);
+    }
+
+    private void refreshAcc(String reason) {
+        if (terminalStopped || accWorker.isShutdown()) return;
+        if (!accObservationActive) {
+            accObservationActive = true;
+            accEpoch.incrementAndGet();
+            accTelemetrySequence = new AtomicLong();
+            accAppliedSequence = 0;
+        }
+        long epoch = accEpoch.get();
+        long readId = ++accReadSequence;
+        accSession.beginRead();
+        try {
+            accWorker.execute(() -> {
+                if (epoch != accEpoch.get()) return;
+                AtomicLong telemetrySequence = accTelemetrySequence;
+                if (accSubscription == null || accSubscriptionEpoch != epoch) {
+                    closeAccSubscriptionOnWorker();
+                    try {
+                        accSubscription = accTransport.subscribe(
+                                new MusicVisualizerAccTransport.Listener() {
+                            @Override public void onValue(int value) {
+                                long sequence = telemetrySequence.incrementAndGet();
+                                runOnHandler(() -> applyAccCallback(
+                                        epoch, telemetrySequence, sequence, value, "callback"));
+                            }
+                            @Override public void onError(String error) {
+                                long sequence = telemetrySequence.incrementAndGet();
+                                runOnHandler(() -> applyAccError(
+                                        epoch, telemetrySequence, sequence,
+                                        "subscription_error: " + error));
+                            }
+                        });
+                        accSubscriptionEpoch = epoch;
+                        runOnHandler(() -> {
+                            if (epoch != accEpoch.get()) return;
+                            accSubscriptionFailureLogged = false;
+                            emit("music_acc_subscription", "registered", true,
+                                    "source_event", reason);
+                        });
+                    } catch (Throwable failure) {
+                        runOnHandler(() -> reportAccSubscriptionFailure(epoch, reason, failure));
+                    }
+                }
+                if (epoch != accEpoch.get()) return;
+                long sequenceBeforeRead = telemetrySequence.get();
+                Integer value = accTransport.read();
+                runOnHandler(() -> {
+                    if (epoch != accEpoch.get() || telemetrySequence != accTelemetrySequence
+                            || readId != accReadSequence
+                            || !MusicVisualizerAccSession.isReadSnapshotCurrent(
+                                    sequenceBeforeRead, telemetrySequence.get(),
+                                    accAppliedSequence)) return;
+                    applyAccRead(value, reason);
+                });
+            });
+        } catch (RejectedExecutionException failure) {
+            accSession.readFailed("worker_unavailable");
+        }
+    }
+
+    private void applyAccCallback(long epoch, AtomicLong telemetrySequence,
+            long sequence, int value, String reason) {
+        if (epoch != accEpoch.get() || telemetrySequence != accTelemetrySequence
+                || sequence <= accAppliedSequence) return;
+        accAppliedSequence = sequence;
+        applyAccValue(value, false, reason);
+    }
+
+    private void applyAccError(long epoch, AtomicLong telemetrySequence,
+            long sequence, String reason) {
+        if (epoch != accEpoch.get() || telemetrySequence != accTelemetrySequence
+                || sequence <= accAppliedSequence) return;
+        accAppliedSequence = sequence;
+        reportAccSubscriptionFailure(epoch, "listener_error", reason);
+        accSession.readFailed(reason);
+        if (enabled && awake) queryPlaybackConfigurations("acc_unknown_fallback");
+    }
+
+    private void applyAccRead(Integer value, String reason) {
+        if (value == null) {
+            accSession.readFailed(reason + "_get_failed");
+            if (enabled && awake) queryPlaybackConfigurations("acc_unknown_fallback");
+            return;
+        }
+        applyAccValue(value, true, reason);
+    }
+
+    private void applyAccValue(int value, boolean reconcile, String reason) {
+        if (value != MusicVisualizerAccSession.OFF && value != MusicVisualizerAccSession.ON) {
+            boolean wasReadPending = accSession.readPending();
+            accSession.readFailed(reason);
+            if (wasReadPending && enabled && awake) {
+                queryPlaybackConfigurations("acc_unknown_fallback");
+            }
+            return;
+        }
+        int previous = accSession.accState();
+        accSession.update(value, reconcile, reason);
+        int current = accSession.accState();
+        if (current == MusicVisualizerAccSession.UNKNOWN) return;
+        accUnavailableLogged = false;
+        if (current != previous || reconcile) {
+            emit("music_acc_state", "acc",
+                    current == MusicVisualizerAccSession.ON ? "on" : "off",
+                    "source_event", reason);
+        }
+        if (reconcile && enabled && awake) queryPlaybackConfigurations("acc_reconcile");
+    }
+
+    private void reportAccUnavailable(String reason) {
+        if (accUnavailableLogged) return;
+        accUnavailableLogged = true;
+        emit("music_acc_telemetry", "available", false, "fallback", "android_playback",
+                "source_event", reason);
+    }
+
+    private void reportAccSubscriptionFailure(long epoch, String reason, Throwable failure) {
+        reportAccSubscriptionFailure(epoch, reason, summary(failure));
+    }
+
+    private void reportAccSubscriptionFailure(long epoch, String reason, String failure) {
+        if (epoch != accEpoch.get() || accSubscriptionFailureLogged) return;
+        accSubscriptionFailureLogged = true;
+        emit("music_acc_subscription", "registered", false,
+                "fallback", "android_playback", "source_event", reason,
+                "error", failure);
+    }
+
+    private void invalidateAccSession(String reason) {
+        cancelDeferredStop("acc_off");
+        handler.removeCallbacks(retryStop);
+        stopRetryPending = false;
+        stopRetryMustComplete = false;
+        stopRetryExhausted = false;
+        stopRetryAttempts = 0;
+        if (error.startsWith("stopAudioOutput:")) clearError();
+        emit("music_visualizer_acc", "state", "off", "source_event", reason,
+                "session_invalidated", true, "stop_requested", false);
+    }
+
+    private void stopAccObservation(boolean terminal) {
+        if (accObservationActive) {
+            accObservationActive = false;
+            accEpoch.incrementAndGet();
+            accReadSequence++;
+            accSession.cancelPendingStart();
+            try { accWorker.execute(this::closeAccSubscriptionOnWorker); }
+            catch (RejectedExecutionException ignored) {}
+        } else if (terminal) {
+            accSession.cancelPendingStart();
+            try { accWorker.execute(this::closeAccSubscriptionOnWorker); }
+            catch (RejectedExecutionException ignored) {}
+        }
+        if (terminal) accWorker.shutdown();
+    }
+
+    private void closeAccSubscriptionOnWorker() {
+        MusicVisualizerAccTransport.Subscription old = accSubscription;
+        accSubscription = null;
+        accSubscriptionEpoch = Long.MIN_VALUE;
+        if (old != null) {
+            try { old.close(); }
+            catch (RuntimeException failure) {
+                runOnHandler(() -> emit("music_acc_subscription", "registered", false,
+                        "source_event", "close", "error", summary(failure)));
+            }
+        }
+    }
+
+    private String accStateName() {
+        switch (accSession.accState()) {
+            case MusicVisualizerAccSession.OFF: return "off";
+            case MusicVisualizerAccSession.ON: return "on";
+            default: return "unknown";
+        }
     }
 
     private void activate(String reason) {
@@ -246,7 +468,7 @@ final class MusicVisualizerRuntime {
         reportSourceTagCapability(source);
         if (nextActive == mediaActive) {
             if (nextActive) startOutput(source);
-            else if (outputActive) scheduleDeferredStop(source);
+            else if (accSession.outputClaimed()) scheduleDeferredStop(source);
             return;
         }
         if (nextActive) {
@@ -256,7 +478,7 @@ final class MusicVisualizerRuntime {
             startOutput(source);
         } else {
             setMediaActive(false, source);
-            if (outputActive) scheduleDeferredStop(source);
+            if (accSession.outputClaimed()) scheduleDeferredStop(source);
         }
     }
 
@@ -265,40 +487,46 @@ final class MusicVisualizerRuntime {
         mediaActive = value;
         emit("music_playback_state",
                 "active", value, "source_event", reason,
-                "session_active", outputActive, "stop_pending", stopPending);
+                "session_active", accSession.outputClaimed(), "stop_pending", stopPending);
     }
 
     private void startOutput(String reason) {
-        if (!shouldStartOutput(enabled, awake, callbackRegistered, mediaActive, outputActive)) {
+        if (!shouldStartOutput(enabled, awake, callbackRegistered, mediaActive,
+                        accSession.outputClaimed()) || !accSession.canStart()) {
             return;
         }
-        outputActive = true;
         try {
-            Method startAudioOutput = audioManager.getClass().getMethod(
-                    "startAudioOutput", String.class);
-            startAudioOutput.invoke(audioManager, MEDIA_SELECTOR);
+            boolean requested = accSession.requestStart(true, () -> {
+                Method startAudioOutput = audioManager.getClass().getMethod(
+                        "startAudioOutput", String.class);
+                startAudioOutput.invoke(audioManager, MEDIA_SELECTOR);
+            });
+            if (!requested) return;
             clearError();
             emit("music_visualizer_start",
-                    "ok", true, "selector", MEDIA_SELECTOR,
+                    "ok", true, "request_accepted", true,
+                    "physical_output_confirmed", false, "selector", MEDIA_SELECTOR,
                     "source_event", reason, "session_active", true, "error", "");
         } catch (Throwable failure) {
             String value = "startAudioOutput: " + summary(failure);
             emit("music_visualizer_start",
-                    "ok", false, "selector", MEDIA_SELECTOR,
-                    "source_event", reason, "session_active", true,
+                    "ok", false, "request_accepted", false,
+                    "physical_output_confirmed", false, "selector", MEDIA_SELECTOR,
+                    "source_event", reason, "session_active", accSession.outputClaimed(),
                     "error", value);
             stopOutput("start_failed_cleanup");
-            setRuntimeError(outputActive ? value + "; cleanup_pending" : value, reason);
+            setRuntimeError(accSession.outputClaimed() ? value + "; cleanup_pending" : value, reason);
         }
     }
 
     private void stopOutput(String reason) {
-        if (!shouldAttemptStop(outputActive, stopRetryExhausted)) return;
         try {
-            Method stopAudioOutput = audioManager.getClass().getMethod(
-                    "stopAudioOutput", String.class);
-            stopAudioOutput.invoke(audioManager, MEDIA_SELECTOR);
-            outputActive = false;
+            boolean requested = accSession.requestStop(stopRetryExhausted, () -> {
+                Method stopAudioOutput = audioManager.getClass().getMethod(
+                        "stopAudioOutput", String.class);
+                stopAudioOutput.invoke(audioManager, MEDIA_SELECTOR);
+            });
+            if (!requested) return;
             stopRetryPending = false;
             stopRetryMustComplete = false;
             stopRetryExhausted = false;
@@ -315,7 +543,7 @@ final class MusicVisualizerRuntime {
                 error = value;
                 emit("music_visualizer_stop",
                         "ok", false, "selector", MEDIA_SELECTOR,
-                        "source_event", reason, "session_active", true,
+                        "source_event", reason, "session_active", accSession.outputClaimed(),
                         "error", error);
             }
             if (shouldScheduleStopRetry(stopRetryPending, stopRetryAttempts)) {
@@ -326,7 +554,7 @@ final class MusicVisualizerRuntime {
                 stopRetryMustComplete = false;
                 stopRetryExhausted = true;
                 emit("music_runtime_error", "error", "stop_retry_exhausted",
-                        "source_event", reason, "session_active", true,
+                        "source_event", reason, "session_active", accSession.outputClaimed(),
                         "retry_attempts", stopRetryAttempts);
             }
         }
@@ -350,12 +578,12 @@ final class MusicVisualizerRuntime {
     }
 
     private void scheduleDeferredStop(String reason) {
-        if (!shouldScheduleStop(outputActive, mediaActive, stopPending)) return;
+        if (!shouldScheduleStop(accSession.outputClaimed(), mediaActive, stopPending)) return;
         stopPending = true;
         handler.postDelayed(deferredStop, STOP_DEBOUNCE_MS);
         emit("music_visualizer_stop_pending",
                 "delay_ms", STOP_DEBOUNCE_MS, "source_event", reason,
-                "session_active", outputActive, "stop_pending", true);
+                "session_active", accSession.outputClaimed(), "stop_pending", true);
     }
 
     private void cancelDeferredStop(String reason) {
@@ -376,7 +604,7 @@ final class MusicVisualizerRuntime {
         emit("music_runtime_error", "error", error, "source_event", reason,
                 "enabled", enabled, "awake", awake,
                 "callback_registered", callbackRegistered,
-                "playback_active", mediaActive, "session_active", outputActive,
+                "playback_active", mediaActive, "session_active", accSession.outputClaimed(),
                 "stop_pending", stopPending, "selector", MEDIA_SELECTOR);
     }
 
@@ -390,7 +618,7 @@ final class MusicVisualizerRuntime {
                 "engine_visualization", engineVisualizationEnabled,
                 "source_event", reason, "awake", awake,
                 "callback_registered", callbackRegistered,
-                "playback_active", mediaActive, "session_active", outputActive,
+                "playback_active", mediaActive, "session_active", accSession.outputClaimed(),
                 "stop_pending", stopPending, "error", error);
     }
 
@@ -401,7 +629,8 @@ final class MusicVisualizerRuntime {
                 "engine_visualization", engineVisualizationEnabled,
                 "callback_registered", callbackRegistered,
                 "playback_active", mediaActive,
-                "session_active", outputActive,
+                "session_active", accSession.outputClaimed(),
+                "acc_state", accStateName(),
                 "stop_pending", stopPending,
                 "selector", MEDIA_SELECTOR,
                 "stop_debounce_ms", STOP_DEBOUNCE_MS,

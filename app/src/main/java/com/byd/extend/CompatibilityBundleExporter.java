@@ -2,7 +2,12 @@ package com.byd.extend;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -25,6 +30,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
@@ -38,6 +45,7 @@ final class CompatibilityBundleExporter {
     static final int MANIFEST_SCHEMA_VERSION = 2;
     private static final int BUFFER_SIZE = 64 * 1024;
     private static final long PROGRESS_INTERVAL_MS = 250L;
+    private static final long MAIN_PREPARE_TIMEOUT_MS = 5_000L;
     private static final String ARCHIVE_DIRECTORY = "shared_logs";
     private static final String MANIFEST_ENTRY = "manifest.json";
     private static final String PACKAGE_NAME = "com.byd.avc";
@@ -96,6 +104,16 @@ final class CompatibilityBundleExporter {
         ExportControl operation = control;
         CompatibilityExportArtifacts.checkBeforeExport(context);
         try {
+            ProgressReporter preparationProgress = new ProgressReporter(operation);
+            preparationProgress.report(Progress.Phase.PREPARING,
+                    "camera/oem-model", 0, 0, 0L, 0L, true);
+            CollectionEvidence evidence;
+            try {
+                evidence = collectEvidence(context, operation);
+            } catch (CancellationException canceled) {
+                preparationProgress.cancelled();
+                throw canceled;
+            }
             return export(context.getCacheDir(), preferences, identity,
                     (command, limit) -> fromAdbResult(LocalAdbClient.executeAuthorizedText(
                             context, command, limit, LocalAdbClient.EXPORT_READ_TIMEOUT_MS,
@@ -107,7 +125,9 @@ final class CompatibilityBundleExporter {
                             operation, (kind, fields) -> {});
                         return fromAdbResult(result, counted.count);
                     },
-                    System.currentTimeMillis(), operation);
+                    System.currentTimeMillis(), operation,
+                    new CompatibilityExportSpace.Guard(
+                            new File(context.getCacheDir(), ARCHIVE_DIRECTORY)), evidence);
         } finally {
             CompatibilityExportArtifacts.checkAsync(context);
         }
@@ -146,6 +166,20 @@ final class CompatibilityBundleExporter {
             long createdAtMillis,
             ExportControl control,
             CompatibilityExportSpace.Guard space) throws IOException {
+        return export(cacheDirectory, preferences, identity, textRunner, streamRunner,
+                createdAtMillis, control, space, null);
+    }
+
+    static File export(
+            File cacheDirectory,
+            SharedPreferences preferences,
+            Identity identity,
+            TextCommandRunner textRunner,
+            StreamCommandRunner streamRunner,
+            long createdAtMillis,
+            ExportControl control,
+            CompatibilityExportSpace.Guard space,
+            CollectionEvidence evidence) throws IOException {
         if (control == null) control = new ExportControl();
         ProgressReporter progress = new ProgressReporter(control);
         progress.report(Progress.Phase.PREPARING, "", 0, 0, 0L, 0L, true);
@@ -228,6 +262,32 @@ final class CompatibilityBundleExporter {
                 progress.report(Progress.Phase.TEXT, spec.entry, textIndex + 1,
                         textSpecs.size(), value.length, textTotal, false);
             }
+            if (evidence != null) {
+                for (int index = 0; index < evidence.text.size(); index++) {
+                    checkCancelled(control);
+                    EvidenceText item = evidence.text.get(index);
+                    progress.report(Progress.Phase.TEXT, item.spec.entry,
+                            textSpecs.size() + index + 1,
+                            textSpecs.size() + evidence.text.size(), 0L, textTotal, true);
+                    long limit = Math.min(MAX_TEXT_BYTES,
+                            Math.max(0L, textBudget - textTotal));
+                    byte[] value = item.value.getBytes(StandardCharsets.UTF_8);
+                    CommandResult result = item.error == null
+                            ? CommandResult.success(item.value)
+                            : CommandResult.failure(item.error, item.exitCode);
+                    if (value.length > limit) {
+                        value = Arrays.copyOf(value, (int) limit);
+                        result = CommandResult.failure(
+                                new String(value, StandardCharsets.UTF_8), "too_large", -1);
+                    }
+                    textTotal += value.length;
+                    text.add(new TextCapture(item.spec, result, value));
+                    progress.report(Progress.Phase.TEXT, item.spec.entry,
+                            textSpecs.size() + index + 1,
+                            textSpecs.size() + evidence.text.size(), value.length,
+                            textTotal, false);
+                }
+            }
         } catch (Throwable error) {
             if (partial.exists()) partial.delete();
             deleteTree(tempDirectory);
@@ -246,6 +306,7 @@ final class CompatibilityBundleExporter {
         addPaths(remote, paths, text.get(6).result.output, "com.byd.avc", false);
         addPaths(remote, paths, text.get(7).result.output, "allowlisted_jar", true);
         addPaths(remote, paths, text.get(8).result.output, "avm_config", false);
+        if (evidence != null) addEvidencePaths(remote, paths, evidence);
         try {
             checkCancelled(control);
         } catch (CancellationException error) {
@@ -292,6 +353,10 @@ final class CompatibilityBundleExporter {
                     record.error = "total_limit";
                 } else if (isPermission(capture.result.error)) {
                     record.status = "permission_denied";
+                    record.error = capture.result.error;
+                } else if ("too_large".equals(capture.result.error)
+                        || "total_limit".equals(capture.result.error)) {
+                    record.status = "too_large";
                     record.error = capture.result.error;
                 } else if (capture.result.ok) {
                     record.status = "missing";
@@ -540,6 +605,230 @@ final class CompatibilityBundleExporter {
         return specs;
     }
 
+    private static CollectionEvidence collectEvidence(
+            Context context, ExportControl control) throws IOException {
+        SteeringEvidence steering = captureSteeringEvidence(context, control);
+        AutoVideoInfo packageInfo = readAutoVideoInfo(context, steering.selection);
+        List<CompatibilityBundleEvidence.NativeLibraryCandidate> nativeLibraries =
+                CompatibilityBundleEvidence.nativeLibraryCandidates(packageInfo.nativeLibraryDir);
+        String externalPath = steering.selection == null ? ""
+                : steering.selection.externalConfigurationPath;
+        List<EvidenceText> text = new ArrayList<>();
+        text.add(new EvidenceText(
+                "camera/autovideo-package.json", "autovideo_package_metadata",
+                "PackageManager applicationInfo " + PACKAGE_NAME,
+                packageMetadataJson(packageInfo), null, 0));
+        text.add(new EvidenceText(
+                "camera/selected-oem-model.json", "selected_oem_model_metadata",
+                "ReverseSteeringModelConfig selection",
+                steeringMetadataJson(steering), null, 0));
+
+        String assetPath = steering.selection == null ? ""
+                : steering.selection.configurationPath;
+        if (CompatibilityBundleEvidence.isAllowedSelectedAssetPath(assetPath)) {
+            String format = steering.selection.configurationFormat;
+            String extension = "yaml".equalsIgnoreCase(format) ? "yaml"
+                    : "json".equalsIgnoreCase(format) ? "json"
+                    : assetPath.toLowerCase(Locale.US).endsWith(".yaml") ? "yaml" : "json";
+            String raw = steering.capture == null ? "" : steering.capture.rawConfiguration;
+            String error = null;
+            int exitCode = 0;
+            if (steering.capture == null) {
+                error = steering.error == null ? "configuration_unavailable" : steering.error;
+                exitCode = 1;
+            } else if (raw.isEmpty()) {
+                error = "missing_selected_configuration";
+                exitCode = 44;
+            }
+            text.add(new EvidenceText("camera/selected-oem-config." + extension,
+                    "selected_oem_model_configuration", "stock asset: " + assetPath,
+                    raw, error, exitCode));
+        }
+        return new CollectionEvidence(packageInfo.nativeLibraryDir,
+                packageInfo.packageAbi, packageInfo.packageAbiSource,
+                packageInfo.devicePreferredAbi, externalPath, nativeLibraries, text);
+    }
+
+    private static SteeringEvidence captureSteeringEvidence(
+            Context context, ExportControl control) throws IOException {
+        checkCancelled(control);
+        Looper mainLooper = Looper.getMainLooper();
+        if (mainLooper == null) return new SteeringEvidence(null, null, "main_looper_unavailable");
+        if (Looper.myLooper() == mainLooper) {
+            return new SteeringEvidence(null, null, "export_must_run_on_worker");
+        }
+        AtomicReference<ReverseSteeringModelConfig.Selection> selected = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        CountDownLatch prepared = new CountDownLatch(1);
+        Handler handler;
+        Runnable preparation = () -> {
+            try {
+                selected.set(ReverseSteeringModelConfig.prepareLoad(context));
+            } catch (Exception | LinkageError error) {
+                failure.set(error);
+            } finally {
+                prepared.countDown();
+            }
+        };
+        try {
+            handler = new Handler(mainLooper);
+        } catch (RuntimeException error) {
+            return new SteeringEvidence(null, null, summary(error));
+        }
+        final boolean posted;
+        try {
+            posted = handler.post(preparation);
+        } catch (RuntimeException error) {
+            return new SteeringEvidence(null, null, summary(error));
+        }
+        if (!posted) return new SteeringEvidence(null, null, "main_handler_rejected");
+
+        long deadline = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(MAIN_PREPARE_TIMEOUT_MS);
+        try {
+            while (!prepared.await(100L, TimeUnit.MILLISECONDS)) {
+                checkCancelled(control);
+                if (System.nanoTime() >= deadline) {
+                    handler.removeCallbacks(preparation);
+                    return new SteeringEvidence(null, null, "main_prepare_timeout");
+                }
+            }
+        } catch (CancellationException canceled) {
+            handler.removeCallbacks(preparation);
+            throw canceled;
+        } catch (InterruptedException interrupted) {
+            handler.removeCallbacks(preparation);
+            Thread.currentThread().interrupt();
+            return new SteeringEvidence(null, null, "main_prepare_interrupted");
+        }
+        checkCancelled(control);
+        if (failure.get() != null) {
+            return new SteeringEvidence(null, null, summary(failure.get()));
+        }
+        ReverseSteeringModelConfig.Selection selection = selected.get();
+        if (selection == null) return new SteeringEvidence(null, null, "selection_unavailable");
+        try {
+            return new SteeringEvidence(selection, selection.load(), null);
+        } catch (Exception | LinkageError error) {
+            if (control != null && control.isCancellationRequested()) {
+                throw new CancellationException();
+            }
+            return new SteeringEvidence(selection, null, summary(error));
+        }
+    }
+
+    private static AutoVideoInfo readAutoVideoInfo(
+            Context context, ReverseSteeringModelConfig.Selection selection) {
+        String versionName = selection == null ? null : selection.packageVersionName;
+        Integer versionCode = selection == null ? null : selection.packageVersionCode;
+        Long lastUpdateTime = selection == null ? null : selection.packageLastUpdateTime;
+        String sourceDir = selection == null ? null : selection.packageSourceDir;
+        String nativeLibraryDir = null;
+        String error = null;
+        try {
+            Context stockContext = context.createPackageContext(PACKAGE_NAME,
+                    Context.CONTEXT_INCLUDE_CODE | Context.CONTEXT_IGNORE_SECURITY);
+            ApplicationInfo info = stockContext.getApplicationInfo();
+            if (info != null) {
+                if (sourceDir == null || sourceDir.isEmpty()) sourceDir = info.sourceDir;
+                nativeLibraryDir = info.nativeLibraryDir;
+            }
+            PackageInfo packageInfo = stockContext.getPackageManager()
+                    .getPackageInfo(PACKAGE_NAME, 0);
+            if (packageInfo != null) {
+                if (versionName == null || versionName.isEmpty()) versionName = packageInfo.versionName;
+                if (versionCode == null) versionCode = packageInfo.versionCode;
+                if (lastUpdateTime == null) lastUpdateTime = packageInfo.lastUpdateTime;
+            }
+        } catch (PackageManager.NameNotFoundException errorNotFound) {
+            error = summary(errorNotFound);
+        } catch (Exception unavailable) {
+            error = summary(unavailable);
+        }
+        String[] supportedAbis = Build.SUPPORTED_ABIS;
+        String devicePreferredAbi = supportedAbis == null || supportedAbis.length == 0
+                ? null : supportedAbis[0];
+        CompatibilityBundleEvidence.PackageAbi packageAbi =
+                CompatibilityBundleEvidence.resolvePackageAbi(nativeLibraryDir);
+        return new AutoVideoInfo(versionName, versionCode, lastUpdateTime, sourceDir,
+                nativeLibraryDir, packageAbi.abi, packageAbi.source, devicePreferredAbi, error);
+    }
+
+    private static String packageMetadataJson(AutoVideoInfo info) {
+        return "{\"package\":" + quote(PACKAGE_NAME)
+                + ",\"version_name\":" + quote(info.versionName)
+                + ",\"version_code\":" + numberOrNull(info.versionCode)
+                + ",\"last_update_time_ms\":" + numberOrNull(info.lastUpdateTime)
+                + ",\"source_dir\":" + quote(info.sourceDir)
+                + ",\"native_library_dir\":" + quote(info.nativeLibraryDir)
+                + ",\"package_abi\":" + quote(info.packageAbi)
+                + ",\"package_abi_source\":" + quote(info.packageAbiSource)
+                + ",\"device_preferred_abi\":" + quote(info.devicePreferredAbi)
+                + ",\"metadata_error\":" + quote(info.error) + "}";
+    }
+
+    private static String steeringMetadataJson(SteeringEvidence evidence) {
+        ReverseSteeringModelConfig.Selection selection = evidence.selection;
+        ReverseSteeringModelConfig.Capture capture = evidence.capture;
+        String renderer = capture != null ? capture.renderer
+                : selection == null ? null : selection.renderer;
+        String model = capture != null ? capture.model
+                : selection == null ? null : selection.model;
+        String suffix = capture != null ? capture.resourceSuffix
+                : selection == null ? null : selection.resourceSuffix;
+        String assetPath = capture != null ? capture.configurationPath
+                : selection == null ? null : selection.configurationPath;
+        String format = capture != null ? capture.configurationFormat
+                : selection == null ? null : selection.configurationFormat;
+        String externalPath = capture != null ? capture.externalConfigurationPath
+                : selection == null ? null : selection.externalConfigurationPath;
+        Map<String, String> rawParameters = capture == null
+                ? Collections.emptyMap() : capture.rawSteeringParameters;
+        float minimum = capture == null ? Float.NaN : capture.minimumDegrees;
+        float maximum = capture == null ? Float.NaN : capture.maximumDegrees;
+        boolean boundsAvailable = capture != null && capture.boundsAvailable;
+        boolean provisional = capture != null ? capture.provisionalBounds
+                : "BYD".equals(renderer);
+        String error = capture != null && capture.parseError != null
+                && !capture.parseError.isEmpty() ? capture.parseError : evidence.error;
+        return "{\"renderer\":" + quote(renderer)
+                + ",\"model\":" + quote(model)
+                + ",\"resource_suffix\":" + quote(suffix)
+                + ",\"configuration_format\":" + quote(format)
+                + ",\"configuration_path\":" + quote(
+                        CompatibilityBundleEvidence.isAllowedSelectedAssetPath(assetPath)
+                                ? assetPath : null)
+                + ",\"external_configuration_path\":" + quote(
+                        CompatibilityBundleEvidence.isAllowedExternalConfigPath(externalPath)
+                                ? externalPath : null)
+                + ",\"raw_steering_parameters\":" + stringMapJson(rawParameters)
+                + ",\"computed_bounds\":{\"minimum_degrees\":"
+                + floatOrNull(minimum) + ",\"maximum_degrees\":" + floatOrNull(maximum)
+                + ",\"available\":" + boundsAvailable + "}"
+                + ",\"provisional_bounds\":" + provisional
+                + ",\"parse_error\":" + quote(error) + "}";
+    }
+
+    private static String stringMapJson(Map<String, String> values) {
+        List<String> keys = new ArrayList<>(values.keySet());
+        Collections.sort(keys);
+        StringBuilder json = new StringBuilder("{");
+        for (int i = 0; i < keys.size(); i++) {
+            if (i > 0) json.append(',');
+            String key = keys.get(i);
+            json.append(quote(key)).append(':').append(quote(values.get(key)));
+        }
+        return json.append('}').toString();
+    }
+
+    private static String numberOrNull(Number value) {
+        return value == null ? "null" : value.toString();
+    }
+
+    private static String floatOrNull(float value) {
+        return Float.isNaN(value) || Float.isInfinite(value) ? "null" : Float.toString(value);
+    }
+
     private static void addPaths(
             List<RemoteSpec> remote, Set<String> paths, String output, String type, boolean jars) {
         if (output == null) return;
@@ -552,6 +841,24 @@ final class CompatibilityBundleExporter {
             if (allowed) {
                 addRemote(remote, paths, path, type);
             }
+        }
+    }
+
+    private static void addEvidencePaths(
+            List<RemoteSpec> remote, Set<String> paths, CollectionEvidence evidence) {
+        for (CompatibilityBundleEvidence.NativeLibraryCandidate candidate
+                : evidence.nativeLibraries) {
+            if (CompatibilityBundleEvidence.isAllowedNativeLibraryCandidate(
+                    candidate.path, evidence.nativeLibraryDir)
+                    && paths.add(candidate.path)) {
+                remote.add(new RemoteSpec(candidate.path, candidate.origin));
+            }
+        }
+        String externalPath = evidence.externalConfigurationPath;
+        if (CompatibilityBundleEvidence.isAllowedExternalConfigPath(externalPath)
+                && paths.add(externalPath)) {
+            remote.add(new RemoteSpec(externalPath,
+                    "external_oem_config_copy_unverified"));
         }
     }
 
@@ -902,6 +1209,75 @@ final class CompatibilityBundleExporter {
         CommandResult run(String command, long maxBytes);
     }
     interface StreamCommandRunner { StreamResult run(String command, OutputStream output, long maxBytes); }
+
+    static final class CollectionEvidence {
+        final String nativeLibraryDir, packageAbi, packageAbiSource;
+        final String devicePreferredAbi, externalConfigurationPath;
+        final List<CompatibilityBundleEvidence.NativeLibraryCandidate> nativeLibraries;
+        final List<EvidenceText> text;
+
+        CollectionEvidence(String nativeLibraryDir, String packageAbi, String packageAbiSource,
+                String devicePreferredAbi,
+                String externalConfigurationPath,
+                List<CompatibilityBundleEvidence.NativeLibraryCandidate> nativeLibraries,
+                List<EvidenceText> text) {
+            this.nativeLibraryDir = nativeLibraryDir;
+            this.packageAbi = packageAbi;
+            this.packageAbiSource = packageAbiSource;
+            this.devicePreferredAbi = devicePreferredAbi;
+            this.externalConfigurationPath = externalConfigurationPath;
+            this.nativeLibraries = nativeLibraries;
+            this.text = text;
+        }
+    }
+
+    static final class EvidenceText {
+        final TextSpec spec;
+        final String value, error;
+        final int exitCode;
+
+        EvidenceText(String entry, String type, String source, String value,
+                String error, int exitCode) {
+            this.spec = new TextSpec(entry, type, source);
+            this.value = value == null ? "" : value;
+            this.error = error;
+            this.exitCode = exitCode;
+        }
+    }
+
+    private static final class SteeringEvidence {
+        final ReverseSteeringModelConfig.Selection selection;
+        final ReverseSteeringModelConfig.Capture capture;
+        final String error;
+
+        SteeringEvidence(ReverseSteeringModelConfig.Selection selection,
+                ReverseSteeringModelConfig.Capture capture, String error) {
+            this.selection = selection;
+            this.capture = capture;
+            this.error = error;
+        }
+    }
+
+    private static final class AutoVideoInfo {
+        final String versionName, sourceDir, nativeLibraryDir;
+        final String packageAbi, packageAbiSource, devicePreferredAbi, error;
+        final Integer versionCode;
+        final Long lastUpdateTime;
+
+        AutoVideoInfo(String versionName, Integer versionCode, Long lastUpdateTime,
+                String sourceDir, String nativeLibraryDir, String packageAbi,
+                String packageAbiSource, String devicePreferredAbi, String error) {
+            this.versionName = versionName;
+            this.versionCode = versionCode;
+            this.lastUpdateTime = lastUpdateTime;
+            this.sourceDir = sourceDir;
+            this.nativeLibraryDir = nativeLibraryDir;
+            this.packageAbi = packageAbi;
+            this.packageAbiSource = packageAbiSource;
+            this.devicePreferredAbi = devicePreferredAbi;
+            this.error = error;
+        }
+    }
 
     static final class CommandResult {
         final boolean ok; final String output; final String error; final int exitCode;
