@@ -22,23 +22,23 @@ public final class CameraProbeStartupAuthorizationTest {
         CameraProbeActivity.StartupOverlayPermissionFlow flow =
                 new CameraProbeActivity.StartupOverlayPermissionFlow();
 
-        assertTrue(flow.beginForegroundAuthorizationAttempt(true));
+        flow.reconcileAuthorization(true, true);
         assertFalse(flow.beginStartupOverlayPermissionRequest(false, false));
-        flow.finishForegroundAuthorizationAttempt();
+        flow.reconcileAuthorization(true, false);
 
-        assertFalse(flow.beginForegroundAuthorizationAttempt(true));
+        assertTrue(flow.foregroundAuthorizationFinished());
         assertTrue(flow.beginStartupOverlayPermissionRequest(false, false));
         assertTrue(flow.overlaySettingsInFlight());
     }
 
     @Test
-    public void callbackRegistrationFailureReleasesStartupOverlayStep() {
+    public void pendingAuthorizationDoesNotDependOnHelperCallback() {
         CameraProbeActivity.StartupOverlayPermissionFlow flow =
                 new CameraProbeActivity.StartupOverlayPermissionFlow();
 
-        flow.skipForegroundAuthorizationAttempt();
-
-        assertFalse(flow.beginForegroundAuthorizationAttempt(true));
+        flow.reconcileAuthorization(true, true);
+        assertFalse(flow.beginStartupOverlayPermissionRequest(false, false));
+        flow.reconcileAuthorization(true, false);
         assertTrue(flow.beginStartupOverlayPermissionRequest(false, false));
     }
 
@@ -60,9 +60,7 @@ public final class CameraProbeStartupAuthorizationTest {
 
         CameraProbeActivity.StartupOverlayPermissionFlow recreated =
                 new CameraProbeActivity.StartupOverlayPermissionFlow();
-        recreated.restore(original.foregroundAuthorizationStarted(),
-                original.foregroundAuthorizationFinished(),
-                original.overlayPermissionAttempted(), original.overlaySettingsInFlight(), false);
+        recreated.restore(original.overlayPermissionAttempted(), original.overlaySettingsInFlight());
 
         assertFalse(recreated.beginStartupOverlayPermissionRequest(false, false));
         assertFalse(recreated.canPresentStartupDialogs(false));
@@ -72,24 +70,28 @@ public final class CameraProbeStartupAuthorizationTest {
     }
 
     @Test
-    public void recreationReconcilesOnlyUnfinishedLocalAuthorization() {
+    public void recreationReattachesToProcessRequestButProcessDeathLeavesNoPhantomRequest() {
         CameraProbeActivity.StartupOverlayPermissionFlow flow =
                 new CameraProbeActivity.StartupOverlayPermissionFlow();
-        flow.restore(true, false, false, false, true);
-        assertTrue(flow.beginForegroundAuthorizationAttempt(true));
+        flow.restore(false, false);
+        flow.reconcileAuthorization(true, true);
+        assertTrue(flow.foregroundAuthorizationInFlight());
         assertFalse(flow.beginStartupOverlayPermissionRequest(false, false));
-        flow.finishForegroundAuthorizationAttempt();
+        flow.reconcileAuthorization(true, false);
         assertTrue(flow.beginStartupOverlayPermissionRequest(false, false));
 
-        flow.restore(true, true, true, true, true);
-        assertFalse(flow.beginForegroundAuthorizationAttempt(true));
+        flow.restore(true, true);
+        flow.reconcileAuthorization(true, false);
+        assertTrue(flow.foregroundAuthorizationFinished());
         assertTrue(flow.overlaySettingsInFlight());
         assertTrue(flow.finishOverlaySettings());
         assertFalse(flow.beginStartupOverlayPermissionRequest(false, false));
 
-        flow.restore(true, false, false, false, false);
-        assertFalse(flow.beginForegroundAuthorizationAttempt(true));
-        assertTrue(flow.foregroundAuthorizationInFlight());
+        flow.restore(false, false);
+        flow.reconcileAuthorization(false, false);
+        assertFalse(flow.foregroundAuthorizationStarted());
+        assertFalse(flow.foregroundAuthorizationInFlight());
+        assertFalse(flow.foregroundAuthorizationFinished());
     }
 
     @Test

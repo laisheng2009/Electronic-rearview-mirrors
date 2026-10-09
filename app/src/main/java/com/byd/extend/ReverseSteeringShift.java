@@ -1,6 +1,6 @@
 package com.byd.extend;
 
-/** Pure source-X crop travel for transient Reverse steering input. */
+/** Pure source-X crop travel preserving visual steering direction across pane mirroring. */
 final class ReverseSteeringShift {
     private ReverseSteeringShift() {}
 
@@ -23,7 +23,8 @@ final class ReverseSteeringShift {
 
     static ReverseCameraLayout.Rect apply(
             ReverseCameraLayout.Rect savedCrop,
-            float angleDegrees, float minimumDegrees, float maximumDegrees) {
+            float angleDegrees, float minimumDegrees, float maximumDegrees,
+            boolean mirrorHorizontally) {
         if (savedCrop == null) throw new IllegalArgumentException("saved crop is required");
         if (!isValidAngle(angleDegrees, minimumDegrees, maximumDegrees)) return savedCrop;
         if (angleDegrees == 0.0f || savedCrop.width == 1.0f) return savedCrop;
@@ -31,6 +32,7 @@ final class ReverseSteeringShift {
         float q = angleDegrees < 0.0f
                 ? angleDegrees / -minimumDegrees
                 : angleDegrees / maximumDegrees;
+        if (!mirrorHorizontally) q = -q;
         float left = savedCrop.left + q * (q < 0.0f
                 ? savedCrop.left
                 : 1.0f - savedCrop.width - savedCrop.left);

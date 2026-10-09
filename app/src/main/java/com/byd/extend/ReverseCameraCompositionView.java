@@ -399,8 +399,8 @@ final class ReverseCameraCompositionView extends FrameLayout {
 
     /**
      * Sets transient steering crop state. The caller supplies bounds from the active OEM model;
-     * a non-finite, stale, or out-of-bounds angle restores the saved crop. Positive angles use
-     * increasing source X; this pane's existing output transform applies mirror/rotation once.
+     * a non-finite, stale, or out-of-bounds angle restores the saved crop. Steering travel
+     * compensates for horizontal mirroring before this pane applies its mirror/rotation transform.
      */
     void setSteeringShift(
             float angleDegrees, float minimumDegrees, float maximumDegrees,
@@ -1604,7 +1604,8 @@ final class ReverseCameraCompositionView extends FrameLayout {
                 && !pane.texture.usesRawFallback() ? value.sourceCrop : rawCrop;
         return shiftEnabled
                 ? ReverseSteeringShift.apply(sourceCrop,
-                        steeringAngleDegrees, steeringMinimumDegrees, steeringMaximumDegrees)
+                        steeringAngleDegrees, steeringMinimumDegrees, steeringMaximumDegrees,
+                        value.mirrorHorizontally)
                 : sourceCrop;
     }
 

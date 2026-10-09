@@ -174,8 +174,6 @@ public final class CameraProbeActivity extends ComponentActivity
             "weather_enable_requested";
     private static final String STATE_WEATHER_REFRESH_AFTER_PERMISSION =
             "weather_refresh_after_permission";
-    private static final String STATE_STARTUP_ADB_AUTH_STARTED = "startup_adb_auth_started";
-    private static final String STATE_STARTUP_ADB_AUTH_FINISHED = "startup_adb_auth_finished";
     private static final String STATE_STARTUP_OVERLAY_PERMISSION_ATTEMPTED =
             "startup_overlay_permission_attempted";
     private static final String STATE_STARTUP_OVERLAY_SETTINGS_IN_FLIGHT =
@@ -804,6 +802,12 @@ public final class CameraProbeActivity extends ComponentActivity
                     advanceStartupAuthorizationFlow();
                 }
             });
+    private final Runnable foregroundAdbListener = () -> mainHandler.post(() -> {
+        if (!activityStarted || activityDestroyed) return;
+        reconcileForegroundAdbAuthorization();
+        updateControls();
+        advanceStartupAuthorizationFlow();
+    });
     private boolean updateCheckInFlight;
     private boolean updateCheckDialogRequested;
     private int updateCheckDialogResult = UPDATE_CHECK_RESULT_NONE;
@@ -971,14 +975,9 @@ public final class CameraProbeActivity extends ComponentActivity
                 backgroundStartSettingsPending(), hasWindowFocus(),
                 foregroundAdbAuthorizationReady(), adbAuthPending,
                 adbAuthorizationRequested
-                        || startupOverlayPermissionFlow.foregroundAuthorizationStarted())
-                && startupOverlayPermissionFlow.beginForegroundAuthorizationAttempt(true)) {
-            if (!requestAdbAuthorization(
-                    "adb_authorization_foreground_start",
-                    "foreground_adb_authorization", true)) {
-                startupOverlayPermissionFlow.finishForegroundAuthorizationAttempt();
-                advanceStartupAuthorizationFlow();
-            }
+                        || startupOverlayPermissionFlow.foregroundAuthorizationStarted())) {
+            requestAdbAuthorization("adb_authorization_foreground_start",
+                    "foreground_adb_authorization", true);
         } else {
             // A skipped delayed authorization must still release the import-offer gate.
             // Otherwise only a later focus/lifecycle callback resumes onboarding.
@@ -1039,11 +1038,7 @@ public final class CameraProbeActivity extends ComponentActivity
             IBinder disconnected = helper;
             helper = null;
             helperCallbackRegistration.disconnected(disconnected);
-            adbAuthPending = false;
-            adbAuthMode = null;
-            adbAuthorizationRequested = false;
-            startupOverlayPermissionFlow.finishForegroundAuthorizationAttempt();
-            cancelPendingForegroundAdbAuthorization();
+            reconcileForegroundAdbAuthorization();
             telemetryReady = false;
             manualGearPark = false;
             manualTurnRequestPending = false;
@@ -1108,11 +1103,8 @@ public final class CameraProbeActivity extends ComponentActivity
             updateCheckDialogResult = savedInstanceState.getInt(
                     STATE_UPDATE_CHECK_DIALOG_RESULT, UPDATE_CHECK_RESULT_NONE);
             startupOverlayPermissionFlow.restore(
-                    savedInstanceState.getBoolean(STATE_STARTUP_ADB_AUTH_STARTED),
-                    savedInstanceState.getBoolean(STATE_STARTUP_ADB_AUTH_FINISHED),
                     savedInstanceState.getBoolean(STATE_STARTUP_OVERLAY_PERMISSION_ATTEMPTED),
-                    savedInstanceState.getBoolean(STATE_STARTUP_OVERLAY_SETTINGS_IN_FLIGHT),
-                    LegacySettingsImporter.blocksRuntime(this));
+                    savedInstanceState.getBoolean(STATE_STARTUP_OVERLAY_SETTINGS_IN_FLIGHT));
         }
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -1192,10 +1184,6 @@ public final class CameraProbeActivity extends ComponentActivity
                 weatherEnableRequestedForPermission);
         outState.putBoolean(STATE_WEATHER_REFRESH_AFTER_PERMISSION,
                 weatherRefreshAfterPermission);
-        outState.putBoolean(STATE_STARTUP_ADB_AUTH_STARTED,
-                startupOverlayPermissionFlow.foregroundAuthorizationStarted());
-        outState.putBoolean(STATE_STARTUP_ADB_AUTH_FINISHED,
-                startupOverlayPermissionFlow.foregroundAuthorizationFinished());
         outState.putBoolean(STATE_STARTUP_OVERLAY_PERMISSION_ATTEMPTED,
                 startupOverlayPermissionFlow.overlayPermissionAttempted());
         outState.putBoolean(STATE_STARTUP_OVERLAY_SETTINGS_IN_FLIGHT,
@@ -1231,6 +1219,8 @@ public final class CameraProbeActivity extends ComponentActivity
         else restoreUpdateButton();
         publishReverseOwnerPresence();
         LocalAdbClient.setAccessStateListener(adbAccessListener);
+        LocalAdbClient.AUTHORIZATION.addForegroundListener(foregroundAdbListener);
+        reconcileForegroundAdbAuthorization();
         CameraHelperService.addAdbRecoveryListener(adbRecoveryListener);
         preferences.registerOnSharedPreferenceChangeListener(permissionsPreferenceListener);
         WeatherRefreshAccessibilityService.addConnectionListener(accessibilityConnectionListener);
@@ -1255,6 +1245,7 @@ public final class CameraProbeActivity extends ComponentActivity
         refreshProductionHeader();
         if (!helperBound) startAndBindHelperService();
         activityResumed = true;
+        enqueueHelperCallbackRegistration(helperCallbackRegistration.start());
         publishReverseOwnerPresence();
         ensureAutomaticPreviewInputs();
         if (!resumeTabWarmup.required()
@@ -1389,6 +1380,7 @@ public final class CameraProbeActivity extends ComponentActivity
         WeatherRefreshAccessibilityService.removeConnectionListener(accessibilityConnectionListener);
         clearReverseOwnerPresence();
         LocalAdbClient.clearAccessStateListener(adbAccessListener);
+        LocalAdbClient.AUTHORIZATION.removeForegroundListener(foregroundAdbListener);
         cancelPendingBackgroundStartSettings();
         cancelPendingForegroundAdbAuthorization();
         stopCalibrationCopies(true);
@@ -1422,6 +1414,7 @@ public final class CameraProbeActivity extends ComponentActivity
         cancelReverseButtonLearningIfVisible();
         clearReverseOwnerPresence();
         activityDestroyed = true;
+        LocalAdbClient.AUTHORIZATION.removeForegroundListener(foregroundAdbListener);
         mainHandler.removeCallbacks(reverseSteeringExpired);
         UpdateHintRuntime.get(this).removeCheckListener(updateCheckListener);
         UpdateHintRuntime.get(this).removeDownloadListener(updateDownloadListener);
@@ -3731,10 +3724,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 || logExportInProgress || compatibilityExportInProgress || updateDownloadInFlight
                 || settingsTransferDialog != null || legacyImportOfferDialog != null
                 || productionUi != null && productionUi.getState().getDialog() != null
-                || helperBound && helper == null && !legacyRuntimeBlocked
-                        && !startupOverlayPermissionFlow.foregroundAuthorizationFinished()
-                || helper != null && !helperCallbackRegistration.registered()
-                        && !startupOverlayPermissionFlow.foregroundAuthorizationFinished();
+                || !startupOverlayPermissionFlow.foregroundAuthorizationFinished();
     }
 
     @Override
@@ -7764,6 +7754,7 @@ public final class CameraProbeActivity extends ComponentActivity
     void requestAppShutdown() {
         if (shutdownRequested) return;
         shutdownRequested = true;
+        LocalAdbClient.AUTHORIZATION.cancelForeground();
         WeatherRefreshAccessibilityService.stopMicrophone();
         UpdateHintRuntime.get(this).shutdown();
         com.byd.extend.ui.RuntimeUiSession.clearProcessState();
@@ -13861,6 +13852,7 @@ public final class CameraProbeActivity extends ComponentActivity
                     new JSONObject(result).optString("kind"));
             boolean active = accepted
                     && helperCallbackRegistration.registered(operation);
+            if (!accepted) helperCallbackRegistration.failed(operation);
             record("ipc_reply", "operation", "register_callback", "reply", result,
                     "registration_generation", operation.generation,
                     "accepted", accepted, "active", active);
@@ -13873,12 +13865,9 @@ public final class CameraProbeActivity extends ComponentActivity
             }
         } catch (Throwable error) {
             record("ipc_error", "operation", "register_callback", "error", error.toString());
-            if (helperCallbackRegistration.isCurrent(operation)) {
+            if (helperCallbackRegistration.failed(operation)) {
                 mainHandler.post(() -> {
                     if (activityDestroyed) return;
-                    startupOverlayPermissionFlow.skipForegroundAuthorizationAttempt();
-                    record("adb_authorization_skipped", "reason",
-                            "callback_registration_failed");
                     updateControls();
                     advanceStartupAuthorizationFlow();
                 });
@@ -14614,117 +14603,62 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     private boolean foregroundAdbAuthorizationReady() {
-        return legacyRuntimeBlocked
-                || helper != null && helperCallbackRegistration.registered();
+        return activityResumed && !activityDestroyed && !isFinishing() && !shutdownRequested
+                && !settingsTransferInProgress && !settingsReloadPending
+                && !weatherLocationPermissionPending && !weatherLocationPermissionInFlight
+                && !startupOverlayPermissionFlow.overlaySettingsInFlight()
+                && (productionUi == null || productionUi.getState().getDialog() == null);
     }
 
     boolean requestAdbAuthorization(
             String event, String operation, boolean automatic) {
-        IBinder current = helper;
-        boolean authorizeOnly = LegacySettingsImporter.blocksRuntime(this);
         LocalAdbClient.PromptMode mode = automatic
                 ? LocalAdbClient.PromptMode.AUTO_ONCE
                 : LocalAdbClient.PromptMode.FORCE;
         if (settingsTransferInProgress || settingsReloadPending
                 || weatherLocationPermissionPending || weatherLocationPermissionInFlight
-                || current == null && !authorizeOnly || automatic && adbAuthPending
+                || shutdownRequested || activityDestroyed || isFinishing()
+                || cameraPermissionPending || backgroundStartSettingsPending()
+                || automatic && !foregroundAdbAuthorizationReady()
+                || automatic && adbAuthPending
                 || !automatic && adbAuthPending
                 && adbAuthMode == LocalAdbClient.PromptMode.FORCE) {
             return false;
         }
         cancelPendingForegroundAdbAuthorization();
-        adbAuthPending = true;
-        adbAuthMode = mode;
-        publishAdbOperation(true);
-        updateControls();
-        record(event, "automatic", automatic, "mode", mode.name());
-        AdbAuthorizationSession.Attempt foregroundAttempt = LocalAdbClient.AUTHORIZATION.begin();
-        try { ipcExecutor.execute(() -> {
-            try {
-                if (!authorizeOnly) {
-                    transactAdbAuthorization(current, operation, automatic, mode);
-                    return;
-                }
-                LocalAdbClient.Result result = LocalAdbClient.authorize(
-                        getApplicationContext(), mode, this::record);
-                if (result.ok) {
-                    AppPermissionProvisioner.ensure(
-                            getApplicationContext(), operation, this::record);
-                }
-                mainHandler.post(() -> {
-                    if (activityDestroyed) return;
-                    adbAuthPending = false;
-                    adbAuthMode = null;
-                    adbAuthorizationRequested = result.ok;
-                    startupOverlayPermissionFlow.finishForegroundAuthorizationAttempt();
-                    publishAdbOperation(false);
-                    refreshProductionHeader();
-                    updateControls();
-                    advanceStartupAuthorizationFlow();
-                });
-            } finally { foregroundAttempt.close(); }
-        }); } catch (java.util.concurrent.RejectedExecutionException stoppedExecutor) {
-            foregroundAttempt.close();
-            adbAuthPending = false;
-            adbAuthMode = null;
-            startupOverlayPermissionFlow.finishForegroundAuthorizationAttempt();
-            publishAdbOperation(false);
+        try {
+            AdbAuthorizationSession.Submission submission =
+                    ForegroundAdbAuthorization.request(this, mode, operation);
+            record(event, "automatic", automatic, "mode", mode.name(),
+                    "request_id", submission.snapshot.requestId,
+                    "disposition", submission.disposition.name());
+        } catch (java.util.concurrent.RejectedExecutionException stoppedExecutor) {
+            reconcileForegroundAdbAuthorization();
             record("adb_authorization_request_failed", "reason", "executor_stopped");
             return false;
         }
+        reconcileForegroundAdbAuthorization();
+        updateControls();
+        advanceStartupAuthorizationFlow();
         return true;
     }
 
-    private void transactAdbAuthorization(
-            IBinder current,
-            String operation,
-            boolean automatic,
-            LocalAdbClient.PromptMode mode) {
-        Parcel data = Parcel.obtain();
-        Parcel reply = Parcel.obtain();
-        try {
-            data.writeInterfaceToken(CameraHelperMain.DESCRIPTOR);
-            data.writeInt(mode == LocalAdbClient.PromptMode.FORCE
-                    ? CameraHelperMain.ADB_AUTH_MODE_FORCE
-                    : CameraHelperMain.ADB_AUTH_MODE_AUTO_ONCE);
-            requireTransaction(current, CameraHelperMain.TX_RETRY_ADB_AUTH, data, reply);
-            String response = reply.readString();
-            JSONObject result = new JSONObject(response);
-            String requestResult = result.optString("result", "error");
-            if (!"accepted".equals(requestResult) && !"coalesced".equals(requestResult)) {
-                throw new IllegalStateException("ADB request rejected: " + response);
-            }
-            record("ipc_reply", "operation", operation, "reply", response,
-                    "mode", mode.name(), "request_result", requestResult,
-                    "replaced_auto", result.optBoolean("replaced_auto"));
-            runOnUiThread(() -> {
-                adbAuthorizationRequested = true;
-                updateControls();
-                advanceStartupAuthorizationFlow();
-            });
-        } catch (Throwable error) {
-            record("ipc_error", "operation", operation, "error", error.toString());
-            runOnUiThread(() -> {
-                if (adbAuthMode == mode) {
-                    adbAuthPending = false;
-                    adbAuthMode = null;
-                }
-                if (automatic) adbAuthorizationRequested = false;
-                startupOverlayPermissionFlow.finishForegroundAuthorizationAttempt();
-                publishAdbOperation(false);
-                updateControls();
-                advanceStartupAuthorizationFlow();
-            });
-        } finally {
-            reply.recycle();
-            data.recycle();
-        }
+    private void reconcileForegroundAdbAuthorization() {
+        AdbAuthorizationSession.RequestSnapshot snapshot =
+                LocalAdbClient.AUTHORIZATION.foregroundSnapshot();
+        adbAuthPending = snapshot != null && snapshot.isActive();
+        adbAuthMode = adbAuthPending ? snapshot.mode : null;
+        adbAuthorizationRequested = snapshot != null;
+        startupOverlayPermissionFlow.reconcileAuthorization(
+                adbAuthorizationRequested, adbAuthPending);
+        publishAdbOperation(adbAuthPending);
+        refreshProductionHeader();
     }
 
     static boolean shouldStartForegroundAdbAuthorization(boolean permissionPending,
-            boolean startupSettingsPending, boolean hasFocus, boolean helperConnected,
+            boolean startupSettingsPending, boolean hasFocus, boolean uiReady,
             boolean authorizationPending, boolean alreadyRequested) {
-        return !permissionPending && !startupSettingsPending && hasFocus && helperConnected
+        return !permissionPending && !startupSettingsPending && hasFocus && uiReady
                 && !authorizationPending && !alreadyRequested;
     }
 
@@ -15185,45 +15119,11 @@ public final class CameraProbeActivity extends ComponentActivity
                     if (!json.optBoolean("ok") || "stopped".equals(json.optString("action"))) {
                         manualGearPark = false;
                     }
-                } else if ("adb_auth_start".equals(kind)) {
-                    adbAuthPending = true;
-                    LocalAdbClient.PromptMode eventMode = adbPromptMode(
-                            json.optString("mode"));
-                    if (adbAuthMode != LocalAdbClient.PromptMode.FORCE
-                            || eventMode == LocalAdbClient.PromptMode.FORCE) {
-                        adbAuthMode = eventMode;
-                    }
-                    publishAdbOperation(true);
-                } else if ("adb_auth_state".equals(kind)) {
-                    adbAuthPending = json.optBoolean("pending");
-                    adbAuthMode = adbAuthPending
-                            ? adbPromptMode(json.optString("mode")) : null;
-                    if (!adbAuthPending) {
-                        startupOverlayPermissionFlow.finishForegroundAuthorizationAttempt();
-                    }
-                    publishAdbOperation(adbAuthPending);
-                } else if ("authorization_superseded".equals(kind)) {
-                    adbAuthMode = adbPromptMode(json.optString("next_mode"));
-                    adbAuthPending = adbAuthMode != null;
-                    if (!adbAuthPending) {
-                        startupOverlayPermissionFlow.finishForegroundAuthorizationAttempt();
-                    }
-                    publishAdbOperation(adbAuthPending);
-                } else if ("adb_auth_auto_blocked".equals(kind)) {
-                    publishAdbOperation(adbAuthPending);
-                } else if ("adb_auth_result".equals(kind)) {
-                    publishAdbOperation(adbAuthPending);
-                    if (json.optBoolean("ok")) {
-                        ipcExecutor.execute(() -> {
-                            AppPermissionProvisioner.ensure(getApplicationContext(),
-                                    "adb_authorization_result", this::record);
-                            mainHandler.post(() -> {
-                                if (activityStarted && !activityDestroyed) {
-                                    refreshProductionHeader();
-                                }
-                            });
-                        });
-                    }
+                } else if ("adb_auth_start".equals(kind) || "adb_auth_state".equals(kind)
+                        || "authorization_superseded".equals(kind)
+                        || "adb_auth_auto_blocked".equals(kind) || "adb_auth_result".equals(kind)) {
+                    // Camera status can arrive late; only the process RSA owner completes UI work.
+                    reconcileForegroundAdbAuthorization();
                 } else if ("helper_launch".equals(kind) && !json.optBoolean("ok")) {
                     telemetryReady = false;
                     manualGearPark = false;
@@ -15813,31 +15713,17 @@ public final class CameraProbeActivity extends ComponentActivity
         private boolean overlayPermissionAttempted;
         private boolean overlaySettingsInFlight;
 
-        void restore(boolean foregroundStarted, boolean foregroundFinished,
-                boolean overlayAttempted, boolean overlayInFlight, boolean localAuthorization) {
-            // A local request completes on the old Activity, unlike helper state callbacks.
-            // Reconcile via AUTO_ONCE: LocalAdbClient serializes with the old request and
-            // retains its authorization cache/process-local RSA attempt budget.
-            foregroundAuthorizationStarted = foregroundStarted
-                    && (!localAuthorization || foregroundFinished);
-            foregroundAuthorizationFinished = foregroundStarted && foregroundFinished;
+        void restore(boolean overlayAttempted, boolean overlayInFlight) {
+            // RSA state belongs to the live process request, never a saved Activity flag.
+            foregroundAuthorizationStarted = false;
+            foregroundAuthorizationFinished = false;
             overlayPermissionAttempted = overlayAttempted;
             overlaySettingsInFlight = overlayAttempted && overlayInFlight;
         }
 
-        boolean beginForegroundAuthorizationAttempt(boolean eligible) {
-            if (!eligible || foregroundAuthorizationStarted) return false;
-            foregroundAuthorizationStarted = true;
-            return true;
-        }
-
-        void finishForegroundAuthorizationAttempt() {
-            if (foregroundAuthorizationStarted) foregroundAuthorizationFinished = true;
-        }
-
-        void skipForegroundAuthorizationAttempt() {
-            foregroundAuthorizationStarted = true;
-            foregroundAuthorizationFinished = true;
+        void reconcileAuthorization(boolean started, boolean pending) {
+            foregroundAuthorizationStarted = started;
+            foregroundAuthorizationFinished = started && !pending;
         }
 
         boolean beginStartupOverlayPermissionRequest(
@@ -15892,10 +15778,12 @@ public final class CameraProbeActivity extends ComponentActivity
         private long issuedGeneration;
         private long desiredGeneration;
         private long completedGeneration;
+        private boolean registrationFailed;
 
         synchronized T start() {
-            if (desired) return null;
+            if (desired && !registrationFailed) return null;
             desired = true;
+            registrationFailed = false;
             return connection;
         }
 
@@ -15912,6 +15800,7 @@ public final class CameraProbeActivity extends ComponentActivity
             connection = value;
             desiredGeneration = 0;
             completedGeneration = 0;
+            registrationFailed = false;
             return desired ? value : null;
         }
 
@@ -15920,6 +15809,7 @@ public final class CameraProbeActivity extends ComponentActivity
             connection = null;
             desiredGeneration = 0;
             completedGeneration = 0;
+            registrationFailed = false;
         }
 
         synchronized Operation<T> queue(T value, long generation) {
@@ -15930,6 +15820,7 @@ public final class CameraProbeActivity extends ComponentActivity
             issuedGeneration = generation;
             desiredGeneration = generation;
             completedGeneration = 0;
+            registrationFailed = false;
             return new Operation<>(value, generation);
         }
 
@@ -15937,6 +15828,14 @@ public final class CameraProbeActivity extends ComponentActivity
             if (!desired || operation == null || connection != operation.connection
                     || desiredGeneration != operation.generation) return false;
             completedGeneration = operation.generation;
+            registrationFailed = false;
+            return true;
+        }
+
+        synchronized boolean failed(Operation<T> operation) {
+            if (!isCurrent(operation)) return false;
+            completedGeneration = 0;
+            registrationFailed = true;
             return true;
         }
 
@@ -16178,7 +16077,7 @@ public final class CameraProbeActivity extends ComponentActivity
                     !settingsTransferInProgress && !settingsReloadPending
                             && !backgroundStartSettingsPending()
                             && shouldEnableManualAdbAuthorization(
-                                    helper != null || legacyRuntimeBlocked,
+                                    !shutdownRequested && !activityDestroyed && !cameraPermissionPending,
                                     adbAuthPending, adbAuthMode),
                     !requestedOpen && !cameraHandoffPending);
             if (legacyRuntimeBlocked) {
@@ -16293,10 +16192,10 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     static boolean shouldEnableManualAdbAuthorization(
-            boolean helperConnected,
+            boolean uiReady,
             boolean authorizationPending,
             LocalAdbClient.PromptMode mode) {
-        return helperConnected
+        return uiReady
                 && (!authorizationPending || mode != LocalAdbClient.PromptMode.FORCE);
     }
 

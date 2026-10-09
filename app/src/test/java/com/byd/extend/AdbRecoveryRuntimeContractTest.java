@@ -100,7 +100,7 @@ public final class AdbRecoveryRuntimeContractTest {
         if (!Files.exists(clientPath)) clientPath = Path.of("src/main/java/com/byd/extend/LocalAdbClient.java");
         String client = new String(Files.readAllBytes(clientPath), StandardCharsets.UTF_8);
         assertFalse(client.contains("AUTO_PROMPT_KEY"));
-        assertTrue(client.contains("AUTHORIZATION.claimPrompt"));
+        assertTrue(client.contains("AUTHORIZATION.reservePrompt"));
         assertTrue(client.contains("saved.equals(currentFingerprint(context))"));
     }
 

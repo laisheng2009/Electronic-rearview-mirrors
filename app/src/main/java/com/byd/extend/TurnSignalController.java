@@ -127,7 +127,6 @@ final class TurnSignalController {
     private volatile IBinder pendingReverseHelper;
     private volatile long pendingReverseHelperEpoch;
     private volatile boolean pendingReverseClusterExpected;
-    private final AuthorizationGate authorizationRequests = new AuthorizationGate();
     private long lastLaunchFailureAt;
     private volatile String automaticAuthorizationBlockedFor = "";
     private volatile boolean automaticAuthorizationBlockReported;
@@ -1297,10 +1296,9 @@ final class TurnSignalController {
 
     void reportStatus() {
         if (cameraRuntimeHost) return;
-        emit("adb_auth_state", "pending", authorizationPending,
-                "mode", modeName(authorizationMode));
+        emitAuthorizationState();
         worker.execute(() -> {
-            if (authorizationPending) return;
+            if (authorizationPending || requestedForegroundMode() != null) return;
             IBinder value = helper;
             if (healthy && value != null) {
                 try {
@@ -1315,56 +1313,36 @@ final class TurnSignalController {
     }
 
     AuthorizationRequestAction requestAuthorization(LocalAdbClient.PromptMode mode) {
-        if (mode != LocalAdbClient.PromptMode.AUTO_ONCE
-                && mode != LocalAdbClient.PromptMode.FORCE) {
-            throw new IllegalArgumentException("Unsupported authorization mode: " + mode);
-        }
-        AuthorizationRequestAction action = authorizationRequests.request(mode);
-        if (action == AuthorizationRequestAction.COALESCED) {
-            emit("adb_authorization_request", "mode", mode.name(),
-                    "result", action.wireName(),
-                    "active_mode", modeName(authorizationRequests.mode()));
-            return action;
-        }
-        AdbAuthorizationSession.Attempt foregroundAttempt = LocalAdbClient.AUTHORIZATION.begin();
-        if (mode == LocalAdbClient.PromptMode.FORCE) {
-            automaticAuthorizationBlockedFor = "";
-            automaticAuthorizationBlockReported = false;
-        }
-        boolean socketClosed = mode == LocalAdbClient.PromptMode.FORCE
-                && LocalAdbClient.cancelPendingAuthorization();
-        long cancellationToken = LocalAdbClient.cancellationToken();
-        authorizationPending = true;
-        authorizationMode = authorizationRequests.mode();
-        emit("adb_authorization_request", "mode", mode.name(),
-                "result", action.wireName(),
-                "cancelled_pending_socket", socketClosed,
-                "active_mode", modeName(authorizationMode));
-        emitAuthorizationState();
-        try { worker.execute(() -> {
-            try {
-                if (!authorizationRequests.isCurrent(mode)) {
-                    emit("authorization_superseded", "mode", mode.name(),
-                            "next_mode", modeName(authorizationRequests.mode()),
-                            "stage", "queued");
-                    return;
-                }
-                ensureRunning(mode, true, cancellationToken);
-            } finally {
-                authorizationRequests.finish(mode);
-                syncRequestedAuthorizationState();
-                foregroundAttempt.close();
-                if (!stopped && !authorizationPending && healthyHelper() == null) {
-                    failPendingAvas("helper_unavailable");
-                }
+        AdbAuthorizationSession.Submission submission =
+                ForegroundAdbAuthorization.request(context, mode, "helper_authorization_request");
+        return switch (submission.disposition) {
+            case ACCEPTED -> AuthorizationRequestAction.ACCEPTED;
+            case REPLACED_AUTO -> AuthorizationRequestAction.REPLACED_AUTO;
+            case COALESCED -> AuthorizationRequestAction.COALESCED;
+        };
+    }
+
+    void foregroundAdbFinished(boolean authorized) {
+        if (cameraRuntimeHost || stopped) return;
+        worker.execute(() -> {
+            if (stopped || requestedForegroundMode() != null) return;
+            authorizationPending = false;
+            authorizationMode = null;
+            if (authorized) {
+                automaticAuthorizationBlockedFor = "";
+                automaticAuthorizationBlockReported = false;
+                lastLaunchFailureAt = 0;
+                ensureRunning(LocalAdbClient.PromptMode.NEVER, true);
+            } else if (healthyHelper() == null) {
+                failPendingAvas("helper_unavailable");
             }
-        }); } catch (java.util.concurrent.RejectedExecutionException stoppedWorker) {
-            authorizationRequests.finish(mode);
-            syncRequestedAuthorizationState();
-            foregroundAttempt.close();
-            throw stoppedWorker;
-        }
-        return action;
+        });
+    }
+
+    private static LocalAdbClient.PromptMode requestedForegroundMode() {
+        AdbAuthorizationSession.RequestSnapshot snapshot =
+                LocalAdbClient.AUTHORIZATION.foregroundSnapshot();
+        return snapshot != null && snapshot.isActive() ? snapshot.mode : null;
     }
 
     private void checkHealth() {
@@ -1419,7 +1397,7 @@ final class TurnSignalController {
             automaticAuthorizationBlockReported = false;
             lastLaunchFailureAt = 0;
         }
-        LocalAdbClient.PromptMode requestedMode = authorizationRequests.mode();
+        LocalAdbClient.PromptMode requestedMode = requestedForegroundMode();
         if (isSupersededByRequest(mode, requestedMode)) {
             authorizationPending = true;
             authorizationMode = requestedMode;
@@ -1446,15 +1424,15 @@ final class TurnSignalController {
             }
 
             authorizationPending = true;
-            authorizationMode = authorizationRequests.active()
-                    ? authorizationRequests.mode() : mode;
+            requestedMode = requestedForegroundMode();
+            authorizationMode = requestedMode != null ? requestedMode : mode;
             emit("adb_auth_start", "mode", mode.name(),
                     "endpoint", LocalAdbClient.endpointForTest());
             LocalAdbClient.Result authorization = LocalAdbClient.authorize(
                     context, mode, cancellationToken, this::emit);
             if (authorization.superseded) {
-                authorizationPending = authorizationRequests.active();
-                authorizationMode = authorizationRequests.mode();
+                authorizationMode = requestedForegroundMode();
+                authorizationPending = authorizationMode != null;
                 emit("authorization_superseded", "mode", mode.name(),
                         "next_mode", modeName(authorizationMode),
                         "stage", "socket");
@@ -1466,14 +1444,14 @@ final class TurnSignalController {
                     "public_key_sent", authorization.publicKeySent,
                     "fingerprint", authorization.fingerprint,
                     "error", authorization.error);
-            LocalAdbClient.PromptMode activeRequestedMode = authorizationRequests.mode();
+            LocalAdbClient.PromptMode activeRequestedMode = requestedForegroundMode();
             if (isSupersededByRequest(mode, activeRequestedMode)) {
                 emit("authorization_superseded", "mode", mode.name(),
                         "next_mode", modeName(activeRequestedMode),
                         "stage", "result");
                 return;
             }
-            if (!authorizationRequests.active()) {
+            if (activeRequestedMode == null) {
                 authorizationPending = false;
                 authorizationMode = null;
                 emitAuthorizationState();
@@ -1515,7 +1493,7 @@ final class TurnSignalController {
                     cancellationToken, this::emit);
             if (launch.superseded) {
                 emit("authorization_superseded", "mode", mode.name(),
-                        "next_mode", modeName(authorizationRequests.mode()),
+                        "next_mode", modeName(requestedForegroundMode()),
                         "stage", "helper_launch");
                 return;
             }
@@ -1611,7 +1589,7 @@ final class TurnSignalController {
         return !stopped
                 && !LegacySettingsImporter.blocksRuntime(context)
                 && LocalAdbClient.isCancellationTokenCurrent(cancellationToken)
-                && !isSupersededByRequest(mode, authorizationRequests.mode());
+                && !isSupersededByRequest(mode, requestedForegroundMode());
     }
 
     private void reportHelperReadinessAbort(
@@ -1622,9 +1600,9 @@ final class TurnSignalController {
             return;
         }
         if (!LocalAdbClient.isCancellationTokenCurrent(cancellationToken)
-                || isSupersededByRequest(mode, authorizationRequests.mode())) {
+                || isSupersededByRequest(mode, requestedForegroundMode())) {
             emit("authorization_superseded", "mode", mode.name(),
-                    "next_mode", modeName(authorizationRequests.mode()),
+                    "next_mode", modeName(requestedForegroundMode()),
                     "stage", "helper_binder_wait");
         }
     }
@@ -1641,7 +1619,7 @@ final class TurnSignalController {
 
     static boolean canReuseHealthyHelperBeforeAuthorization(
             boolean helperReady, LocalAdbClient.PromptMode mode) {
-        return helperReady && mode != LocalAdbClient.PromptMode.FORCE;
+        return helperReady && mode == LocalAdbClient.PromptMode.NEVER;
     }
 
     static boolean isSupersededByRequest(
@@ -1656,15 +1634,12 @@ final class TurnSignalController {
                 && blockedIdentity.equals(currentIdentity);
     }
 
-    private void syncRequestedAuthorizationState() {
-        authorizationMode = authorizationRequests.mode();
-        authorizationPending = authorizationMode != null;
-        emitAuthorizationState();
-    }
-
     private void emitAuthorizationState() {
-        emit("adb_auth_state", "pending", authorizationPending,
-                "mode", modeName(authorizationMode));
+        AdbAuthorizationSession.RequestSnapshot snapshot =
+                LocalAdbClient.AUTHORIZATION.foregroundSnapshot();
+        emit("adb_auth_state", "pending", snapshot != null && snapshot.isActive(),
+                "request_id", snapshot == null ? 0L : snapshot.requestId,
+                "mode", modeName(snapshot != null && snapshot.isActive() ? snapshot.mode : null));
     }
 
     private static String modeName(LocalAdbClient.PromptMode mode) {
@@ -1923,14 +1898,14 @@ final class TurnSignalController {
 
     private boolean deferPendingAvasConfiguration() {
         synchronized (this) {
-            return !stopped && (authorizationPending || authorizationRequests.active())
+            return !stopped && (authorizationPending || requestedForegroundMode() != null)
                     && pendingAvas.deferConfigurationIf(true);
         }
     }
 
     private boolean deferPendingAvasStatus() {
         synchronized (this) {
-            return !stopped && (authorizationPending || authorizationRequests.active())
+            return !stopped && (authorizationPending || requestedForegroundMode() != null)
                     && pendingAvas.deferStatusIf(true);
         }
     }
@@ -3974,42 +3949,6 @@ final class TurnSignalController {
         }
     }
 
-    static final class AuthorizationGate {
-        private LocalAdbClient.PromptMode mode;
-
-        synchronized AuthorizationRequestAction request(LocalAdbClient.PromptMode requested) {
-            if (requested != LocalAdbClient.PromptMode.AUTO_ONCE
-                    && requested != LocalAdbClient.PromptMode.FORCE) {
-                throw new IllegalArgumentException("Unsupported authorization mode: " + requested);
-            }
-            if (mode == null) {
-                mode = requested;
-                return AuthorizationRequestAction.ACCEPTED;
-            }
-            if (requested == LocalAdbClient.PromptMode.FORCE
-                    && mode == LocalAdbClient.PromptMode.AUTO_ONCE) {
-                mode = LocalAdbClient.PromptMode.FORCE;
-                return AuthorizationRequestAction.REPLACED_AUTO;
-            }
-            return AuthorizationRequestAction.COALESCED;
-        }
-
-        synchronized void finish(LocalAdbClient.PromptMode finished) {
-            if (mode == finished) mode = null;
-        }
-
-        synchronized boolean active() {
-            return mode != null;
-        }
-
-        synchronized boolean isCurrent(LocalAdbClient.PromptMode expected) {
-            return mode == expected;
-        }
-
-        synchronized LocalAdbClient.PromptMode mode() {
-            return mode;
-        }
-    }
 }
 
 final class OverlayFrameArm {

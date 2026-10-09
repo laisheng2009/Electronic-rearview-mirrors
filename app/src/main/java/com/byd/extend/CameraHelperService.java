@@ -418,6 +418,24 @@ public final class CameraHelperService extends Service {
         }
     }
 
+    static void foregroundAdbFinished(long requestId, boolean authorized) {
+        CameraHelperService service = activeInstance;
+        if (service == null) return;
+        service.postRuntime(() -> {
+            AdbAuthorizationSession.RequestSnapshot snapshot =
+                    LocalAdbClient.AUTHORIZATION.foregroundSnapshot();
+            if (snapshot == null || snapshot.requestId != requestId || snapshot.isActive()) return;
+            if (activeInstance != service || GuardRecovery.isUserShutdownActive(service)) return;
+            if (authorized) service.provisionAppPermissions("foreground_adb_authorized");
+            if (LegacySettingsImporter.blocksRuntime(service)) return;
+            if (authorized) {
+                service.handleStartCommand(ServiceRuntimeCommand.capture(
+                        new Intent().setAction(ACTION_ADB_READY), 0, ACTION_START));
+            }
+            if (service.helper != null) service.helper.foregroundAdbFinished(authorized);
+        });
+    }
+
     private void resumeOverlayIfIdle() {
         if (shouldResumeOverlay(cameraPreviewActive, activityVisible)) {
             if (cameraRuntime != null) cameraRuntime.preview(false);
@@ -849,6 +867,7 @@ public final class CameraHelperService extends Service {
             return;
         }
         if (ACTION_SHUTDOWN.equals(action)) {
+            LocalAdbClient.AUTHORIZATION.cancelForeground();
             WeatherRefreshAccessibilityService.stopMicrophone();
             GuardRecovery.setUserShutdownActive(this, true);
             if (adbRecovery != null) adbRecovery.close();

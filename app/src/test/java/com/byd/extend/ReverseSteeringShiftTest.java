@@ -13,47 +13,52 @@ public final class ReverseSteeringShiftTest {
         ReverseCameraLayout.Rect saved = ReverseCameraLayout.sourceCrop(.25f, .2f, .5f, .6f);
 
         assertCrop(0.0f, 0.2f, 0.5f, 0.6f,
-                ReverseSteeringShift.apply(saved, -100.0f, -100.0f, 200.0f));
+                ReverseSteeringShift.apply(saved, -100.0f, -100.0f, 200.0f, true));
         assertCrop(0.125f, 0.2f, 0.5f, 0.6f,
-                ReverseSteeringShift.apply(saved, -50.0f, -100.0f, 200.0f));
+                ReverseSteeringShift.apply(saved, -50.0f, -100.0f, 200.0f, true));
         assertCrop(0.25f, 0.2f, 0.5f, 0.6f,
-                ReverseSteeringShift.apply(saved, 0.0f, -100.0f, 200.0f));
+                ReverseSteeringShift.apply(saved, 0.0f, -100.0f, 200.0f, true));
         assertCrop(0.375f, 0.2f, 0.5f, 0.6f,
-                ReverseSteeringShift.apply(saved, 100.0f, -100.0f, 200.0f));
+                ReverseSteeringShift.apply(saved, 100.0f, -100.0f, 200.0f, true));
         assertCrop(0.5f, 0.2f, 0.5f, 0.6f,
-                ReverseSteeringShift.apply(saved, 200.0f, -100.0f, 200.0f));
+                ReverseSteeringShift.apply(saved, 200.0f, -100.0f, 200.0f, true));
     }
 
     @Test
     public void edgesAndFullWidthCropHaveOnlyAvailableTravel() {
         ReverseCameraLayout.Rect leftHalf = ReverseCameraLayout.sourceCrop(0.0f, .15f, .5f, .7f);
+        ReverseCameraLayout.Rect rightHalf = ReverseCameraLayout.sourceCrop(.5f, .15f, .5f, .7f);
         ReverseCameraLayout.Rect fullWidth = ReverseCameraLayout.sourceCrop(0.0f, .15f, 1.0f, .7f);
 
         assertCrop(0.0f, .15f, .5f, .7f,
-                ReverseSteeringShift.apply(leftHalf, -100.0f, -100.0f, 100.0f));
+                ReverseSteeringShift.apply(leftHalf, -100.0f, -100.0f, 100.0f, true));
         assertCrop(.5f, .15f, .5f, .7f,
-                ReverseSteeringShift.apply(leftHalf, 100.0f, -100.0f, 100.0f));
+                ReverseSteeringShift.apply(leftHalf, 100.0f, -100.0f, 100.0f, true));
         assertCrop(0.0f, .15f, 1.0f, .7f,
-                ReverseSteeringShift.apply(fullWidth, 100.0f, -100.0f, 100.0f));
+                ReverseSteeringShift.apply(fullWidth, 100.0f, -100.0f, 100.0f, true));
+        assertCrop(0.0f, .15f, .5f, .7f,
+                ReverseSteeringShift.apply(leftHalf, 100.0f, -100.0f, 100.0f, false));
+        assertCrop(.5f, .15f, .5f, .7f,
+                ReverseSteeringShift.apply(rightHalf, -100.0f, -100.0f, 100.0f, false));
     }
 
     @Test
     public void unknownStaleOrInvalidBoundsRestoreSavedCrop() {
         ReverseCameraLayout.Rect saved = ReverseCameraLayout.sourceCrop(.2f, .1f, .6f, .8f);
 
-        assertSame(saved, ReverseSteeringShift.apply(saved, Float.NaN, -100.0f, 100.0f));
-        assertSame(saved, ReverseSteeringShift.apply(saved, 101.0f, -100.0f, 100.0f));
-        assertSame(saved, ReverseSteeringShift.apply(saved, 50.0f, 0.0f, 100.0f));
-        assertSame(saved, ReverseSteeringShift.apply(saved, 50.0f, -100.0f, Float.NaN));
+        assertSame(saved, ReverseSteeringShift.apply(saved, Float.NaN, -100.0f, 100.0f, true));
+        assertSame(saved, ReverseSteeringShift.apply(saved, 101.0f, -100.0f, 100.0f, false));
+        assertSame(saved, ReverseSteeringShift.apply(saved, 50.0f, 0.0f, 100.0f, true));
+        assertSame(saved, ReverseSteeringShift.apply(saved, 50.0f, -100.0f, Float.NaN, false));
     }
 
     @Test
     public void repeatedUpdatesAlwaysStartFromSavedCrop() {
         ReverseCameraLayout.Rect saved = ReverseCameraLayout.sourceCrop(.25f, .3f, .5f, .4f);
         ReverseCameraLayout.Rect first =
-                ReverseSteeringShift.apply(saved, 50.0f, -100.0f, 100.0f);
+                ReverseSteeringShift.apply(saved, 50.0f, -100.0f, 100.0f, true);
         ReverseCameraLayout.Rect repeated =
-                ReverseSteeringShift.apply(saved, 50.0f, -100.0f, 100.0f);
+                ReverseSteeringShift.apply(saved, 50.0f, -100.0f, 100.0f, true);
 
         assertEquals(first.left, repeated.left, 0.0f);
         assertCrop(.25f, .3f, .5f, .4f, saved);
@@ -68,29 +73,62 @@ public final class ReverseSteeringShiftTest {
     }
 
     @Test
-    public void displayMirrorAndRotationApplyTheSourceXDirectionOnce() {
+    public void renderedSteeringDirectionIsMirrorInvariantForCorrectedAndRawCrops() {
+        ReverseCameraLayout.Rect correctedCrop =
+                ReverseCameraLayout.sourceCrop(.25f, .2f, .5f, .6f);
+        ReverseCameraLayout.Rect rawFallbackCrop =
+                ReverseCameraLayout.sourceCrop(.2f, .1f, .6f, .8f);
+        for (ReverseCameraLayout.Rect saved :
+                new ReverseCameraLayout.Rect[]{correctedCrop, rawFallbackCrop}) {
+            for (int angle : new int[]{-50, 50}) {
+                for (boolean mirror : new boolean[]{false, true}) {
+                    ReverseCameraLayout.Rect shifted = ReverseSteeringShift.apply(
+                            saved, angle, -100.0f, 100.0f, mirror);
+                    float[] before = cropTransform(saved, 0, mirror);
+                    float[] after = cropTransform(shifted, 0, mirror);
+                    float[] beforePoint = map(before,
+                            .5f * ReverseCameraCompositionView.SOURCE_WIDTH,
+                            .5f * ReverseCameraCompositionView.SOURCE_HEIGHT);
+                    float[] afterPoint = map(after,
+                            .5f * ReverseCameraCompositionView.SOURCE_WIDTH,
+                            .5f * ReverseCameraCompositionView.SOURCE_HEIGHT);
+                    assertEquals(Math.signum(angle),
+                            Math.signum(afterPoint[0] - beforePoint[0]), 0.0f);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void mirroredDefaultStillFollowsTheCalibratedPaneRotation() {
         ReverseCameraLayout.Rect saved = ReverseCameraLayout.sourceCrop(.25f, .25f, .5f, .5f);
         ReverseCameraLayout.Rect shifted =
-                ReverseSteeringShift.apply(saved, 50.0f, -100.0f, 100.0f);
-        assertEquals(.375f, shifted.left, .00001f);
-
+                ReverseSteeringShift.apply(saved, 50.0f, -100.0f, 100.0f, true);
         for (int rotation : new int[]{0, 90, 180, -90}) {
-            for (boolean mirror : new boolean[]{false, true}) {
-                float[] before = cropTransform(saved, rotation, mirror);
-                float[] after = cropTransform(shifted, rotation, mirror);
-                float[] beforePoint = map(before, .6f * ReverseCameraCompositionView.SOURCE_WIDTH,
-                        .5f * ReverseCameraCompositionView.SOURCE_HEIGHT);
-                float[] afterPoint = map(after, .6f * ReverseCameraCompositionView.SOURCE_WIDTH,
-                        .5f * ReverseCameraCompositionView.SOURCE_HEIGHT);
-                double radians = Math.toRadians(rotation);
-                float direction = rotation % 180 == 0
-                        ? -((mirror ? -1.0f : 1.0f) * (float) Math.cos(radians))
-                        : -(float) Math.sin(radians);
-                float movement = rotation % 180 == 0
-                        ? afterPoint[0] - beforePoint[0]
-                        : afterPoint[1] - beforePoint[1];
-                assertEquals(Math.signum(direction), Math.signum(movement), 0.0f);
-            }
+            float[] before = cropTransform(saved, rotation, true);
+            float[] after = cropTransform(shifted, rotation, true);
+            float[] beforePoint = map(before,
+                    .6f * ReverseCameraCompositionView.SOURCE_WIDTH,
+                    .5f * ReverseCameraCompositionView.SOURCE_HEIGHT);
+            float[] afterPoint = map(after,
+                    .6f * ReverseCameraCompositionView.SOURCE_WIDTH,
+                    .5f * ReverseCameraCompositionView.SOURCE_HEIGHT);
+            float direction = rotation % 180 == 0
+                    ? (float) Math.cos(Math.toRadians(rotation))
+                    : -(float) Math.sin(Math.toRadians(rotation));
+            float movement = rotation % 180 == 0
+                    ? afterPoint[0] - beforePoint[0]
+                    : afterPoint[1] - beforePoint[1];
+            assertEquals(Math.signum(direction), Math.signum(movement), 0.0f);
+        }
+    }
+
+    @Test
+    public void zeroSteeringLeavesCropUntouchedWithEitherMirrorSetting() {
+        ReverseCameraLayout.Rect saved = ReverseCameraLayout.sourceCrop(.25f, .2f, .5f, .6f);
+        for (boolean mirror : new boolean[]{false, true}) {
+            assertSame(saved, ReverseSteeringShift.apply(
+                    saved, 0.0f, -100.0f, 100.0f, mirror));
         }
     }
 

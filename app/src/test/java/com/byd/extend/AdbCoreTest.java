@@ -254,16 +254,16 @@ public final class AdbCoreTest {
 
         int timeout = connection.indexOf("if (publicKeySent) {");
         assertTrue(timeout >= 0);
-        assertTrue(connection.indexOf("recordAccessError(context, fingerprint);", timeout) > timeout);
+        assertTrue(connection.indexOf("recordAccessError(context, fingerprint, operationGeneration);", timeout) > timeout);
         int rejected = connection.indexOf("\"authorization_rejected\"");
         assertTrue(rejected >= 0);
-        assertTrue(connection.indexOf("recordAccessError(context, fingerprint);", rejected) > rejected);
+        assertTrue(connection.indexOf("recordAccessError(context, fingerprint, operationGeneration);", rejected) > rejected);
         int required = connection.indexOf("\"authorization_required\"");
         assertTrue(required >= 0);
-        assertTrue(connection.indexOf("recordAccessError(context, fingerprint);", required) > required);
+        assertTrue(connection.indexOf("recordAccessError(context, fingerprint, operationGeneration);", required) > required);
         int catchStart = connection.indexOf("} catch (Throwable error) {");
         assertTrue(catchStart >= 0);
-        assertTrue(connection.indexOf("recordAccessError(context, fingerprint);", catchStart)
+        assertTrue(connection.indexOf("recordAccessError(context, fingerprint, operationGeneration);", catchStart)
                 > catchStart);
 
         LocalAdbClient.Result failure = LocalAdbClient.Result.failed(
@@ -392,26 +392,11 @@ public final class AdbCoreTest {
     }
 
     @Test
-    public void authorizationModesReplaceAutoAndCoalesceForce() {
-        TurnSignalController.AuthorizationGate gate =
-                new TurnSignalController.AuthorizationGate();
-        assertEquals(TurnSignalController.AuthorizationRequestAction.ACCEPTED,
-                gate.request(LocalAdbClient.PromptMode.AUTO_ONCE));
-        assertEquals(TurnSignalController.AuthorizationRequestAction.COALESCED,
-                gate.request(LocalAdbClient.PromptMode.AUTO_ONCE));
-        assertEquals(TurnSignalController.AuthorizationRequestAction.REPLACED_AUTO,
-                gate.request(LocalAdbClient.PromptMode.FORCE));
-        assertEquals(LocalAdbClient.PromptMode.FORCE, gate.mode());
-        gate.finish(LocalAdbClient.PromptMode.AUTO_ONCE);
-        assertEquals(LocalAdbClient.PromptMode.FORCE, gate.mode());
-        assertEquals(TurnSignalController.AuthorizationRequestAction.COALESCED,
-                gate.request(LocalAdbClient.PromptMode.FORCE));
+    public void authorizationWireModesAndHealthyHelperDoNotReplaceAdbProof() {
         assertEquals("accepted",
                 TurnSignalController.AuthorizationRequestAction.REPLACED_AUTO.wireName());
         assertEquals("coalesced",
                 TurnSignalController.AuthorizationRequestAction.COALESCED.wireName());
-        gate.finish(LocalAdbClient.PromptMode.FORCE);
-        assertFalse(gate.active());
 
         assertEquals(LocalAdbClient.PromptMode.AUTO_ONCE,
                 CameraHelperMain.adbAuthorizationMode(
@@ -422,6 +407,8 @@ public final class AdbCoreTest {
                 () -> CameraHelperMain.adbAuthorizationMode(2));
 
         assertTrue(TurnSignalController.canReuseHealthyHelperBeforeAuthorization(
+                true, LocalAdbClient.PromptMode.NEVER));
+        assertFalse(TurnSignalController.canReuseHealthyHelperBeforeAuthorization(
                 true, LocalAdbClient.PromptMode.AUTO_ONCE));
         assertFalse(TurnSignalController.canReuseHealthyHelperBeforeAuthorization(
                 true, LocalAdbClient.PromptMode.FORCE));

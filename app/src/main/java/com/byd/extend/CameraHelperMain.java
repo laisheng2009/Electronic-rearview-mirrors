@@ -145,6 +145,10 @@ final class CameraHelperMain {
 
         CameraRuntimeClient cameraRuntime() { return cameraRuntime; }
 
+        void foregroundAdbFinished(boolean authorized) {
+            turnController.foregroundAdbFinished(authorized);
+        }
+
         void reportRetainedCameraState() {
             turnController.reportCameraShellState();
             emit("reverse_camera_state", "active", activeReverseControllerRequestId > 0,

@@ -281,6 +281,28 @@ public final class CameraTransitionTest {
     }
 
     @Test
+    public void failedCallbackRetriesOnResumeAndIgnoresOldCompletions() {
+        Object helper = new Object();
+        CameraProbeActivity.HelperCallbackRegistration<Object> registration =
+                new CameraProbeActivity.HelperCallbackRegistration<>();
+        registration.start();
+        registration.connected(helper);
+        CameraProbeActivity.HelperCallbackRegistration.Operation<Object> first =
+                registration.queue(helper, 1L);
+        assertTrue(registration.failed(first));
+        assertFalse(registration.registered());
+        assertSame(helper, registration.start());
+        CameraProbeActivity.HelperCallbackRegistration.Operation<Object> retry =
+                registration.queue(helper, 2L);
+        assertNull(registration.start());
+        assertFalse(registration.registered(first));
+        assertFalse(registration.failed(first));
+        assertTrue(registration.registered(retry));
+        assertNull(registration.start());
+        assertTrue(registration.registered());
+    }
+
+    @Test
     public void rapidStopResumeFinalRegistrationWins() {
         Object helper = new Object();
         CameraProbeActivity.HelperCallbackRegistration<Object> registration =
