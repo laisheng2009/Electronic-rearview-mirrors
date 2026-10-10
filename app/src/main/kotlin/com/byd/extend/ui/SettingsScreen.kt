@@ -224,12 +224,6 @@ private fun FormScope.CameraOutputSettings(state: SettingsUiState, strings: UiSt
             state.cameraOutput.quality, colors, Modifier.fillMaxWidth()) {
             onAction(BydExtendUiAction.Select(SelectionTarget.Simple(SelectionId.CameraQuality), it))
         } }
-        row("frame-rate-title") { Text(strings.text("Частота кадрів", "Frame rate"), color = colors.text,
-            fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
-        row("frame-rate") { Segmented(listOf("20", "25", "30"),
-            (state.cameraOutput.frameRate - 20) / 5, colors, Modifier.fillMaxWidth()) {
-            onAction(BydExtendUiAction.Select(SelectionTarget.Simple(SelectionId.CameraFrameRate), it))
-        } }
         row("corner-radius") { NumericSetting(strings.text("Заокруглення камер", "Camera corner radius"),
             state.cameraOutput.cornerRadius, "dp", colors,
             { onAction(BydExtendUiAction.CommitNumber(NumberTarget.Output(OutputNumber.CornerRadius), it)) },

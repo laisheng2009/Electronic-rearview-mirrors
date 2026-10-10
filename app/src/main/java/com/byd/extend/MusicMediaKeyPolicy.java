@@ -21,6 +21,10 @@ final class MusicMediaKeyPolicy {
         return rawKeyCode == OEM_WHEEL_KEY ? KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE : rawKeyCode;
     }
 
+    static boolean supportsReceiverFallback(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE;
+    }
+
     static boolean isMediaKey(int rawKeyCode) {
         switch (standardKeyCode(rawKeyCode)) {
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
@@ -130,6 +134,81 @@ final class MusicMediaKeyPolicy {
 
         void clear() {
             downTimes.clear();
+        }
+    }
+
+    static final class ReceiverFallback {
+        static final long TIMEOUT_MS = 2_000;
+
+        final long downTimeMs;
+        private final Map<Object, Integer> initialStates = new HashMap<>();
+        private boolean originalUp;
+        private boolean dispatched;
+        private String cancelReason = "";
+
+        ReceiverFallback(long downTimeMs, Map<?, Integer> initialStates) {
+            this.downTimeMs = downTimeMs;
+            if (initialStates != null) this.initialStates.putAll(initialStates);
+        }
+
+        boolean originalUp(long eventTimeMs) {
+            originalUp = true;
+            if (eventTimeMs >= downTimeMs && eventTimeMs - downTimeMs >= TIMEOUT_MS) {
+                return cancel("key_held");
+            }
+            return false;
+        }
+
+        boolean observeSessions(Map<?, Integer> states) {
+            if (!isActive()) return false;
+            Map<Object, Integer> current = new HashMap<>();
+            if (states != null) current.putAll(states);
+            for (Object token : initialStates.keySet()) {
+                if (!current.containsKey(token)) return cancel("session_destroyed");
+            }
+            for (Object token : current.keySet()) {
+                if (!initialStates.containsKey(token)) return cancel("session_appeared");
+            }
+            for (Object token : initialStates.keySet()) {
+                if (!java.util.Objects.equals(initialStates.get(token), current.get(token))) {
+                    return cancel("playback_state_change");
+                }
+            }
+            return false;
+        }
+
+        boolean observePlaybackState(Object token, Integer state) {
+            if (!isActive()) return false;
+            if (!initialStates.containsKey(token)) return cancel("session_appeared");
+            if (!java.util.Objects.equals(initialStates.get(token), state)) {
+                return cancel("playback_state_change");
+            }
+            return false;
+        }
+
+        boolean cancel(String reason) {
+            if (!isActive()) return false;
+            cancelReason = reason == null || reason.isEmpty() ? "cancelled" : reason;
+            return true;
+        }
+
+        boolean shouldDispatch(long nowMs) {
+            return isActive() && originalUp && nowMs >= downTimeMs
+                    && nowMs - downTimeMs >= TIMEOUT_MS;
+        }
+
+        boolean markDispatched(long nowMs) {
+            if (!shouldDispatch(nowMs)) return false;
+            dispatched = true;
+            return true;
+        }
+
+        boolean isActive() {
+            return cancelReason.isEmpty() && !dispatched;
+        }
+
+        String cancelReason() {
+            return cancelReason;
         }
     }
 }

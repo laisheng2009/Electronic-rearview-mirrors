@@ -90,8 +90,11 @@ public final class CameraFrameRateTest {
         assertTrue(helper.contains("collectStatsForWindow(requestedFrameRate)"));
         assertTrue(helper.contains("\"new_buffer_fps_valid\", stats.producerTimestampInvalid == 0"));
         String screen = source("kotlin/com/byd/extend/ui/SettingsScreen.kt");
-        assertTrue(screen.indexOf("row(\"quality\")") < screen.indexOf("row(\"frame-rate\")"));
-        assertTrue(screen.indexOf("row(\"frame-rate\")") < screen.indexOf("row(\"corner-radius\")"));
+        assertFalse(screen.contains("row(\"frame-rate-title\")"));
+        assertFalse(screen.contains("row(\"frame-rate\")"));
+        assertFalse(screen.contains("SelectionId.CameraFrameRate"));
+        assertTrue(screen.contains("row(\"quality\")"));
+        assertTrue(screen.indexOf("row(\"quality\")") < screen.indexOf("row(\"corner-radius\")"));
     }
 
     private static String source(String relative) throws Exception {

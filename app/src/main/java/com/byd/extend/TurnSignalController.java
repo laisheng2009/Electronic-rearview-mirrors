@@ -113,6 +113,7 @@ final class TurnSignalController {
     private IBinder.DeathRecipient cameraHelperDeathRecipient;
     private IBinder.DeathRecipient avmShellDeathRecipient;
     private long cameraHelperEpoch;
+    private volatile long cameraHelperInvalidationGeneration;
     private long avmShellEpoch;
     private volatile int stockAvmRetryRequestId;
     private volatile int stockAvmRetryAttempt;
@@ -872,7 +873,9 @@ final class TurnSignalController {
         if (spec == null || surfaceSink == null || preparedSink == null) {
             throw new IllegalArgumentException("overlay spec/sinks required");
         }
+        long shellGeneration = cameraHelperInvalidationGeneration;
         worker.execute(() -> {
+            if (!isCurrentCameraShellGeneration(shellGeneration)) return;
             PendingOverlay pending = new PendingOverlay(spec.cameraId, spec.requestId, surfaceSink);
             pendingOverlays[spec.cameraId] = pending;
             IBinder value = null;
@@ -908,10 +911,12 @@ final class TurnSignalController {
                     throw new IllegalStateException("main handler rejected overlay prepare");
                 }
             } catch (Throwable error) {
-                clearPendingOverlaySurface(spec.cameraId, spec.requestId);
+                if (!isCurrentPendingOverlay(pending)) return;
                 if (!transactionComplete && value != null && !cameraPing(value)) {
                     cameraHelperLost(value, epoch, summary(error));
+                    if (!isCurrentPendingOverlay(pending)) return;
                 }
+                clearPendingOverlaySurface(spec.cameraId, spec.requestId);
                 emit("camera_overlay_error", "stage", "prepare",
                         "camera_id", spec.cameraId,
                         "request_id", spec.requestId, "error", summary(error));
@@ -939,8 +944,18 @@ final class TurnSignalController {
                 && pendingOverlays[pending.cameraId()] == pending;
     }
 
+    private boolean isCurrentCameraShellGeneration(long generation) {
+        return !stopped && cameraHelperInvalidationGeneration == generation;
+    }
+
     private boolean isCurrentPendingReverse(int requestId) {
         return !stopped && requestId > 0 && pendingReverseRequestId == requestId;
+    }
+
+    private boolean isCurrentPendingReverse(
+            int requestId, Consumer<ReverseSurfaces> sink) {
+        return isCurrentPendingReverse(requestId) && sink != null
+                && pendingReverseSurfaceSink == sink;
     }
 
     void setCameraOverlayVisible(
@@ -1024,7 +1039,9 @@ final class TurnSignalController {
         if (spec == null || surfaceSink == null || preparedSink == null) {
             throw new IllegalArgumentException("reverse spec/sinks required");
         }
+        long shellGeneration = cameraHelperInvalidationGeneration;
         worker.execute(() -> {
+            if (!isCurrentCameraShellGeneration(shellGeneration)) return;
             clearPendingBlindOverlays();
             pendingReverseRequestId = spec.requestId;
             pendingReverseSurfaceSink = surfaceSink;
@@ -1061,10 +1078,12 @@ final class TurnSignalController {
                     throw new IllegalStateException("main handler rejected reverse prepare");
                 }
             } catch (Throwable error) {
-                clearPendingReverseSurfaces(spec.requestId);
+                if (!isCurrentPendingReverse(spec.requestId, surfaceSink)) return;
                 if (!transactionComplete && value != null && !cameraPing(value)) {
                     cameraHelperLost(value, epoch, summary(error));
+                    if (!isCurrentPendingReverse(spec.requestId, surfaceSink)) return;
                 }
+                clearPendingReverseSurfaces(spec.requestId);
                 emit("reverse_overlay_error", "stage", "prepare",
                         "request_id", spec.requestId, "error", summary(error));
             }
@@ -2492,20 +2511,25 @@ final class TurnSignalController {
     private IBinder restartCameraHelper(
             IBinder expected, long expectedEpoch, String reason) throws Exception {
         if (stopped) throw new IllegalStateException("camera shell restart cancelled");
-        try {
-            if (cameraPing(expected)) {
-                try {
-                    transactCameraNoArgs(expected, CameraShellProtocol.TX_SHUTDOWN);
-                } catch (Throwable error) {
-                    // A dead or already-stopped shell must not block the fresh replacement.
-                    emit("shell_shutdown_failed", "helper", "camera",
-                            "error", summary(error));
-                }
+        if (cameraPing(expected)) {
+            try {
+                transactCameraNoArgs(expected, CameraShellProtocol.TX_SHUTDOWN);
+            } catch (Throwable error) {
+                // A dead or already-stopped shell must not block the fresh replacement.
+                emit("shell_shutdown_failed", "helper", "camera",
+                        "error", summary(error));
             }
-        } finally {
-            clearCameraHelper(expected, expectedEpoch);
         }
-        IBinder value = ensureCameraHelper(true, expected);
+        cameraHelperLost(expected, expectedEpoch,
+                "planned camera shell restart: " + reason, true);
+        final IBinder value;
+        try {
+            value = ensureCameraHelper(true, expected);
+        } catch (Throwable error) {
+            emit("camera_shell_recovery_failed", "planned_restart", true,
+                    "camera_shell_epoch", expectedEpoch, "error", summary(error));
+            throw error;
+        }
         long epoch = cameraHelperEpoch(value);
         emit("camera_shell_restarted", "reason", reason,
                 "camera_shell_epoch", epoch);
@@ -3052,6 +3076,7 @@ final class TurnSignalController {
                 || requestId != pending.requestId || reportedGeneration <= 0) {
             return;
         }
+        boolean pendingCleared = false;
         try {
             IBinder value = cameraHelper;
             long currentEpoch = cameraHelperEpoch(value);
@@ -3071,11 +3096,14 @@ final class TurnSignalController {
                 throw new IllegalStateException("overlay Surface generation changed");
             }
             clearPendingOverlaySurface(cameraId, requestId);
+            pendingCleared = true;
             if (!handler.post(() -> pending.sink.accept(result))) {
                 result.surface.release();
                 throw new IllegalStateException("main handler rejected overlay Surface");
             }
         } catch (Throwable error) {
+            if (pendingOverlays[cameraId] != pending
+                    && !(pendingCleared && pendingOverlays[cameraId] == null)) return;
             clearPendingOverlaySurface(cameraId, requestId);
             emit("camera_overlay_error", "stage", "acquire_surface",
                     "camera_id", cameraId, "request_id", requestId,
@@ -3112,6 +3140,7 @@ final class TurnSignalController {
     private void acquireReverseSurfaces(int requestId, boolean forceTabletFallback) {
         Consumer<ReverseSurfaces> sink = pendingReverseSurfaceSink;
         if (sink == null || requestId != pendingReverseRequestId) return;
+        boolean pendingCleared = false;
         try {
             IBinder value = cameraHelper;
             long currentEpoch = cameraHelperEpoch(value);
@@ -3128,11 +3157,15 @@ final class TurnSignalController {
             ReverseSurfaces result = transactReverseAcquire(
                     value, requestId, pendingReverseClusterExpected, forceTabletFallback);
             clearPendingReverseSurfaces(requestId);
+            pendingCleared = true;
             if (!handler.post(() -> sink.accept(result))) {
                 releaseSurfaces(result.surfaces);
                 throw new IllegalStateException("main handler rejected reverse Surfaces");
             }
         } catch (Throwable error) {
+            if ((pendingReverseSurfaceSink != sink
+                    || !isCurrentPendingReverse(requestId))
+                    && !(pendingCleared && pendingReverseSurfaceSink == null)) return;
             clearPendingReverseSurfaces(requestId);
             emit("reverse_overlay_error", "stage", "acquire_surfaces",
                     "request_id", requestId, "error", summary(error));
@@ -3559,7 +3592,13 @@ final class TurnSignalController {
     }
 
     private void cameraHelperLost(IBinder value, long epoch, String error) {
+        cameraHelperLost(value, epoch, error, false);
+    }
+
+    private void cameraHelperLost(
+            IBinder value, long epoch, String error, boolean plannedRestart) {
         if (!clearCameraHelper(value, epoch)) return;
+        cameraHelperInvalidationGeneration++;
         int[] overlayRequestIds = pendingOverlayRequestIds();
         int reverseRequestId = pendingReverseRequestId;
         clearPendingOverlays();
@@ -3570,6 +3609,7 @@ final class TurnSignalController {
         pendingReverseClusterExpected = false;
         emit("camera_shell_died",
                 "camera_shell_epoch", epoch,
+                "planned_restart", plannedRestart,
                 "pending_overlay_request_ids", Arrays.toString(overlayRequestIds),
                 "pending_reverse_request_id", reverseRequestId,
                 "error", error == null ? "camera helper unavailable" : error);

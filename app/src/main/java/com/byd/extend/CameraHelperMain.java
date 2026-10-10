@@ -4823,7 +4823,9 @@ final class CameraHelperMain {
             emit(kind, forwarded);
             if ("camera_shell_died".equals(kind)) {
                 cameraShellDiedCleanup();
-                turnController.recoverCameraHelper();
+                if (!Boolean.parseBoolean(fieldString(forwarded, "planned_restart"))) {
+                    turnController.recoverCameraHelper();
+                }
             } else if ("stock_avm_shell_died".equals(kind)) {
                 if (!hasReverseStockContext() || isCurrentReverseStockDeath(forwarded)) {
                     stockAvmShellDiedCleanup();

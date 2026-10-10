@@ -19,6 +19,7 @@ import android.media.session.PlaybackState;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.view.KeyEvent;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -98,6 +99,7 @@ final class MusicMetadataRuntime {
     private final MediaSessionManager.OnActiveSessionsChangedListener sessionListener;
     private final Runnable publishRunnable = this::publishSelectedSession;
     private final Runnable progressRunnable = this::refreshPlayingProgress;
+    private final Runnable receiverFallbackRunnable = this::onReceiverFallbackTimeout;
 
     private MediaSessionManager sessionManager;
     private Context mediaContext;
@@ -124,6 +126,7 @@ final class MusicMetadataRuntime {
     private String lastMetadataFingerprint = "";
     private String error = "";
     private WriteRequest queuedWrite;
+    private ReceiverFallbackAttempt receiverFallback;
 
     MusicMetadataRuntime(
             Context context, Handler handler, BiConsumer<String, Object[]> eventSink,
@@ -141,8 +144,22 @@ final class MusicMetadataRuntime {
         this.handler = handler;
         this.eventSink = eventSink;
         this.eventReconciler = eventReconciler;
-        sessionListener = controllers -> eventReconciler.accept("sessions_callback",
-                () -> replaceSessions(controllers, "sessions_callback"));
+        sessionListener = controllers -> {
+            try {
+                observeReceiverFallbackSessions(controllers);
+                eventReconciler.accept("sessions_callback", () -> {
+                    try {
+                        replaceSessions(controllers, "sessions_callback");
+                    } catch (Throwable failure) {
+                        cancelReceiverFallback("session_observation_error");
+                        setError("session_callback: " + summary(failure), "sessions_callback");
+                    }
+                });
+            } catch (Throwable failure) {
+                cancelReceiverFallback("session_observation_error");
+                setError("session_callback: " + summary(failure), "sessions_callback");
+            }
+        };
         this.audioManager = audioManager;
         this.activityManager = activityManager;
     }
@@ -163,6 +180,7 @@ final class MusicMetadataRuntime {
             if (captureFocusOnOpen == value) return;
             captureFocusOnOpen = value;
             if (!value) {
+                cancelReceiverFallback("capture_disabled");
                 releaseAllMediaKeys("capture_disabled");
                 mediaSelection.clear();
             }
@@ -189,6 +207,7 @@ final class MusicMetadataRuntime {
                 || isLiveMediaProcess(candidate, true) && mediaReceiver(candidate) != null;
         mediaSelection.opened(candidate, capable);
         if (!previous.equals(mediaSelection.player)) {
+            cancelReceiverFallback("target_changed");
             emit("music_media_target", "package", mediaSelection.player, "previous", previous);
         }
     }
@@ -286,16 +305,19 @@ final class MusicMetadataRuntime {
             if (action == android.view.KeyEvent.ACTION_UP) {
                 if (pending == null || pending.downTime != downTime) return false;
                 pendingMediaKeys.remove(keyCode);
-                dispatchPendingMediaKey(pending,
+                boolean dispatched = dispatchPendingMediaKey(pending,
                         android.view.KeyEvent.ACTION_UP, 0, downTime, eventTime);
+                completeReceiverFallbackOriginalUp(pending, dispatched, eventTime);
                 return true;
             }
             if (repeatCount > 0) {
+                cancelReceiverFallback("key_repeat");
                 if (pending == null || pending.downTime != downTime) return false;
                 dispatchPendingMediaKey(pending,
                         android.view.KeyEvent.ACTION_DOWN, repeatCount, downTime, eventTime);
                 return true;
             }
+            cancelReceiverFallback("new_media_press");
             if (pending != null) {
                 pendingMediaKeys.remove(keyCode);
                 releaseMediaKey(pending, eventTime);
@@ -306,8 +328,9 @@ final class MusicMetadataRuntime {
             mediaSelection.opened(foregroundPackage, false);
             considerOpenedPlayer();
             SessionBinding target = controlSession(mediaSelection.player, keyCode);
+            boolean sessionObservationAvailable = true;
             if (mediaSelection.needsSessionRefresh(target != null)) {
-                refreshSessions("media_key");
+                sessionObservationAvailable = refreshSessionsOnHandler("media_key");
                 considerOpenedPlayer();
                 target = controlSession(mediaSelection.player, keyCode);
             }
@@ -323,11 +346,25 @@ final class MusicMetadataRuntime {
             if (target == null && receiver == null) {
                 return mediaKeyDecision(rawKeyCode, false, "no_supported_endpoint");
             }
+            Map<Object, Integer> initialStates = null;
+            boolean receiverFallbackEligible = receiver != null
+                    && MusicMediaKeyPolicy.supportsReceiverFallback(keyCode);
+            if (receiverFallbackEligible && sessionObservationAvailable) {
+                try {
+                    initialStates = receiverPlaybackStates(packageName);
+                } catch (Throwable failure) {
+                    sessionObservationAvailable = false;
+                    setError("media_key_session_state: " + summary(failure), "media_key");
+                }
+            }
             PendingMediaKey selected = new PendingMediaKey(target, receiver, packageName, keyCode, downTime);
             if (!dispatchPendingMediaKey(selected, android.view.KeyEvent.ACTION_DOWN, 0, downTime, eventTime)) {
                 return mediaKeyDecision(rawKeyCode, false, "dispatch_rejected");
             }
             pendingMediaKeys.put(keyCode, selected);
+            if (receiverFallbackEligible && sessionObservationAvailable) {
+                startReceiverFallback(selected, initialStates);
+            }
             return mediaKeyDecision(rawKeyCode, true, target == null ? "receiver" : "session");
         } catch (Throwable failure) {
             return mediaKeyDecision(rawKeyCode, false, "dispatch_error:" + summary(failure));
@@ -342,31 +379,214 @@ final class MusicMetadataRuntime {
 
     private boolean dispatchPendingMediaKey(PendingMediaKey pending, int action, int repeats,
             long downTime, long eventTime) {
-        boolean accepted = false;
+        boolean dispatched = false;
         String failure = "";
         try {
             android.view.KeyEvent key = new android.view.KeyEvent(
                     downTime, eventTime, action, pending.keyCode, repeats);
             if (pending.binding != null && !pending.binding.destroyed) {
-                accepted = pending.binding.controller.dispatchMediaButtonEvent(key);
-                if (!accepted) failure = "session_rejected";
+                dispatched = pending.binding.controller.dispatchMediaButtonEvent(key);
+                if (!dispatched) failure = "session_rejected";
             } else if (pending.binding == null && pending.receiver != null
                     && mediaContext != null && isLiveMediaProcess(pending.packageName, false)) {
                 mediaContext.sendBroadcast(new Intent(Intent.ACTION_MEDIA_BUTTON)
                         .setComponent(pending.receiver).putExtra(Intent.EXTRA_KEY_EVENT, key));
-                accepted = true;
+                dispatched = true;
             } else failure = "endpoint_unavailable";
         } catch (Throwable problem) {
             failure = summary(problem);
         }
-        if (repeats == 0 || !accepted) emit("music_media_key_dispatch",
+        if (repeats == 0 || !dispatched) emit("music_media_key_dispatch",
                 "endpoint", pending.binding != null ? "session" : "receiver",
                 "target", pending.packageName, "receiver", pending.receiver == null ? ""
                         : pending.receiver.flattenToShortString(),
                 "caller_package", mediaContext == null ? "" : mediaContext.getPackageName(),
                 "caller_uid", android.os.Process.myUid(), "key_code", pending.keyCode,
-                "action", action, "accepted", accepted, "error", failure);
-        return accepted;
+                "action", action, "accepted", dispatched, "dispatched", dispatched,
+                "delivery", pending.binding != null ? "session_api" : "broadcast_enqueued_only",
+                "acknowledged", false,
+                "error", failure);
+        return dispatched;
+    }
+
+    private Map<Object, Integer> receiverPlaybackStates(String packageName) throws Throwable {
+        Map<Object, Integer> states = new HashMap<>();
+        for (SessionBinding binding : new ArrayList<>(sessions.values())) {
+            if (binding.destroyed || !binding.packageName.equals(packageName)) continue;
+            PlaybackState state = binding.controller.getPlaybackState();
+            binding.playbackState = state;
+            states.put(binding.token, state == null ? null : state.getState());
+        }
+        return states;
+    }
+
+    private void observeReceiverFallbackSessions(List<MediaController> controllers) {
+        ReceiverFallbackAttempt attempt = receiverFallback;
+        if (attempt == null || !attempt.policy.isActive()) return;
+        if (controllers == null) {
+            cancelReceiverFallback("session_observation_error");
+            return;
+        }
+        Map<Object, Integer> states = new HashMap<>();
+        try {
+            for (MediaController controller : controllers) {
+                if (controller == null) continue;
+                String packageName = controller.getPackageName();
+                if (!attempt.packageName.equals(packageName)) continue;
+                MediaSession.Token token = controller.getSessionToken();
+                if (token == null) throw new IllegalStateException("Session token unavailable");
+                PlaybackState state = controller.getPlaybackState();
+                SessionBinding binding = sessions.get(token);
+                if (binding != null) binding.playbackState = state;
+                states.put(token, state == null ? null : state.getState());
+            }
+        } catch (Throwable failure) {
+            cancelReceiverFallback("session_observation_error");
+            setError("media_key_session_observation: " + summary(failure), "media_key_fallback");
+            return;
+        }
+        if (attempt.policy.observeSessions(states)) {
+            finishReceiverFallback(attempt, "observed_response", attempt.policy.cancelReason());
+        }
+    }
+
+    private void observeReceiverFallbackPlaybackState(SessionBinding binding, PlaybackState state) {
+        ReceiverFallbackAttempt attempt = receiverFallback;
+        if (attempt == null || !attempt.packageName.equals(binding.packageName)) return;
+        Integer stateValue = state == null ? null : state.getState();
+        if (attempt.policy.observePlaybackState(binding.token, stateValue)) {
+            finishReceiverFallback(attempt, "observed_response", attempt.policy.cancelReason());
+        }
+    }
+
+    private void observeReceiverFallbackSessionDestroyed(SessionBinding binding) {
+        ReceiverFallbackAttempt attempt = receiverFallback;
+        if (attempt == null || !attempt.packageName.equals(binding.packageName)) return;
+        if (attempt.policy.cancel("session_destroyed")) {
+            finishReceiverFallback(attempt, "observed_response", "session_destroyed");
+        }
+    }
+
+    private void startReceiverFallback(PendingMediaKey pending, Map<Object, Integer> initialStates) {
+        ReceiverFallbackAttempt attempt = new ReceiverFallbackAttempt(
+                pending.packageName, pending.receiver, pending.keyCode, pending.downTime,
+                initialStates);
+        receiverFallback = attempt;
+        emit("music_media_receiver_fallback", "event", "attempt",
+                "target", attempt.packageName,
+                "receiver", attempt.receiver.flattenToShortString(),
+                "key_code", pending.keyCode,
+                "fallback_key_code", KeyEvent.KEYCODE_HEADSETHOOK,
+                "timeout_ms", MusicMediaKeyPolicy.ReceiverFallback.TIMEOUT_MS);
+        long elapsed = Math.max(0L, SystemClock.uptimeMillis() - pending.downTime);
+        long delay = Math.max(0L, MusicMediaKeyPolicy.ReceiverFallback.TIMEOUT_MS - elapsed);
+        if (!handler.postDelayed(receiverFallbackRunnable, delay)) {
+            cancelReceiverFallback("timer_unavailable");
+        }
+    }
+
+    private void completeReceiverFallbackOriginalUp(PendingMediaKey pending, boolean dispatched,
+            long eventTime) {
+        ReceiverFallbackAttempt attempt = receiverFallback;
+        if (attempt == null || attempt.downTimeMs != pending.downTime
+                || attempt.keyCode != pending.keyCode
+                || !attempt.packageName.equals(pending.packageName)) return;
+        if (!dispatched) {
+            cancelReceiverFallback(isLiveMediaProcess(attempt.packageName, false)
+                    ? "original_up_not_dispatched" : "player_process_dead");
+            return;
+        }
+        if (attempt.policy.originalUp(eventTime)) {
+            finishReceiverFallback(attempt, "cancelled", attempt.policy.cancelReason());
+            return;
+        }
+        if (attempt.policy.shouldDispatch(SystemClock.uptimeMillis())) onReceiverFallbackTimeout();
+    }
+
+    private void onReceiverFallbackTimeout() {
+        ReceiverFallbackAttempt attempt = receiverFallback;
+        if (attempt == null || !attempt.policy.shouldDispatch(SystemClock.uptimeMillis())) return;
+        if (!enabled || !awake || !observersStarted || sessionManager == null) {
+            cancelReceiverFallback("observer_unavailable");
+            return;
+        }
+        if (!isLiveMediaProcess(attempt.packageName, false)) {
+            cancelReceiverFallback("player_process_dead");
+            return;
+        }
+        try {
+            List<MediaController> active = sessionManager.getActiveSessions(null);
+            if (active == null) throw new IllegalStateException("Active sessions unavailable");
+            observeReceiverFallbackSessions(active);
+            if (receiverFallback != attempt) return;
+            replaceSessions(active, "media_key_fallback_check");
+        } catch (Throwable failure) {
+            cancelReceiverFallback("session_observation_error");
+            setError("media_key_fallback_refresh: " + summary(failure), "media_key_fallback");
+            return;
+        }
+        if (receiverFallback != attempt) return;
+        if (hasUsableObservedSession(attempt.packageName, attempt.keyCode)) {
+            if (attempt.policy.cancel("session_usable")) {
+                finishReceiverFallback(attempt, "observed_response", "session_usable");
+            }
+            return;
+        }
+        if (!isLiveMediaProcess(attempt.packageName, false)) {
+            cancelReceiverFallback("player_process_dead");
+            return;
+        }
+        if (!attempt.packageName.equals(mediaSelection.player)) {
+            cancelReceiverFallback("target_changed");
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (!attempt.policy.markDispatched(now)) return;
+        PendingMediaKey fallback = new PendingMediaKey(null, attempt.receiver,
+                attempt.packageName, KeyEvent.KEYCODE_HEADSETHOOK, now);
+        boolean downDispatched = dispatchPendingMediaKey(
+                fallback, KeyEvent.ACTION_DOWN, 0, now, now);
+        if (!downDispatched) {
+            finishReceiverFallback(attempt, "cancelled",
+                    isLiveMediaProcess(attempt.packageName, false)
+                            ? "fallback_down_not_dispatched" : "player_process_dead");
+            return;
+        }
+        boolean upDispatched = dispatchPendingMediaKey(
+                fallback, KeyEvent.ACTION_UP, 0, now, now + 1);
+        finishReceiverFallback(attempt, "79_dispatched",
+                "down=true,up=" + upDispatched);
+    }
+
+    private boolean hasUsableObservedSession(String packageName, int keyCode) {
+        for (SessionBinding binding : sessions.values()) {
+            if (binding.destroyed || !binding.packageName.equals(packageName)) continue;
+            PlaybackState state = binding.playbackState;
+            long actions = state == null ? 0 : state.getActions();
+            if (MusicMediaKeyPolicy.isPlayer(actions)
+                    && MusicMediaKeyPolicy.supports(actions, keyCode)) return true;
+        }
+        return false;
+    }
+
+    private void cancelReceiverFallback(String reason) {
+        ReceiverFallbackAttempt attempt = receiverFallback;
+        if (attempt == null) return;
+        attempt.policy.cancel(reason);
+        finishReceiverFallback(attempt, "cancelled", attempt.policy.cancelReason());
+    }
+
+    private void finishReceiverFallback(ReceiverFallbackAttempt attempt, String event,
+            String reason) {
+        if (receiverFallback != attempt) return;
+        receiverFallback = null;
+        handler.removeCallbacks(receiverFallbackRunnable);
+        emit("music_media_receiver_fallback", "event", event,
+                "target", attempt.packageName,
+                "receiver", attempt.receiver.flattenToShortString(),
+                "key_code", attempt.keyCode,
+                "fallback_key_code", KeyEvent.KEYCODE_HEADSETHOOK,
+                "reason", reason);
     }
 
     private void releaseMediaKey(PendingMediaKey pending, long eventTime) {
@@ -415,15 +635,23 @@ final class MusicMetadataRuntime {
     }
 
     void refreshSessions(String reason) {
-        runOnHandler(() -> {
-            if (!enabled || !awake || !observersStarted || sessionManager == null) return;
-            try {
-                replaceSessions(sessionManager.getActiveSessions(null), reason);
-                schedulePublish(reason, true);
-            } catch (Throwable failure) {
-                setError("session_refresh: " + summary(failure), reason);
-            }
-        });
+        runOnHandler(() -> refreshSessionsOnHandler(reason));
+    }
+
+    private boolean refreshSessionsOnHandler(String reason) {
+        if (!enabled || !awake || !observersStarted || sessionManager == null) return false;
+        try {
+            List<MediaController> active = sessionManager.getActiveSessions(null);
+            if (active == null) throw new IllegalStateException("Active sessions unavailable");
+            observeReceiverFallbackSessions(active);
+            replaceSessions(active, reason);
+            schedulePublish(reason, true);
+            return true;
+        } catch (Throwable failure) {
+            cancelReceiverFallback("session_observation_error");
+            setError("session_refresh: " + summary(failure), reason);
+            return false;
+        }
     }
 
     void audioPlaybackChanged(String reason) {
@@ -490,6 +718,7 @@ final class MusicMetadataRuntime {
     }
 
     private void stopObservers(String reason, boolean clearCard) {
+        cancelReceiverFallback("observer_stop:" + reason);
         lifecycleGeneration++;
         handler.removeCallbacks(publishRunnable);
         cancelProgressRefresh();
@@ -531,6 +760,7 @@ final class MusicMetadataRuntime {
     }
 
     private void pausePublishing() {
+        cancelReceiverFallback("sleep");
         releaseAllMediaKeys("sleep");
         lifecycleGeneration++;
         handler.removeCallbacks(publishRunnable);
@@ -1130,6 +1360,23 @@ final class MusicMetadataRuntime {
         }
     }
 
+    private static final class ReceiverFallbackAttempt {
+        final String packageName;
+        final ComponentName receiver;
+        final int keyCode;
+        final long downTimeMs;
+        final MusicMediaKeyPolicy.ReceiverFallback policy;
+
+        ReceiverFallbackAttempt(String packageName, ComponentName receiver, int keyCode,
+                long downTimeMs, Map<?, Integer> initialStates) {
+            this.packageName = packageName;
+            this.receiver = receiver;
+            this.keyCode = keyCode;
+            this.downTimeMs = downTimeMs;
+            policy = new MusicMediaKeyPolicy.ReceiverFallback(downTimeMs, initialStates);
+        }
+    }
+
     private final class SessionBinding extends MediaController.Callback {
         final MediaController controller;
         final MediaSession.Token token;
@@ -1205,6 +1452,7 @@ final class MusicMetadataRuntime {
 
         @Override
         public void onPlaybackStateChanged(PlaybackState state) {
+            observeReceiverFallbackPlaybackState(this, state);
             playbackState = state;
             considerOpenedPlayer();
             if (state == null || state.getState() != PlaybackState.STATE_PLAYING) {
@@ -1216,6 +1464,7 @@ final class MusicMetadataRuntime {
 
         @Override
         public void onSessionDestroyed() {
+            observeReceiverFallbackSessionDestroyed(this);
             releaseMediaKeysFor(this, "session_destroyed");
             destroyed = true;
             SessionBinding removed = sessions.remove(token);
