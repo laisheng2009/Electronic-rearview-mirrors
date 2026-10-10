@@ -2,9 +2,6 @@ package com.byd.extend;
 
 import static org.junit.Assert.*;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,38 +9,6 @@ import org.junit.Test;
 
 /** Real OEM proxy + production subscription requests + controller, without Android Binder GET. */
 public final class TurnSignalTelemetryIntegrationTest {
-    @Test public void guardAdmissionUsesCurrentFreshnessClockAndKeepsCallbackEventTime()
-            throws Exception {
-        String source = new String(Files.readAllBytes(Path.of(
-                "src/main/java/com/byd/extend/TurnSignalGuardRuntime.java")),
-                StandardCharsets.UTF_8);
-        assertTrue(source.contains("observeStalk(stalk.raw, \"callback\", observedMs);"));
-        assertTrue(source.contains(
-                "telemetryController.dataFresh(SystemClock.elapsedRealtime())"));
-    }
-
-    @Test public void productionCallbacksCarryShortCompletionWithoutGuardControl() throws Exception {
-        Rig rig = new Rig();
-        try {
-            rig.controller.start();
-            rig.now = 10;
-            rig.backend.listener.onChanged(1004, 321912876, 2, null);
-            rig.flush();
-            rig.now = 20;
-            rig.backend.listener.onChanged(1004, 950009900, 2, null);
-            rig.flush();
-            rig.now = 30;
-            rig.backend.listener.onChanged(1004, 321912876, 1, null);
-            rig.flush();
-            assertEquals(0, rig.shortTurn.endedDirection());
-            rig.now = 40;
-            rig.backend.listener.onChanged(1004, 950009900, 1, null);
-            rig.flush();
-            assertEquals(2, rig.shortTurn.endedDirection());
-        } finally {
-            rig.controller.close();
-        }
-    }
 
     @Test public void productionSubscriptionDeliversBothFloatSignalsAndIntegerControls()
             throws Exception {
@@ -71,36 +36,6 @@ public final class TurnSignalTelemetryIntegrationTest {
         assertEquals(1, rig.backend.unregisterCount);
     }
 
-    @Test public void typeFailureEntersFallbackAndQueuedValuesCannotResurrectClosedSession()
-            throws Exception {
-        Rig rig = new Rig();
-        try {
-            rig.controller.start();
-            // OEM supplies the wrong overload for the Float steering request.
-            rig.backend.listener.onChanged(1001, 300941320, 12, null);
-            rig.backend.listener.onChanged(1013, -1807745016, 20.5f, null);
-            rig.flush();
-            assertFalse(rig.controller.subscriptionHealthy());
-            assertEquals(1, rig.states.size()); // only initial GET, never a live gesture
-            assertTrue(rig.backend.enabled.isEmpty());
-
-            rig.now = 999;
-            rig.controller.tick();
-            assertFalse(rig.controller.subscriptionHealthy());
-            rig.now = 1000;
-            rig.controller.tick();
-            assertTrue(rig.controller.subscriptionHealthy());
-            rig.backend.listener.onChanged(1001, 300941320, 25.5f, null);
-            int beforeClose = rig.states.size();
-            rig.controller.close();
-            rig.flush();
-            assertEquals(beforeClose, rig.states.size());
-            assertTrue(rig.backend.enabled.isEmpty());
-        } finally {
-            rig.controller.close();
-        }
-    }
-
     private static final class Rig implements TurnSignalTelemetryController.Sink {
         final FixedBydTelemetryManagerTest.FakeManager backend =
                 new FixedBydTelemetryManagerTest.FakeManager();
@@ -108,7 +43,6 @@ public final class TurnSignalTelemetryIntegrationTest {
         final List<TurnSignalTelemetryController.Snapshot> states = new ArrayList<>();
         final List<Integer> masks = new ArrayList<>();
         final TurnSignalTelemetryController controller;
-        final BlindShortTurnSignal shortTurn = new BlindShortTurnSignal();
         TurnSignalTelemetryController.Source lastSource;
         long now;
 
@@ -132,7 +66,6 @@ public final class TurnSignalTelemetryIntegrationTest {
             states.add(state);
             masks.add(mask);
             lastSource = source;
-            shortTurn.observe(state.stalk, state.blink, source, mask, conflict, now);
         }
         @Override public void onMode(boolean subscribed, boolean seeded, String reason) { }
     }

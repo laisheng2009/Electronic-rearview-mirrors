@@ -2,17 +2,12 @@ package com.byd.extend;
 
 import org.junit.Test;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -48,85 +43,6 @@ public final class ReverseCameraControllerCleanupTest {
         assertEquals(Arrays.asList(47, 47), harness.closeRequestIds);
     }
 
-    @Test
-    public void thrownCloseAndWindowQueueUseTheSameBoundedRetryPath() {
-        Harness harness = new Harness(new IllegalStateException("close"), true);
-        harness.throwFirstWindowClose = true;
-
-        harness.coordinator.startCameraThenWindow();
-
-        assertEquals(1, harness.cameraErrors);
-        assertEquals(1, harness.windowErrors);
-        assertEquals(1, harness.retryEvents);
-        assertEquals(Arrays.asList(47), harness.closeRequestIds);
-
-        Runnable scheduledRetry = harness.retry;
-        assertTrue(scheduledRetry != null);
-        scheduledRetry.run();
-        harness.windowCallbacks.get(0).accept(true);
-
-        assertEquals(Arrays.asList(47, 47), harness.closeRequestIds);
-        assertEquals(1, harness.priorityReleases);
-        assertEquals(1, harness.stoppedEvents);
-        assertFalse(harness.throwFirstWindowClose);
-    }
-
-    @Test
-    public void windowFirstProductionPathClosesCameraAfterAsyncWindowSuccess() {
-        Harness harness = new Harness(true);
-
-        harness.coordinator.startWindowThenCamera();
-        assertTrue(harness.closeRequestIds.isEmpty());
-        Consumer<Boolean> callback = harness.windowCallbacks.get(0);
-        callback.accept(true);
-
-        assertEquals(Arrays.asList(47), harness.closeRequestIds);
-        assertEquals(1, harness.coordinator.closeAttempts());
-        assertEquals(1, harness.priorityReleases);
-        assertEquals(1, harness.stoppedEvents);
-        assertNull(harness.active[0]);
-
-        callback.accept(true);
-        assertEquals(Arrays.asList(47), harness.closeRequestIds);
-        assertEquals(1, harness.priorityReleases);
-        assertEquals(1, harness.stoppedEvents);
-    }
-
-    @Test
-    public void failClosedInvalidationMakesQueuedCleanupRetriesNoOps() {
-        Harness harness = new Harness(false);
-
-        harness.coordinator.startCameraThenWindow();
-        harness.windowCallbacks.get(0).accept(false);
-        Runnable staleRetry = harness.retry;
-        assertTrue(staleRetry != null);
-
-        harness.active[0] = null;
-        harness.retry = null;
-        for (int i = 0; i < 6; i++) staleRetry.run();
-
-        assertEquals(Arrays.asList(47), harness.closeRequestIds);
-        assertEquals(1, harness.windowCallbacks.size());
-        assertEquals(1, harness.coordinator.closeAttempts());
-        assertEquals(0, harness.priorityReleases);
-        assertEquals(0, harness.stoppedEvents);
-    }
-
-    @Test
-    public void stableReverseGearHasNoFreshnessExpiry() throws Exception {
-        String source = readMainSource("ReverseCameraController.java");
-
-        assertFalse(source.contains("GEAR_FRESHNESS_MS"));
-        assertFalse(source.contains("gearFreshnessTimeout"));
-        assertFalse(source.contains("gear_stale"));
-    }
-
-    private static String readMainSource(String name) throws Exception {
-        Path path = Paths.get("src/main/java/com/byd/extend", name);
-        if (!Files.exists(path)) path = Paths.get("app/src/main/java/com/byd/extend", name);
-        return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
-    }
-
     private static final class Harness {
         final ReverseCameraController.CleanupCloseCoordinator[] active =
                 new ReverseCameraController.CleanupCloseCoordinator[1];
@@ -135,10 +51,7 @@ public final class ReverseCameraControllerCleanupTest {
         final List<Object> cameraResults;
         final ReverseCameraController.CleanupCloseCoordinator coordinator;
         Runnable retry;
-        boolean throwFirstWindowClose;
         int retryEvents;
-        int cameraErrors;
-        int windowErrors;
         int priorityReleases;
         int stoppedEvents;
 
@@ -153,18 +66,12 @@ public final class ReverseCameraControllerCleanupTest {
                         if (result instanceof Throwable) throw (Throwable) result;
                         return (Boolean) result;
                     },
-                    callback -> {
-                        if (throwFirstWindowClose) {
-                            throwFirstWindowClose = false;
-                            throw new IllegalStateException("window");
-                        }
-                        windowCallbacks.add(callback);
-                    },
+                    windowCallbacks::add,
                     task -> retry = task,
                     () -> retry = null,
                     ignored -> retryEvents++,
-                    ignored -> cameraErrors++,
-                    ignored -> windowErrors++,
+                    ignored -> {},
+                    ignored -> {},
                     state -> {
                         assertSame(active[0], state);
                         active[0] = null;

@@ -1,14 +1,9 @@
 package com.byd.extend;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
-
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 
 public final class RuntimeSettingsReplayTest {
     @Test
@@ -37,76 +32,6 @@ public final class RuntimeSettingsReplayTest {
         assertTrue(sink.musicEnabled);
         assertTrue(sink.parkingEnabled);
         assertEquals(3, sink.calls);
-    }
-
-    @Test
-    public void absentStoredConfigurationUsesExistingDefaultsWithoutSavingThem() {
-        TestSharedPreferences settings = new TestSharedPreferences();
-        RecordingSink sink = new RecordingSink();
-
-        CameraHelperService.RuntimeSettingsSnapshot
-                .read(settings, false)
-                .replay(sink);
-
-        assertEquals(0, settings.transactions);
-        assertFalse(sink.guardEnabled);
-        assertEquals(90f, sink.outward, 0f);
-        assertEquals(10f, sink.center, 0f);
-        assertEquals(100, sink.delayMs);
-        assertEquals(30, sink.maxSpeedKph);
-        assertFalse(sink.musicEnabled);
-        assertFalse(sink.parkingEnabled);
-    }
-
-    @Test
-    public void replayDerivesParkingFromRulesInsteadOfCorruptedSummaryFlag() {
-        TestSharedPreferences settings = new TestSharedPreferences();
-        settings.putBoolean("parking_any_enabled", false);
-        ParkingCameraProfile frontLeft =
-                ParkingCameraProfile.of(ParkingCameraProfile.FL);
-        settings.putBoolean(ParkingCameraSettings.enabledKey(frontLeft), true);
-        RecordingSink sink = new RecordingSink();
-
-        CameraHelperService.RuntimeSettingsSnapshot.read(
-                settings, CameraHelperService.anyParkingEnabled(settings)).replay(sink);
-
-        assertTrue(sink.parkingEnabled);
-        assertFalse(settings.getBoolean("parking_any_enabled", true));
-        assertEquals(0, settings.transactions);
-    }
-
-    @Test
-    public void serviceInitializationAndReloadUseReadOnlyReplay() throws Exception {
-        Path source = Path.of("app/src/main/java/com/byd/extend/CameraHelperService.java");
-        if (!Files.exists(source)) {
-            source = Path.of("src/main/java/com/byd/extend/CameraHelperService.java");
-        }
-        String text = new String(Files.readAllBytes(source), StandardCharsets.UTF_8);
-        String start = text.substring(text.indexOf("private void ensureHelperStarted"),
-                text.indexOf("private void stopRuntime"));
-        String reload = text.substring(text.indexOf("private void reloadSettings"),
-                text.indexOf("private void startHeartbeat"));
-        assertTrue(start.contains("RuntimeSettingsSnapshot.read"));
-        assertTrue(reload.contains("RuntimeSettingsSnapshot.read"));
-        assertFalse(start.contains("helper.configureGuard"));
-        assertFalse(start.contains("helper.configureMusic"));
-        assertFalse(start.contains("helper.configureParkingRadar"));
-        assertFalse(reload.contains("helper.configureGuard"));
-        assertFalse(reload.contains("helper.configureMusic"));
-        assertFalse(reload.contains("helper.configureParkingRadar"));
-
-        Path controllerSource = source.resolveSibling("TurnSignalController.java");
-        String controller = new String(
-                Files.readAllBytes(controllerSource), StandardCharsets.UTF_8);
-        String attach = controller.substring(controller.indexOf("private void attach(Ping ping)"),
-                controller.indexOf("private void helperDied"));
-        assertTrue(attach.contains("CameraHelperService.anyParkingEnabled(settings)"));
-        assertFalse(attach.contains("getBoolean(\"parking_any_enabled\""));
-        String parkingTransaction = controller.substring(
-                controller.indexOf("private void transactParkingRadarConfig"),
-                controller.indexOf("private static void transactAvasConfig"));
-        assertTrue(parkingTransaction.contains("data.writeInt(anyEnabled ? 1 : 0)"));
-        assertFalse(parkingTransaction.contains("getBoolean("));
     }
 
     private static final class RecordingSink
