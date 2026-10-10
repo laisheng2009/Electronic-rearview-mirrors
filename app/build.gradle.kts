@@ -23,8 +23,8 @@ android {
         applicationId = "com.byd.extend"
         minSdk = 26
         targetSdk = 29
-        versionCode = 114
-        versionName = "1.6.1"
+        versionCode = 115
+        versionName = "1.6.2"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",

@@ -676,9 +676,7 @@ final class CameraHelperMain {
             Object opened = null;
             try {
                 Class<?> avm = Class.forName("android.hardware.AVMCamera");
-                opened = avm.getMethod("open", int.class).invoke(null, requestedCameraId);
-                if (opened == null) opened = openWithConstructor(avm, requestedCameraId);
-                if (opened == null) throw new IllegalStateException("AVMCamera.open returned null");
+                opened = openAvmCamera(avm, requestedCameraId);
 
                 Class<?> callbackType = Class.forName("android.hardware.AVMCamera$IEventCallback");
                 Object callbackProxy = Proxy.newProxyInstance(
@@ -1085,9 +1083,7 @@ final class CameraHelperMain {
             boolean activityAttached = false;
             try {
                 Class<?> avm = Class.forName("android.hardware.AVMCamera");
-                opened = avm.getMethod("open", int.class).invoke(null, requestedCameraId);
-                if (opened == null) opened = openWithConstructor(avm, requestedCameraId);
-                if (opened == null) throw new IllegalStateException("AVMCamera.open returned null");
+                opened = openAvmCamera(avm, requestedCameraId);
 
                 Class<?> callbackType = Class.forName("android.hardware.AVMCamera$IEventCallback");
                 Object callbackProxy = Proxy.newProxyInstance(
@@ -1969,9 +1965,7 @@ final class CameraHelperMain {
             DirectCameraSourceHub openedHub = null;
             try {
                 Class<?> avm = Class.forName("android.hardware.AVMCamera");
-                opened = avm.getMethod("open", int.class).invoke(null, requestedCameraId);
-                if (opened == null) opened = openWithConstructor(avm, requestedCameraId);
-                if (opened == null) throw new IllegalStateException("AVMCamera.open returned null");
+                opened = openAvmCamera(avm, requestedCameraId);
                 Class<?> callbackType = Class.forName("android.hardware.AVMCamera$IEventCallback");
                 Object callbackProxy = Proxy.newProxyInstance(
                         callbackType.getClassLoader(), new Class<?>[]{callbackType}, eventHandler());
@@ -5216,13 +5210,33 @@ final class CameraHelperMain {
         return false;
     }
 
-    private static Object openWithConstructor(Class<?> avm, int cameraId) throws Exception {
-        Constructor<?> constructor = avm.getDeclaredConstructor(int.class);
+    static Object openAvmCamera(Class<?> avm, int cameraId) throws Exception {
+        Object camera = avm.getMethod("open", int.class).invoke(null, cameraId);
+        if (camera != null) return camera;
+
+        Constructor<?> constructor;
+        Method open;
+        try {
+            constructor = avm.getDeclaredConstructor(int.class);
+            open = avm.getDeclaredMethod("open");
+        } catch (NoSuchMethodException error) {
+            throw new IllegalStateException("AVMCamera.open returned null", error);
+        }
         constructor.setAccessible(true);
-        Object camera = constructor.newInstance(cameraId);
-        Method open = avm.getDeclaredMethod("open");
         open.setAccessible(true);
-        return Boolean.TRUE.equals(open.invoke(camera)) ? camera : null;
+        camera = constructor.newInstance(cameraId);
+        try {
+            if (Boolean.TRUE.equals(open.invoke(camera))) return camera;
+            throw new IllegalStateException("AVMCamera.open returned null");
+        } catch (Throwable error) {
+            try {
+                HelperBinder.closeProducerObject(camera);
+            } catch (Throwable closeError) {
+                error.addSuppressed(root(closeError));
+            }
+            if (error instanceof Exception) throw (Exception) error;
+            throw (Error) error;
+        }
     }
 
     private static boolean invokeBoolean(

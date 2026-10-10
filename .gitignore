@@ -12,4 +12,5 @@ build_output/
 captures/
 *.iml
 .idea/
+.codex/
 AGENTS.md
