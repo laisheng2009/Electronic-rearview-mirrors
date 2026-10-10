@@ -372,33 +372,35 @@ public final class CameraHelperService extends Service {
     }
 
     private void provisionAppPermissions(String reason) {
+        provisionAppPermissions(reason, () -> {});
+    }
+
+    private void provisionAppPermissions(String reason, Runnable finished) {
         // The successful foreground RSA completion schedules this again after admission is released.
-        if (LocalAdbClient.AUTHORIZATION.pending() || !LocalAdbClient.hasAuthorizedIdentity(this)) return;
-        if (!permissionsProvisioning.compareAndSet(false, true)) {
-            // A pre-authorization check must not swallow the successful RSA follow-up.
-            if ("foreground_adb_authorized".equals(reason)) {
-                try {
-                    weatherAccessibilityExecutor.execute(() -> {
-                        AppPermissionProvisioner.ensure(this, reason, this::avasRecoveryEvent);
-                        if (adbRecovery != null) adbRecovery.onPermissionsChecked();
-                        publishAdbRecoveryUi();
-                    });
-                } catch (java.util.concurrent.RejectedExecutionException stopped) { }
-            }
+        if (LocalAdbClient.AUTHORIZATION.pending() || !LocalAdbClient.hasAuthorizedIdentity(this)) {
+            finished.run();
+            return;
+        }
+        boolean ownsProvisioning = permissionsProvisioning.compareAndSet(false, true);
+        // A pre-authorization check must not swallow the successful RSA follow-up.
+        if (!ownsProvisioning && !"foreground_adb_authorized".equals(reason)) {
+            finished.run();
             return;
         }
         try {
             weatherAccessibilityExecutor.execute(() -> {
                 try { AppPermissionProvisioner.ensure(this, reason, this::avasRecoveryEvent); }
                 finally {
-                    permissionsProvisioning.set(false);
+                    if (ownsProvisioning) permissionsProvisioning.set(false);
+                    finished.run();
                     AdbRecoveryRuntime recovery = adbRecovery;
                     if (recovery != null) recovery.onPermissionsChecked();
                     publishAdbRecoveryUi();
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException stopped) {
-            permissionsProvisioning.set(false);
+            if (ownsProvisioning) permissionsProvisioning.set(false);
+            finished.run();
         }
     }
 
@@ -433,21 +435,29 @@ public final class CameraHelperService extends Service {
     }
 
     static void foregroundAdbFinished(long requestId, boolean authorized) {
+        Runnable permissionsFinished = () ->
+                LocalAdbClient.AUTHORIZATION.finishForegroundPermissions(requestId);
         CameraHelperService service = activeInstance;
-        if (service == null) return;
-        service.postRuntime(() -> {
+        if (service == null) {
+            permissionsFinished.run();
+            return;
+        }
+        if (!service.postRuntime(() -> {
             AdbAuthorizationSession.RequestSnapshot snapshot =
                     LocalAdbClient.AUTHORIZATION.foregroundSnapshot();
             if (snapshot == null || snapshot.requestId != requestId || snapshot.isActive()) return;
-            if (activeInstance != service || GuardRecovery.isUserShutdownActive(service)) return;
-            if (authorized) service.provisionAppPermissions("foreground_adb_authorized");
+            if (activeInstance != service || GuardRecovery.isUserShutdownActive(service)) {
+                permissionsFinished.run();
+                return;
+            }
+            if (authorized) service.provisionAppPermissions("foreground_adb_authorized", permissionsFinished);
             if (LegacySettingsImporter.blocksRuntime(service)) return;
             if (authorized) {
                 service.handleStartCommand(ServiceRuntimeCommand.capture(
                         new Intent().setAction(ACTION_ADB_READY), 0, ACTION_START));
             }
             if (service.helper != null) service.helper.foregroundAdbFinished(authorized);
-        });
+        })) permissionsFinished.run();
     }
 
     private void resumeOverlayIfIdle() {
@@ -1389,7 +1399,12 @@ public final class CameraHelperService extends Service {
         RuntimeLifecycleGate.TeardownResult teardown =
                 runtimeLifecycle.beginTeardown(runtimeQueue, this::destroyRuntime);
         stopForegroundRuntime();
-        if (activeInstance == this) activeInstance = null;
+        if (activeInstance == this) {
+            activeInstance = null;
+            // Teardown may discard a queued permission attempt before its finally can run.
+            AdbAuthorizationSession.RequestSnapshot request = LocalAdbClient.AUTHORIZATION.foregroundSnapshot();
+            if (request != null) LocalAdbClient.AUTHORIZATION.finishForegroundPermissions(request.requestId);
+        }
         if (teardown == RuntimeLifecycleGate.TeardownResult.POST_REJECTED) {
             Thread fallback = new Thread(this::destroyRuntime, "service-runtime-teardown");
             fallback.start();

@@ -24,6 +24,7 @@ final class AdbAuthorizationSession {
     });
     private int requests;
     private long nextRequestId;
+    private long permissionsCompletedRequestId;
     private Request foregroundRequest;
     private RequestSnapshot foregroundSnapshot;
 
@@ -71,6 +72,22 @@ final class AdbAuthorizationSession {
     void removeForegroundListener(Runnable listener) { foregroundListeners.remove(listener); }
 
     synchronized RequestSnapshot foregroundSnapshot() { return foregroundSnapshot; }
+
+    synchronized boolean foregroundPermissionsPending() {
+        RequestSnapshot snapshot = foregroundSnapshot;
+        return snapshot != null && !snapshot.isActive()
+                && snapshot.result != null && snapshot.result.ok
+                && permissionsCompletedRequestId != snapshot.requestId;
+    }
+
+    void finishForegroundPermissions(long requestId) {
+        synchronized (this) {
+            if (foregroundSnapshot == null || foregroundSnapshot.requestId != requestId
+                    || !foregroundPermissionsPending()) return;
+            permissionsCompletedRequestId = requestId;
+        }
+        notifyForegroundListeners();
+    }
 
     // A new foreground visit may retry only a failure that never started sending a key.
     synchronized boolean rearmUnsentAutomaticRequest() {

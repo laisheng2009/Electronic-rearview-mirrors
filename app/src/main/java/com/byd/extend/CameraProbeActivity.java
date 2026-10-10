@@ -14765,7 +14765,8 @@ public final class CameraProbeActivity extends ComponentActivity
         adbAuthMode = adbAuthPending ? snapshot.mode : null;
         adbAuthorizationRequested = snapshot != null;
         startupOverlayPermissionFlow.reconcileAuthorization(
-                adbAuthorizationRequested, adbAuthPending);
+                adbAuthorizationRequested, adbAuthPending
+                        || LocalAdbClient.AUTHORIZATION.foregroundPermissionsPending());
         publishAdbOperation(adbAuthPending);
         refreshProductionHeader();
     }

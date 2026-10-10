@@ -67,6 +67,7 @@ public class StartupAuthorizationBehaviorTest {
             tick(600);
             awaitPrompt(peers, 1);
             Peer abandoned = peers.all.get(0);
+            long abandonedRequestId = LocalAdbClient.AUTHORIZATION.foregroundSnapshot().requestId;
             assertFalse(AppPermissionProvisioner.hasWriteSecureSettings(app));
             assertTrue(peers.shell.isEmpty());
             assertNull(Shadows.shadowOf(activity).getLastRequestedPermission());
@@ -80,12 +81,17 @@ public class StartupAuthorizationBehaviorTest {
             current.approve();
             pumpUntil(() -> peers.grantStarted.getCount() == 0);
             assertFalse(AppPermissionProvisioner.hasWriteSecureSettings(app));
+            LocalAdbClient.AUTHORIZATION.finishForegroundPermissions(abandonedRequestId);
+            assertTrue("stale completion must not release the current permission attempt",
+                    LocalAdbClient.AUTHORIZATION.foregroundPermissionsPending());
             Intent premature = Shadows.shadowOf(activity).peekNextStartedActivity();
             boolean overlayOvertookReadback = premature != null
                     && Settings.ACTION_MANAGE_OVERLAY_PERMISSION.equals(premature.getAction());
             peers.allowGrants.countDown();
             pumpUntil(() -> AppPermissionProvisioner.hasWriteSecureSettings(app)
-                    && AppPermissionProvisioner.hasAccessibilityAccess(app) && AvasNotificationAccess.isGranted(app));
+                    && AppPermissionProvisioner.hasAccessibilityAccess(app) && AvasNotificationAccess.isGranted(app)
+                    && !LocalAdbClient.AUTHORIZATION.foregroundPermissionsPending()
+                    && Shadows.shadowOf(activity).peekNextStartedActivity() != null);
             assertEquals(requestId, LocalAdbClient.AUTHORIZATION.foregroundSnapshot().requestId);
             assertTrue(LocalAdbClient.AUTHORIZATION.foregroundSnapshot().result.ok);
             assertTrue(LocalAdbClient.hasAuthorizedIdentity(app));
@@ -115,7 +121,8 @@ public class StartupAuthorizationBehaviorTest {
                 assertTrue(failed.get().requestAdbAuthorization("test_manual", "test_failure", false));
                 failed.resume().visible().windowFocusChanged(true);
                 pumpUntil(() -> LocalAdbClient.AUTHORIZATION.foregroundSnapshot() != null
-                        && !LocalAdbClient.AUTHORIZATION.foregroundSnapshot().isActive());
+                        && !LocalAdbClient.AUTHORIZATION.foregroundSnapshot().isActive()
+                        && Shadows.shadowOf(failed.get()).peekNextStartedActivity() != null);
                 LocalAdbClient.Result result = LocalAdbClient.AUTHORIZATION.foregroundSnapshot().result;
                 assertNotNull(result);
                 assertFalse(result.ok);
@@ -127,7 +134,24 @@ public class StartupAuthorizationBehaviorTest {
                 assertEquals(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, next.getAction());
                 failed.windowFocusChanged(false).pause().stop();
             }
-            // Known production race, deliberately active until the separately deferred fix lands.
+            // A completed but unsuccessful readback must release the next window too.
+            peers.trusted = true;
+            peers.timeout = peers.reject = false;
+            peers.denyWss = true;
+            Shadows.shadowOf(app).denyPermissions(Manifest.permission.WRITE_SECURE_SETTINGS);
+            var denied = Robolectric.buildActivity(CameraProbeActivity.class).create().start();
+            screens.add(denied);
+            assertTrue(denied.get().requestAdbAuthorization("test_manual", "test_readback_failure", false));
+            denied.resume().visible().windowFocusChanged(true);
+            pumpUntil(() -> !LocalAdbClient.AUTHORIZATION.foregroundSnapshot().isActive()
+                    && !LocalAdbClient.AUTHORIZATION.foregroundPermissionsPending()
+                    && Shadows.shadowOf(denied.get()).peekNextStartedActivity() != null);
+            assertTrue(LocalAdbClient.AUTHORIZATION.foregroundSnapshot().result.ok);
+            assertFalse(AppPermissionProvisioner.hasWriteSecureSettings(app));
+            Intent afterReadbackFailure = Shadows.shadowOf(denied.get()).getNextStartedActivity();
+            assertNotNull("failed readback must not hold startup forever", afterReadbackFailure);
+            assertEquals(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, afterReadbackFailure.getAction());
+            denied.windowFocusChanged(false).pause().stop();
             assertFalse("overlay must not overtake permission readback", overlayOvertookReadback);
         } finally {
             peers.allowGrants.countDown();
@@ -166,7 +190,7 @@ public class StartupAuthorizationBehaviorTest {
         final List<Peer> all = new CopyOnWriteArrayList<>();
         final List<String> shell = new CopyOnWriteArrayList<>();
         final CountDownLatch grantStarted = new CountDownLatch(1), allowGrants = new CountDownLatch(1);
-        volatile boolean trusted, timeout, reject;
+        volatile boolean trusted, timeout, reject, denyWss;
         PeerFactory(Context app) { this.app = app; }
         Socket open() throws IOException {
             try {
@@ -265,7 +289,8 @@ public class StartupAuthorizationBehaviorTest {
             if (command.startsWith("pm grant --user ")) {
                 owner.grantStarted.countDown();
                 assertTrue("test did not release permission writer", owner.allowGrants.await(5, TimeUnit.SECONDS));
-                Shadows.shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(words[words.length - 1]);
+                if (!owner.denyWss || !command.contains("WRITE_SECURE_SETTINGS"))
+                    Shadows.shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(words[words.length - 1]);
             } else if (command.startsWith("cmd notification allow_listener "))
                 Shadows.shadowOf(app.getSystemService(NotificationManager.class))
                         .setNotificationListenerAccessGranted(ComponentName.unflattenFromString(words[3]), true);
