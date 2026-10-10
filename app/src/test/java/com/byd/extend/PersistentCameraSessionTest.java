@@ -25,6 +25,15 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class PersistentCameraSessionTest {
     @Test public void wakeTeardownReleasesAllConsumersAndReopensFreshProducerWithStandbyDemand()
             throws Exception {
+        assertRecovery(CameraHelperMain.VEHICLE_WAKE_RECOVERY);
+    }
+
+    @Test public void nativeDeathTeardownReopensFreshSourceWithoutEnablingDisabledCameras()
+            throws Exception {
+        assertRecovery(CameraHelperMain.NATIVE_SOURCE_RECOVERY);
+    }
+
+    private void assertRecovery(String reason) throws Exception {
         Trace trace = new Trace();
         FakeCameraPort camera = new FakeCameraPort(trace);
         FakeFanout fanout = new FakeFanout(trace);
@@ -38,9 +47,10 @@ public final class PersistentCameraSessionTest {
         session.attach(camera, session.mirrorGroup, surfaces(1), new int[]{1}, 103,
                 "mirror", false, false, events, new FakeShellClose(trace), 7, 1);
 
-        session.tearDown(camera, CameraHelperMain.VEHICLE_WAKE_RECOVERY, null,
+        CameraHelperMain.HelperBinder.TeardownOutcome outcome = session.tearDown(camera, reason, null,
                 false, 0, false, new FakeShellClose(trace), events, 1);
 
+        assertEquals(null, outcome.failure);
         assertEquals(1, count(trace.values, "stop"));
         assertEquals(1, count(trace.values, "close"));
         assertEquals(1, count(trace.values, "fanout-close"));
@@ -50,7 +60,7 @@ public final class PersistentCameraSessionTest {
         assertFalse(session.mirrorGroup.has());
         for (int request = 101; request <= 103; request++) {
             assertEquals(1, events.count("camera_error", request));
-            assertEquals(CameraHelperMain.VEHICLE_WAKE_RECOVERY,
+            assertEquals(reason,
                     events.byKindAndRequest("camera_error", request).field("stage"));
         }
         assertEquals((1 << 2) | (1 << 3), session.blindStandbyDemandMask);

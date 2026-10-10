@@ -58,6 +58,14 @@ final class CameraHelperMain {
     static final String CAMERA_OWNER_REVERSE = "reverse";
     static final String ACTIVITY_RESUME_COLD_RESET = "activity_resume_cold_reset";
     static final String VEHICLE_WAKE_RECOVERY = "vehicle_wake_recovery";
+    static final String NATIVE_SOURCE_RECOVERY = "native_source_recovery";
+    static boolean isSourceRecovery(String stage) {
+        return VEHICLE_WAKE_RECOVERY.equals(stage) || NATIVE_SOURCE_RECOVERY.equals(stage);
+    }
+    static boolean nativeSourceDied(int event) {
+        // AVMCameraEvent: daemon, server and HAL death; not frame/sensor/preemption notices.
+        return event == 8 || event == 1002 || event == 1010;
+    }
     static final String COLD_RESET_DEFERRED_REVERSE = "camera_close_deferred_reverse";
 
     private static final String TAG = "BydCameraProbe";
@@ -687,7 +695,7 @@ final class CameraHelperMain {
 
                 Class<?> callbackType = Class.forName("android.hardware.AVMCamera$IEventCallback");
                 Object callbackProxy = Proxy.newProxyInstance(
-                        callbackType.getClassLoader(), new Class<?>[]{callbackType}, eventHandler());
+                        callbackType.getClassLoader(), new Class<?>[]{callbackType}, eventHandler(opened));
                 avm.getMethod("setEventCallback", callbackType).invoke(opened, callbackProxy);
 
                 boolean added = invokeBoolean(avm, opened, "addPreviewSurface",
@@ -1095,7 +1103,7 @@ final class CameraHelperMain {
 
                 Class<?> callbackType = Class.forName("android.hardware.AVMCamera$IEventCallback");
                 Object callbackProxy = Proxy.newProxyInstance(
-                        callbackType.getClassLoader(), new Class<?>[]{callbackType}, eventHandler());
+                        callbackType.getClassLoader(), new Class<?>[]{callbackType}, eventHandler(opened));
                 avm.getMethod("setEventCallback", callbackType).invoke(opened, callbackProxy);
 
                 for (int i = 0; i < indexes.length; i++) {
@@ -1767,6 +1775,11 @@ final class CameraHelperMain {
                     }
                     return result("already_closed", null);
                 }
+                if (shouldRetireSourceForTimeout(group.requestId, expectedRequestId, reason)) {
+                    emit("camera_source_retired", "reason", reason,
+                            "owner", expectedOwner, "request_id", expectedRequestId);
+                    return tearDownPersistentProducer(NATIVE_SOURCE_RECOVERY, null);
+                }
                 return closePersistentGroup(group, reason, expectedRequestId);
             }
             if (CAMERA_OWNER_ACTIVITY.equals(expectedOwner)
@@ -1796,6 +1809,12 @@ final class CameraHelperMain {
                 return result("camera_close_ignored", null, activeCameraId, activeCameraTag);
             }
             return closeOneShotCamera(reason, false);
+        }
+
+        static boolean shouldRetireSourceForTimeout(int activeRequest, int requested, String reason) {
+            return activeRequest > 0 && activeRequest == requested && reason != null
+                    && (reason.startsWith("first_frame_timeout")
+                    || reason.startsWith("production_first_frame_timeout"));
         }
 
         String closeOverlayCamera(String reason, int expectedRequestId) {
@@ -2012,7 +2031,7 @@ final class CameraHelperMain {
                 opened = openAvmCamera(avm, requestedCameraId);
                 Class<?> callbackType = Class.forName("android.hardware.AVMCamera$IEventCallback");
                 Object callbackProxy = Proxy.newProxyInstance(
-                        callbackType.getClassLoader(), new Class<?>[]{callbackType}, eventHandler());
+                        callbackType.getClassLoader(), new Class<?>[]{callbackType}, eventHandler(opened));
                 avm.getMethod("setEventCallback", callbackType).invoke(opened, callbackProxy);
                 PersistentCameraPort port = new ReflectivePersistentCameraPort(opened);
                 openedPort = port;
@@ -4538,10 +4557,20 @@ final class CameraHelperMain {
             if (value != null) value.release();
         }
 
-        private InvocationHandler eventHandler() {
+        private InvocationHandler eventHandler(Object source) {
             return (proxy, method, args) -> {
                 if ("onEvent".equals(method.getName()) && args != null && args.length >= 4) {
                     emit("avm_event", "type", args[1], "arg1", args[2], "arg2", args[3]);
+                    if (args[1] instanceof Number && nativeSourceDied(((Number) args[1]).intValue())) {
+                        callbackHandler.post(() -> {
+                            synchronized (HelperBinder.this) {
+                                if (source != camera) return; // Late event from an already replaced source.
+                                if (persistentPanoProducer) tearDownPersistentProducer(
+                                        NATIVE_SOURCE_RECOVERY, new IllegalStateException("OEM camera service died"));
+                                else closeOneShotCamera(NATIVE_SOURCE_RECOVERY, false);
+                            }
+                        });
+                    }
                     return null;
                 }
                 if ("toString".equals(method.getName())) return "CameraProbeEventCallback";

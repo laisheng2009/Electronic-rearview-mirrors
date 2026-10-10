@@ -83,7 +83,8 @@ public class AppPlatformOwnershipTest {
         assertTrue(pano.contains("mirror.oemVisibility("));
         assertTrue(shell.contains("}, this::platformSignal)"));
         assertTrue(shell.contains("avasRuntime.navigationVolumeChanged()"));
-        assertTrue(shell.contains("powerStateChanged(value == 1"));
+        assertTrue(shell.contains("powerStateChanged(action, interactive)"));
+        assertTrue(shell.contains("value == CameraRuntimeHost.POWER_SCREEN_OFF ? false"));
         assertTrue(shell.contains("new AvasShellSettings(shellContext(context))"));
         assertFalse(shell.contains("context.getContentResolver()"));
     }

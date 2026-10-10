@@ -212,6 +212,7 @@ final class RearviewMirrorController {
     }
 
     private void displayEvent(int event, int displayId) {
+        CameraRuntimeContext.reportDisplayPower(context, displayId);
         int configuredTarget = RearviewMirrorSettings.target(preferences);
         Display selected = CameraDisplayTarget.resolve(context, configuredTarget);
         int action = ClusterDisplayLifecycle.action(configuredTarget,
@@ -420,9 +421,12 @@ final class RearviewMirrorController {
                     || "camera_error".equals(kind)
                     && CameraHelperMain.CAMERA_OWNER_MIRROR.equals(event.optString("camera_owner")))
                     && requestId > 0 && event.optInt("request_id", -1) == requestId) {
-                boolean wake = CameraHelperMain.VEHICLE_WAKE_RECOVERY.equals(event.optString("stage"));
+                String stage = event.optString("stage");
+                boolean wake = CameraHelperMain.VEHICLE_WAKE_RECOVERY.equals(stage);
+                boolean retry = wake || CameraHelperMain.NATIVE_SOURCE_RECOVERY.equals(stage)
+                        && readiness.claimRetry(true);
                 if (wake) freshCycle();
-                fail(wake ? CameraHelperMain.VEHICLE_WAKE_RECOVERY : "camera_error", wake);
+                fail(CameraHelperMain.isSourceRecovery(stage) ? stage : "camera_error", retry);
             }
         } catch (Exception error) {
             emit("mirror_error", "stage", "event", "error", error.toString());

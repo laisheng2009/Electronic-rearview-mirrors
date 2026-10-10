@@ -92,6 +92,7 @@ final class StockAvmPreview {
     private final Context baseContext;
     private final BiConsumer<String, String> stageSink;
     private Object panoApi;
+    private BydStockAvm byd;
     private Surface surface;
     private Surface inputSurface;
     private int viewpoint = -1;
@@ -155,6 +156,17 @@ final class StockAvmPreview {
                     new Class<?>[]{Context.class}, stockContext);
             Config config = new Config(panoramaState, modelValue, panoWidth, panoHeight,
                     carSeries, carType, subCarType);
+            String[] bydAssets = stockContext.getAssets().list("resource_byd/" + carType);
+            if (bydAssets != null && bydAssets.length > 0) {
+                // Vehicle-identity validation must stay in the real application, not the shell.
+                try {
+                    config.intrinsic = (String) invokeStatic(loader,
+                            "com.byd.avc.resources.InternalParameters", "getInCamParam");
+                } catch (Exception unavailable) {
+                    stageSink.accept("config_byd_intrinsic", summary(root(unavailable)));
+                }
+            }
+            config.validate();
             stageSink.accept(currentStage, config.detail());
             return config;
         } catch (Throwable error) {
@@ -175,8 +187,13 @@ final class StockAvmPreview {
             requestedSurface.release();
             throw new IllegalArgumentException("Surface is invalid");
         }
-        if (panoApi != null) {
+        if (byd != null || panoApi != null) {
             try {
+                if (byd != null) {
+                    byd.setViewpoint(requestedViewpoint, horizontal);
+                    viewpoint = requestedViewpoint;
+                    return false;
+                }
                 applyOrientation(panoApi, horizontal);
                 int result = applyViewpoint(panoApi, requestedViewpoint);
                 viewpoint = requestedViewpoint;
@@ -220,14 +237,30 @@ final class StockAvmPreview {
             applyConfig(loader, stockContext, config);
             stage(currentStage, config.detail());
 
-            currentStage = "set_sub_car_type";
-            invokeStatic(loader, "com.byd.avc.util.devicestates.CarStatus",
-                    "setSettingSubCarType");
-            stage(currentStage, "ok");
-
             currentStage = "set_screen_density";
             invokeStatic(loader, "com.byd.avc.util.devicestates.DeviceStates$ScreenStatus",
                     "setDensity");
+            stage(currentStage, "ok");
+
+            currentStage = "select_renderer";
+            ReverseSteeringModelConfig.Selection selection = new ReverseSteeringModelConfig.PreparedModel(
+                    stockContext, stockContext.getPackageManager().getPackageInfo(STOCK_PACKAGE, 0),
+                    config.carType + "/" + config.subCarType, config.carType, config.subCarType)
+                    .resolveResources();
+            stage(currentStage, selection.renderer + ";resource=" + selection.resourceSuffix);
+            if ("BYD".equals(selection.renderer)) {
+                currentStage = "initialize_byd";
+                byd = new BydStockAvm(stageSink);
+                byd.open(stockContext, config, selection, requestedSurface, requestedViewpoint, horizontal);
+                inputSurface = byd.input();
+                surface = requestedSurface;
+                viewpoint = requestedViewpoint;
+                return true;
+            }
+
+            currentStage = "set_sub_car_type";
+            invokeStatic(loader, "com.byd.avc.util.devicestates.CarStatus",
+                    "setSettingSubCarType");
             stage(currentStage, "ok");
 
             currentStage = "init_device_controller";
@@ -379,6 +412,10 @@ final class StockAvmPreview {
             return true;
         } catch (Throwable error) {
             terminate(openedApi);
+            if (byd != null) {
+                try { byd.close(); } catch (Exception cleanup) { error.addSuppressed(cleanup); }
+                byd = null;
+            }
             requestedSurface.release();
             throw new StageException(currentStage, root(error));
         }
@@ -390,7 +427,7 @@ final class StockAvmPreview {
     }
 
     synchronized boolean isOpen() {
-        return panoApi != null;
+        return panoApi != null || byd != null;
     }
 
     synchronized int getViewpoint() {
@@ -412,6 +449,10 @@ final class StockAvmPreview {
         inputSurface = null;
         viewpoint = -1;
         Throwable failure = terminate(activeApi);
+        if (byd != null) {
+            try { byd.close(); } catch (Throwable error) { failure = error; }
+            byd = null;
+        }
         if (activeSurface != null) activeSurface.release();
         // AvmController retains this exact Surface in a static cache across SDK sessions.
         stage("closed", failure == null ? "ok" : summary(failure));
@@ -586,7 +627,7 @@ final class StockAvmPreview {
                 cameraDirections, supplier == null ? "" : supplier);
     }
 
-    private static void copyAssetDirectory(
+    static void copyAssetDirectory(
             ClassLoader loader, Context stockContext, String assetPath, String destination)
             throws Exception {
         Object copied = invokeStatic(loader, "com.byd.avc.resources.ResourcesManager",
@@ -831,7 +872,7 @@ final class StockAvmPreview {
         return horizontal ? "horizontal=1" : "vertical=0";
     }
 
-    private static Object getStaticField(ClassLoader loader, String className, String field)
+    static Object getStaticField(ClassLoader loader, String className, String field)
             throws Exception {
         Field value = Class.forName(className, true, loader).getDeclaredField(field);
         value.setAccessible(true);
@@ -845,7 +886,7 @@ final class StockAvmPreview {
         value.set(null, newValue);
     }
 
-    private static Object invoke(Object target, String method, Class<?>[] types, Object... args)
+    static Object invoke(Object target, String method, Class<?>[] types, Object... args)
             throws Exception {
         return target.getClass().getMethod(method, types).invoke(target, args);
     }
@@ -864,18 +905,18 @@ final class StockAvmPreview {
         return ((Number) result).intValue();
     }
 
-    private static Object invokeStatic(ClassLoader loader, String className, String method)
+    static Object invokeStatic(ClassLoader loader, String className, String method)
             throws Exception {
         return invokeStatic(loader, className, method, new Class<?>[0]);
     }
 
-    private static Object invokeStatic(
+    static Object invokeStatic(
             ClassLoader loader, String className, String method, Class<?>[] types, Object... args)
             throws Exception {
         return Class.forName(className, true, loader).getMethod(method, types).invoke(null, args);
     }
 
-    private static Throwable terminate(Object api) {
+    static Throwable terminate(Object api) {
         if (api == null) return null;
         Throwable first = null;
         for (String method : new String[]{"freeDisplay", "terminate"}) {
@@ -997,6 +1038,7 @@ final class StockAvmPreview {
         final String carSeries;
         final String carType;
         final String subCarType;
+        String intrinsic;
 
         Config(
                 int panoramaState,
@@ -1024,12 +1066,16 @@ final class StockAvmPreview {
             parcel.writeString(carSeries);
             parcel.writeString(carType);
             parcel.writeString(subCarType);
+            parcel.writeString(intrinsic);
         }
 
         static Config readFromParcel(Parcel parcel) {
-            return new Config(parcel.readInt(), parcel.readInt(), parcel.readInt(),
+            Config config = new Config(parcel.readInt(), parcel.readInt(), parcel.readInt(),
                     parcel.readInt(), parcel.readString(), parcel.readString(),
                     parcel.readString());
+            config.intrinsic = parcel.readString();
+            config.validate();
+            return config;
         }
 
         void validate() {
@@ -1046,6 +1092,8 @@ final class StockAvmPreview {
             }
             requireText("carType", carType);
             requireText("subCarType", subCarType);
+            if (intrinsic != null && intrinsic.length() > 65_536)
+                throw new IllegalArgumentException("intrinsic camera parameters too large");
         }
 
         String detail() {

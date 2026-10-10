@@ -652,6 +652,8 @@ public final class TurnSignalShellMain {
                     "interactive", interactive,
                     "restart_requested", restart && interactive,
                     "restart_deferred", restart && !interactive);
+            // Camera sleep identity belongs to the surviving helper, not UI restart policy.
+            powerStateChanged("controller_died", interactive);
             if (!restart) return;
             if (interactive) {
                 scheduleRecovery(RECOVERY_DEATH_SETTLE_MS, "controller_died");
@@ -664,15 +666,27 @@ public final class TurnSignalShellMain {
         private void platformSignal(int operation, int value) {
             handler.post(() -> {
                 if (processTerminationRequested || nonAvasStopped) return;
-                if (operation == CameraRuntimeHost.POWER)
-                    powerStateChanged(value == 1 ? "android.intent.action.QUICKBOOT_POWERON" : "app_power");
+                if (operation == CameraRuntimeHost.POWER) {
+                    String action = value == CameraRuntimeHost.POWER_QUICKBOOT
+                            ? "android.intent.action.QUICKBOOT_POWERON"
+                            : value == CameraRuntimeHost.POWER_SCREEN_OFF ? "screen_off"
+                            : value == CameraRuntimeHost.POWER_SCREEN_ON ? "screen_on"
+                            : value == CameraRuntimeHost.POWER_USER_PRESENT ? "user_present" : "app_power";
+                    boolean interactive = value == CameraRuntimeHost.POWER_SCREEN_OFF ? false
+                            : value == CameraRuntimeHost.POWER_SCREEN_ON
+                            || value == CameraRuntimeHost.POWER_USER_PRESENT || isInteractive();
+                    powerStateChanged(action, interactive);
+                }
                 else if (operation == CameraRuntimeHost.NAV_VOLUME && avasRuntime != null)
                     avasRuntime.navigationVolumeChanged();
             });
         }
 
         private void powerStateChanged(String action) {
-            boolean interactive = isInteractive();
+            powerStateChanged(action, isInteractive());
+        }
+
+        private void powerStateChanged(String action, boolean interactive) {
             musicRuntime.powerStateChanged(interactive);
             boolean newSession = awakeSession.update(
                     interactive,

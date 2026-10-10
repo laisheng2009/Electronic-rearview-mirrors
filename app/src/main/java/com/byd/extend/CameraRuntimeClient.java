@@ -40,10 +40,17 @@ final class CameraRuntimeClient {
                 platformCommand(CameraRuntimeHost.NAV_VOLUME, 0, "");
             } else {
                 platformCommand(CameraRuntimeHost.POWER,
-                        "android.intent.action.QUICKBOOT_POWERON".equals(action) ? 1 : 0, "");
+                        powerEvent(action), "");
             }
         }
     };
+    static int powerEvent(String action) {
+        if (Intent.ACTION_SCREEN_OFF.equals(action)) return CameraRuntimeHost.POWER_SCREEN_OFF;
+        if (Intent.ACTION_SCREEN_ON.equals(action)) return CameraRuntimeHost.POWER_SCREEN_ON;
+        if (Intent.ACTION_USER_PRESENT.equals(action)) return CameraRuntimeHost.POWER_USER_PRESENT;
+        return "android.intent.action.QUICKBOOT_POWERON".equals(action)
+                ? CameraRuntimeHost.POWER_QUICKBOOT : 0;
+    }
     private java.util.Map<String, Object> lastSettings = new java.util.HashMap<>();
     private final SharedPreferences.OnSharedPreferenceChangeListener preferenceListener =
             (prefs, key) -> scheduleSettingsSync();

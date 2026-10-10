@@ -18,6 +18,8 @@ final class CameraRuntimeHost {
             TOGGLE_REVERSE = 5, ACK_SETTINGS = 6, STOP = 7, STATUS = 8, DETACH = 9,
             PANO = 10, POWER = 11, NAV_VOLUME = 12;
     static final String CALLBACK = "com.byd.extend.ICameraRuntimeClient";
+    static final int POWER_QUICKBOOT = 1, POWER_SCREEN_OFF = 2, POWER_SCREEN_ON = 3,
+            POWER_USER_PRESENT = 4;
     static final int EVENT = 1, PREFERENCES = 2, AVM_CONFIG = 3;
     private final HandlerThread thread = new HandlerThread("camera-runtime");
     private final Handler handler;
@@ -55,7 +57,8 @@ final class CameraRuntimeHost {
         this.appUid = appUid;
         this.journal = journal;
         this.platformSignal = platformSignal;
-        context = new CameraRuntimeContext(system, appUid, this::readAvmConfig);
+        context = new CameraRuntimeContext(system, appUid, this::readAvmConfig,
+                value -> platformSignal.accept(POWER, value));
         CameraShellMain.initializeSystemFontsForShell();
         thread.start();
         handler = new Handler(thread.getLooper());
@@ -113,7 +116,7 @@ final class CameraRuntimeHost {
                     mirror.oemVisibility(platformValue >= 0, platformValue == 1);
                     break;
                 case POWER:
-                    if (platformValue != 0 && platformValue != 1)
+                    if (platformValue < 0 || platformValue > POWER_USER_PRESENT)
                         throw new IllegalArgumentException("invalid power event");
                     platformSignal.accept(operation, platformValue);
                     break;

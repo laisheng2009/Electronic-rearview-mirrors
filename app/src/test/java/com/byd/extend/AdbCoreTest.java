@@ -1638,7 +1638,7 @@ public final class AdbCoreTest {
 
     @Test
     public void cameraConfigRejectsUntrustedValues() {
-        assertEquals(35, CameraShellProtocol.VERSION);
+        assertEquals(37, CameraShellProtocol.VERSION);
         assertEquals(IBinder.FIRST_CALL_TRANSACTION + 10,
                 CameraHelperMain.TX_UPDATE_VISUALS);
         assertTrue(CameraShellProtocol.TX_OVERLAY_PREPARE > CameraShellProtocol.TX_SHUTDOWN);
@@ -1919,14 +1919,14 @@ public final class AdbCoreTest {
         String write = text.substring(writeStart, writeEnd);
         String readParcel = text.substring(writeEnd, parcelReadEnd);
         assertEquals(4, occurrences(write, "parcel.writeInt("));
-        assertEquals(3, occurrences(write, "parcel.writeString("));
+        assertEquals(4, occurrences(write, "parcel.writeString("));
         assertEquals(4, occurrences(readParcel, "parcel.readInt()"));
-        assertEquals(3, occurrences(readParcel, "parcel.readString()"));
+        assertEquals(4, occurrences(readParcel, "parcel.readString()"));
         assertOrdered(write,
                 "writeInt(panoramaState)", "writeInt(modelValue)",
                 "writeInt(panoWidth)", "writeInt(panoHeight)",
                 "writeString(carSeries)", "writeString(carType)",
-                "writeString(subCarType)");
+                "writeString(subCarType)", "writeString(intrinsic)");
         assertOrdered(readParcel,
                 "new Config(",
                 "parcel.readInt()", "parcel.readInt()", "parcel.readInt()", "parcel.readInt()",

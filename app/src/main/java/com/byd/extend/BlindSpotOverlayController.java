@@ -882,6 +882,7 @@ final class BlindSpotOverlayController {
     }
 
     private void displayEvent(int event, int displayId) {
+        CameraRuntimeContext.reportDisplayPower(context, displayId);
         if (cameraUnavailableReason() != null || shellRecovery.pending()) return;
         if (event == ClusterDisplayLifecycle.EVENT_CHANGED
                 && targetDisplayIds[CameraDisplayTarget.CLUSTER] == displayId

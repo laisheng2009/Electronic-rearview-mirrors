@@ -14991,6 +14991,9 @@ public final class CameraProbeActivity extends ComponentActivity
                                 publishCameraEventStatus(json, "Очікування перших кадрів...",
                                         StatusTone.Warning, false);
                             }
+                        } else if (activePreview == cameraPreview || activePreview == calibrationPreview) {
+                            publishCameraEventStatus(json, "Очікування перших кадрів...",
+                                    StatusTone.Warning, false);
                         } else publishCameraEventStatus(json,
                                 json.optString("renderer").startsWith("stock_avm")
                                 || json.optInt("preview_index", -1) < 0
@@ -15046,11 +15049,11 @@ public final class CameraProbeActivity extends ComponentActivity
                     if (!accepted) {
                         recordIgnoredActivityCameraEvent(kind, json);
                     } else {
-                        if (CameraHelperMain.VEHICLE_WAKE_RECOVERY.equals(json.optString("stage"))) {
+                        if (CameraHelperMain.isSourceRecovery(json.optString("stage"))) {
                             if (!cameraTransition.pending()) {
                                 retryStockViewpoint = activePreview == debugPreview ? activeCameraViewpoint : -1;
                                 retryStockDebug = activePreview == debugPreview;
-                                closeCameraForTransition(CameraHelperMain.VEHICLE_WAKE_RECOVERY);
+                                closeCameraForTransition(json.optString("stage"));
                             }
                             return;
                         }

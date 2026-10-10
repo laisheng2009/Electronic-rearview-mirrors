@@ -12,6 +12,38 @@ import java.util.Arrays;
 import java.util.List;
 
 public final class AvasNavVolumePolicyTest {
+    @Test public void capJournalsOriginalAudibleVolumeAndMuteBeforeAnyVolumeWrite() throws Exception {
+        List<String> calls = new ArrayList<>();
+        int[] volume = {0}; // Muted stream has a nonzero last-audible index.
+        int saved = AvasNavVolumePolicy.captureAndCap(() -> true, () -> 7, () -> volume[0],
+                value -> calls.add("mute:" + value), value -> calls.add("saved:" + value),
+                value -> { calls.add("volume:" + value); volume[0] = value; });
+        assertEquals(7, saved);
+        assertEquals(Arrays.asList("mute:1", "saved:7", "volume:1"), calls);
+        assertEquals(1, volume[0]);
+    }
+
+    @Test public void unreadableMutedIndexAndFailedJournalDoNotChangeSharedVolume() {
+        List<String> calls = new ArrayList<>();
+        assertThrows(IllegalStateException.class, () -> AvasNavVolumePolicy.captureAndCap(
+                () -> true, () -> { throw new IllegalStateException(); }, () -> 0,
+                value -> calls.add("mute"), value -> calls.add("saved"),
+                value -> calls.add("volume")));
+        assertTrue(calls.isEmpty());
+        assertThrows(IllegalStateException.class, () -> AvasNavVolumePolicy.captureAndCap(
+                () -> false, () -> 7, () -> 7, value -> calls.add("mute"),
+                value -> { throw new IllegalStateException(); }, value -> calls.add("volume")));
+        assertFalse(calls.contains("volume"));
+    }
+
+    @Test public void capUsesUnmutedFallbackButRejectsFailedReadback() throws Exception {
+        int[] volume = {7};
+        assertEquals(7, AvasNavVolumePolicy.captureAndCap(() -> false,
+                () -> { throw new IllegalStateException(); }, () -> volume[0],
+                value -> {}, value -> {}, value -> volume[0] = value));
+        assertThrows(IllegalStateException.class, () -> AvasNavVolumePolicy.cap(value -> {}, () -> 7));
+    }
+
     @Test public void legacySavedStateRestoresZeroAndOriginalMuteThenClearsEachSuccess()
             throws Exception {
         List<String> calls = new ArrayList<>();

@@ -577,7 +577,7 @@ final class ParkingCameraController {
                     && pane.frameEpoch == epoch && pane.wantVisible) {
                 emit("parking_camera_error", "stage", "first_frame_timeout",
                         "camera_id", pane.profile.id, "request_id", pane.requestId);
-                resetAfterAttachFailure();
+                resetAfterAttachFailure("first_frame_timeout");
             }
         }, 3_000L);
     }
@@ -731,7 +731,11 @@ final class ParkingCameraController {
     }
 
     private void resetAfterAttachFailure() {
-        if (closeParkingGroup("parking_attach_failed")) {
+        resetAfterAttachFailure("parking_attach_failed");
+    }
+
+    private void resetAfterAttachFailure(String reason) {
+        if (closeParkingGroup(reason)) {
             handler.removeCallbacks(retry);
             if (!shutdown) handler.postDelayed(retry, RETRY_MS);
         }

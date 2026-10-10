@@ -57,8 +57,10 @@ public class CameraRuntimeContinuityTest {
                 helper.indexOf("synchronized String closeCamera(String reason)"));
         assertTrue(recover.contains("tearDownPersistentProducer(VEHICLE_WAKE_RECOVERY, null)"));
         assertFalse(recover.contains("shutdown("));
-        assertTrue(source("RearviewMirrorController").contains("fail(wake ? CameraHelperMain.VEHICLE_WAKE_RECOVERY : \"camera_error\", wake)"));
-        assertTrue(source("CameraProbeActivity").contains("closeCameraForTransition(CameraHelperMain.VEHICLE_WAKE_RECOVERY)"));
+        assertTrue(source("RearviewMirrorController").contains("boolean wake = CameraHelperMain.VEHICLE_WAKE_RECOVERY.equals(stage)"));
+        assertTrue(source("RearviewMirrorController").contains("if (wake) freshCycle()"));
+        assertTrue(source("RearviewMirrorController").contains("readiness.claimRetry(true)"));
+        assertTrue(source("CameraProbeActivity").contains("closeCameraForTransition(json.optString(\"stage\"))"));
         assertTrue(source("ParkingCameraController").contains("event.optInt(\"request_id\", -1) == attachedGroupRequestId"));
         assertTrue(helper.contains("sourceHubGeneration != openedHubGeneration"));
     }

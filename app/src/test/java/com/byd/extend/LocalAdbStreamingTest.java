@@ -146,7 +146,7 @@ public final class LocalAdbStreamingTest {
     }
 
     @Test
-    public void acceptedOlderPromptReplacesFailureFromNewerProbe() throws Exception {
+    public void activeForegroundPromptDefersNewBackgroundProbe() throws Exception {
         Path filesDir = Files.createTempDirectory("byd-adb-prompt-proof-");
         ServerSocket server = new ServerSocket(0, 2, InetAddress.getLoopbackAddress());
         ExecutorService peers = Executors.newCachedThreadPool();
@@ -162,14 +162,11 @@ public final class LocalAdbStreamingTest {
             Future<LocalAdbClient.Result> prompt = peers.submit(() -> LocalAdbClient.authorize(
                     null, LocalAdbClient.PromptMode.FORCE, null));
             assertTrue(publicKeyReceived.await(5, TimeUnit.SECONDS));
-            Future<?> probePeer = peers.submit(() -> {
-                serveDelayedAuthorizationFailure(server, new CountDownLatch(0), new CountDownLatch(0));
-                return null;
-            });
             LocalAdbClient.Result probe = LocalAdbClient.executeAuthorizedStreaming(null, "true",
                     new ByteArrayOutputStream(), 16_384, 5_000, null, null);
-            assertTrue(probe.authorizationRequired);
-            assertEquals(LocalAdbClient.AccessState.Status.ERROR, LocalAdbClient.readAccessState(null).status);
+            assertTrue(probe.superseded);
+            assertFalse(probe.publicKeySent);
+            assertEquals(LocalAdbClient.AccessState.Status.UNKNOWN, LocalAdbClient.readAccessState(null).status);
 
             acceptPrompt.countDown();
             LocalAdbClient.Result accepted = prompt.get(5, TimeUnit.SECONDS);
@@ -177,7 +174,8 @@ public final class LocalAdbStreamingTest {
             assertTrue(LocalAdbClient.hasAuthorizedIdentity(null));
             assertEquals(LocalAdbClient.AccessState.Status.OK, LocalAdbClient.readAccessState(null).status);
             promptPeer.get(5, TimeUnit.SECONDS);
-            probePeer.get(5, TimeUnit.SECONDS);
+            server.setSoTimeout(100);
+            org.junit.Assert.assertThrows(java.net.SocketTimeoutException.class, server::accept);
         } finally {
             acceptPrompt.countDown();
             server.close();
@@ -265,9 +263,9 @@ public final class LocalAdbStreamingTest {
             AdbPacket.write(socket.getOutputStream(), AdbPacket.A_OKAY, 2, localId, null);
             byte[] data = new byte[4096];
             AdbPacket.write(socket.getOutputStream(), AdbPacket.A_WRTE, 2, localId, data);
-            assertCommand(AdbPacket.A_OKAY, AdbPacket.read(socket.getInputStream()).command);
-            AdbPacket.write(socket.getOutputStream(), AdbPacket.A_CLSE, 2, localId, null);
-            assertCommand(AdbPacket.A_CLSE, AdbPacket.read(socket.getInputStream()).command);
+            // Foreground authorization preempts this blocked background stream immediately.
+            socket.setSoTimeout(3000);
+            assertEquals(-1, socket.getInputStream().read());
         }
     }
 

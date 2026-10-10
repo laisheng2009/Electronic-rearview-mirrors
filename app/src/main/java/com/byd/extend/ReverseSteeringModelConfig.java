@@ -102,6 +102,11 @@ final class ReverseSteeringModelConfig {
             if (Looper.myLooper() == Looper.getMainLooper()) {
                 throw new IllegalStateException("OEM steering resource selection requires a worker");
             }
+            return resolveResources();
+        }
+
+        // The dedicated stock-renderer shell has a Looper but does not host application UI.
+        Selection resolveResources() throws Exception {
             List<String> paths = new ArrayList<>();
             addIfPresent(paths, "resource_ts/" + carType + "/CarModel/" + subCarType
                     + "/Vehicle_Configuration.json");

@@ -180,10 +180,11 @@ public final class AvasNavigationAudioContractTest {
         int dirty = preparation.indexOf(
                 "settings.putInt(AvasShellSettings.DIRTY, AvasShellSettings.EXTERIOR_UNACQUIRED)");
         assertTrue(dirty >= 0 && dirty < preparation.indexOf("route.naviFocus(true, diagnostics)"));
-        String exterior = player.substring(0, player.indexOf("void playNavigation(File wav"));
-        assertFalse(exterior.contains("setStreamVolume("));
-        assertFalse(exterior.contains("SAVED_NAV"));
-        assertFalse(exterior.contains("SAVED_MUTE"));
+        assertTrue(dirty < preparation.indexOf("AvasNavVolumePolicy.captureAndCap("));
+        assertTrue(preparation.contains("AvasShellSettings.SAVED_NAV"));
+        assertTrue(preparation.contains("AvasShellSettings.SAVED_MUTE"));
+        assertTrue(preparation.lastIndexOf("AvasNavVolumePolicy.cap(")
+                > preparation.indexOf("route.prepare("));
     }
 
     @Test public void exteriorSharedSetupAndCleanupAreNotGatedOnPrimaryAcceptance() throws Exception {
