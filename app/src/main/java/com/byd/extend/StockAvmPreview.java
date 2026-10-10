@@ -245,7 +245,8 @@ final class StockAvmPreview {
             currentStage = "select_renderer";
             ReverseSteeringModelConfig.Selection selection = new ReverseSteeringModelConfig.PreparedModel(
                     stockContext, stockContext.getPackageManager().getPackageInfo(STOCK_PACKAGE, 0),
-                    config.carType + "/" + config.subCarType, config.carType, config.subCarType)
+                    config.carType + "/" + config.subCarType, config.modelValue,
+                    config.carType, config.subCarType)
                     .resolveResources();
             stage(currentStage, selection.renderer + ";resource=" + selection.resourceSuffix);
             if ("BYD".equals(selection.renderer)) {

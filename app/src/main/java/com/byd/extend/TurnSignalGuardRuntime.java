@@ -836,7 +836,7 @@ final class TurnSignalGuardRuntime {
                     "max_speed_kph", maxSpeedKph);
             return;
         }
-        if (!guardActive() || !telemetryController.dataFresh(now)
+        if (!guardActive() || !telemetryController.dataFresh(SystemClock.elapsedRealtime())
                 || !Float.isFinite(latestAngle)) {
             emit("guard_suppressed", "reason", "telemetry_or_control_not_ready",
                     "direction", directionName(direction));

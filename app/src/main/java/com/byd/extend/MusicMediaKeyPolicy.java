@@ -93,9 +93,8 @@ final class MusicMediaKeyPolicy {
             return !hasUsableSession || !foreground.equals(player);
         }
 
-        boolean mayUseReceiver(String packageName, boolean foregroundProcess, boolean stopped) {
-            return !stopped && foregroundProcess && isValidPackage(packageName)
-                    && packageName.equals(player) && packageName.equals(foreground);
+        boolean mayUseReceiver(String packageName) {
+            return isValidPackage(packageName) && packageName.equals(player);
         }
     }
 

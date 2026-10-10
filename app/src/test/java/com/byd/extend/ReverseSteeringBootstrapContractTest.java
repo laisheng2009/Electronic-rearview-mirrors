@@ -22,8 +22,8 @@ public final class ReverseSteeringBootstrapContractTest {
         assertBefore(model, "invokeStatic(loader, CAR_STATUS, \"initBootBoard\"",
                 "return new PreparedModel(");
         assertFalse("must not initialize OEM ADAS just to select steering bounds",
-                model.contains("getSDKTypeName") || model.contains("getCarParamPath"));
-        assertBefore(model, "Selection resolve() throws Exception", "getAssets().list(bydRoot)");
+                model.contains("\"getSDKTypeName\"") || model.contains("\"getCarParamPath\""));
+        assertBefore(model, "Selection resolve() throws Exception", "selectConfigurationPath(");
         assertBefore(model, "Capture load() throws Exception", "getAssets().open(configurationPath)");
         assertTrue(model.contains("Looper.myLooper() == Looper.getMainLooper()"));
         assertTrue(model.contains("final String externalConfigurationPath"));
@@ -48,8 +48,8 @@ public final class ReverseSteeringBootstrapContractTest {
         assertBefore(prepare, "ReverseSteeringModelConfig.prepareLoad(context)", "worker.execute(");
         String finish = between(controller, "private void finishSteeringModelSelection(",
                 "private void configureSteeringModel(");
-        assertBefore(finish, "if (stopped) return", "prepared.resolve()");
-        assertBefore(finish, "prepared.resolve()", "selection.load()");
+        assertBefore(finish, "if (stopped) return", "prepared.resolve(readCameraRendererMarker(helper))");
+        assertBefore(finish, "prepared.resolve(readCameraRendererMarker(helper))", "selection.load()");
         assertBefore(finish, "selection.load()", "steeringCapture.toConfig()");
         assertBefore(finish, "shouldLoadAfterCachedFailure(", "selection.load()");
         assertTrue(finish.contains("boolean changed = steeringSelection == null"));

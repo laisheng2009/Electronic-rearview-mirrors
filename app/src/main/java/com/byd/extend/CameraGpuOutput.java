@@ -28,6 +28,7 @@ final class CameraGpuOutput extends Binder {
 
     private final int width;
     private final int height;
+    private final boolean lifecycleOnly;
     private final Consumer<CameraDewarpRenderer.Event> events;
     private CameraDewarpRenderer.MappingRequest request;
     private IBinder control;
@@ -37,9 +38,15 @@ final class CameraGpuOutput extends Binder {
 
     CameraGpuOutput(int width, int height, CameraDewarpConfig config, long token,
             Consumer<CameraDewarpRenderer.Event> events) {
+        this(width, height, config, token, events, false);
+    }
+
+    CameraGpuOutput(int width, int height, CameraDewarpConfig config, long token,
+            Consumer<CameraDewarpRenderer.Event> events, boolean lifecycleOnly) {
         this.width = width;
         this.height = height;
         this.events = events;
+        this.lifecycleOnly = lifecycleOnly;
         request = new CameraDewarpRenderer.MappingRequest(config, token);
     }
 
@@ -128,6 +135,7 @@ final class CameraGpuOutput extends Binder {
             reply.writeNoException();
             reply.writeInt(width);
             reply.writeInt(height);
+            reply.writeInt(lifecycleOnly ? 1 : 0);
             writeMapping(reply, request);
             return true;
         }
@@ -178,6 +186,7 @@ final class CameraGpuOutput extends Binder {
         final int ownerUid;
         final int width;
         final int height;
+        final boolean lifecycleOnly;
         volatile CameraDewarpRenderer.MappingRequest request;
         private boolean closed;
         private final DeathRecipient ownerDeath;
@@ -198,6 +207,7 @@ final class CameraGpuOutput extends Binder {
                 reply.readException();
                 width = reply.readInt();
                 height = reply.readInt();
+                lifecycleOnly = reply.readInt() != 0;
                 if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
                     throw new IllegalArgumentException("invalid GPU output dimensions");
                 }

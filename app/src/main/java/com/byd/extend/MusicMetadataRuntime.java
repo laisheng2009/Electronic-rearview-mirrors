@@ -317,8 +317,7 @@ final class MusicMetadataRuntime {
             }
             ComponentName receiver = null;
             if (target == null && controlSession(packageName, 0) == null
-                    && mediaSelection.mayUseReceiver(packageName,
-                            isLiveMediaProcess(packageName, true), false)) {
+                    && mediaSelection.mayUseReceiver(packageName)) {
                 receiver = mediaReceiver(packageName);
             }
             if (target == null && receiver == null) {

@@ -2,6 +2,9 @@ package com.byd.extend;
 
 import static org.junit.Assert.*;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -9,6 +12,16 @@ import org.junit.Test;
 
 /** Real OEM proxy + production subscription requests + controller, without Android Binder GET. */
 public final class TurnSignalTelemetryIntegrationTest {
+    @Test public void guardAdmissionUsesCurrentFreshnessClockAndKeepsCallbackEventTime()
+            throws Exception {
+        String source = new String(Files.readAllBytes(Path.of(
+                "src/main/java/com/byd/extend/TurnSignalGuardRuntime.java")),
+                StandardCharsets.UTF_8);
+        assertTrue(source.contains("observeStalk(stalk.raw, \"callback\", observedMs);"));
+        assertTrue(source.contains(
+                "telemetryController.dataFresh(SystemClock.elapsedRealtime())"));
+    }
+
     @Test public void productionCallbacksCarryShortCompletionWithoutGuardControl() throws Exception {
         Rig rig = new Rig();
         try {

@@ -53,4 +53,37 @@ public final class ClusterOverlayIntegrationTest {
         assertTrue(source.contains("unregisterDisplayListener(displayListener)"));
         assertTrue(source.contains("overlay.onClusterDisplayChanged(displayId, removed)"));
     }
+
+    @Test
+    public void shellSurfaceTransactionsTransferTheGpuEndpointBothWays() throws Exception {
+        String helper = new String(Files.readAllBytes(Path.of(
+                "src/main/java/com/byd/extend/CameraShellMain.java")), StandardCharsets.UTF_8);
+        String controller = new String(Files.readAllBytes(Path.of(
+                "src/main/java/com/byd/extend/TurnSignalController.java")), StandardCharsets.UTF_8);
+        String overlayWrite = between(helper,
+                "if (code == CameraShellProtocol.TX_OVERLAY_ACQUIRE_SURFACE)",
+                "if (code == CameraShellProtocol.TX_OVERLAY_ARM_FRAME)");
+        String reverseWrite = between(helper,
+                "if (code == CameraShellProtocol.TX_REVERSE_ACQUIRE_SURFACES)",
+                "if (code == CameraShellProtocol.TX_REVERSE_ARM_FRAMES)");
+        String overlayRead = between(controller,
+                "private static OverlaySurface transactOverlayAcquire(",
+                "private static void transactOverlayFrame(");
+        String reverseRead = between(controller,
+                "private static ReverseSurfaces transactReverseAcquire(",
+                "private static void transactReverseFrames(");
+
+        assertTrue(overlayWrite.contains("CameraGpuOutput.writeSurface(reply, snapshot.surface)"));
+        assertTrue(reverseWrite.contains(
+                "CameraGpuOutput.writeSurface(reply, snapshot.surfaces[index])"));
+        assertTrue(overlayRead.contains("CameraGpuOutput.readSurface(reply)"));
+        assertTrue(reverseRead.contains("CameraGpuOutput.readSurface(reply)"));
+        assertFalse(overlayRead.contains("Surface.CREATOR.createFromParcel(reply)"));
+        assertFalse(reverseRead.contains("Surface.CREATOR.createFromParcel(reply)"));
+    }
+
+    private static String between(String source, String start, String end) {
+        int from = source.indexOf(start);
+        return source.substring(from, source.indexOf(end, from));
+    }
 }

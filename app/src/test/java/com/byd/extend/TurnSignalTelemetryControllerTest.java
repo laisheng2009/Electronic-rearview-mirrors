@@ -87,6 +87,28 @@ public final class TurnSignalTelemetryControllerTest {
         assertEquals(2, last.blink);
     }
 
+    @Test public void queuedCallbackReceiptCanPrecedeGetCompletionWithoutLosingFreshness() {
+        Rig rig = new Rig(true);
+        rig.transport.reads.add(snapshot(1, 0, 1, 0));
+        rig.controller.start();
+        rig.transport.reads.add(snapshot(1, 0, 1, 0));
+        rig.transport.duringRead = () -> {
+            rig.transport.emit(TurnSignalTelemetryController.STALK_DEVICE,
+                    TurnSignalTelemetryController.STALK_FID, 3, 1_000);
+            rig.clock.now = 1_010;
+        };
+        rig.clock.now = 1_000;
+        rig.controller.tick();
+
+        assertTrue(rig.controller.dataFresh(1_010));
+        assertFalse(rig.controller.dataFresh(1_000));
+        rig.dispatcher.runAll();
+        int last = rig.sink.snapshots.size() - 1;
+        assertEquals(TurnSignalTelemetryController.Source.CALLBACK, rig.sink.sources.get(last));
+        assertEquals(3, rig.sink.snapshots.get(last).stalk);
+        assertEquals(Long.valueOf(1_000), rig.sink.observedTimes.get(last));
+    }
+
     @Test public void reconcileMismatchIsMarkedConflictAndNeverPresentedAsCallback() {
         Rig rig = new Rig();
         rig.transport.reads.add(snapshot(1, 0, 1, 0));
@@ -362,6 +384,7 @@ public final class TurnSignalTelemetryControllerTest {
         final List<TurnSignalTelemetryController.Source> sources = new ArrayList<>();
         final List<Integer> liveMasks = new ArrayList<>();
         final List<Boolean> conflicts = new ArrayList<>();
+        final List<Long> observedTimes = new ArrayList<>();
         @Override public void onSnapshot(TurnSignalTelemetryController.Snapshot snapshot,
                 TurnSignalTelemetryController.Source source, int liveMask,
                 boolean conflict, long observedMs) {
@@ -369,6 +392,7 @@ public final class TurnSignalTelemetryControllerTest {
             sources.add(source);
             liveMasks.add(liveMask);
             conflicts.add(conflict);
+            observedTimes.add(observedMs);
         }
         @Override public void onMode(boolean subscribed, boolean seeded, String reason) {}
     }

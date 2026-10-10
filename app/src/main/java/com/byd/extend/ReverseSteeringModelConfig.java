@@ -7,16 +7,17 @@ import android.os.Looper;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
-import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 /** Active OEM model steering bounds used only by Reverse crop shifting. */
@@ -65,6 +66,8 @@ final class ReverseSteeringModelConfig {
                 new Class<?>[]{Context.class}, stockContext);
         String subCarType = (String) invokeStatic(loader, CAR_STATUS, "getSubCarType",
                 new Class<?>[]{Context.class}, stockContext);
+        int modelValue = (Integer) invokeStatic(loader, CAR_STATUS, "getCarBodyTypeValue",
+                new Class<?>[]{Context.class}, stockContext);
         String series = "";
         try {
             Object value = invokeStatic(loader, CAR_STATUS, "getCarSeries", new Class<?>[0]);
@@ -79,21 +82,44 @@ final class ReverseSteeringModelConfig {
                 .getPackageInfo(STOCK_PACKAGE, 0);
         String model = (series == null || series.isEmpty() ? "" : series + "/")
                 + carType + "/" + subCarType;
-        return new PreparedModel(stockContext, packageInfo, model, carType, subCarType);
+        return new PreparedModel(stockContext, packageInfo, model, modelValue, carType, subCarType);
+    }
+
+    /** The shell exposes only this fixed, allowlisted marker read to the app. */
+    static final class RendererMarker {
+        final String status;
+        final String renderer;
+        final String path;
+        final String detail;
+
+        RendererMarker(String status, String renderer, String path, String detail) {
+            this.status = status == null ? "" : status.trim();
+            this.renderer = renderer == null ? "" : renderer.trim();
+            this.path = path == null || path.trim().isEmpty()
+                    ? OEM_RENDERER_FILE : path.trim();
+            this.detail = detail == null ? "" : detail.trim();
+        }
     }
 
     static final class PreparedModel {
         private final Context stockContext;
         private final PackageInfo packageInfo;
         private final String model;
+        private final int modelValue;
         private final String carType;
         private final String subCarType;
 
         PreparedModel(Context stockContext, PackageInfo packageInfo, String model,
                 String carType, String subCarType) {
+            this(stockContext, packageInfo, model, -1, carType, subCarType);
+        }
+
+        PreparedModel(Context stockContext, PackageInfo packageInfo, String model, int modelValue,
+                String carType, String subCarType) {
             this.stockContext = stockContext;
             this.packageInfo = packageInfo;
             this.model = model;
+            this.modelValue = modelValue;
             this.carType = carType;
             this.subCarType = subCarType;
         }
@@ -102,86 +128,210 @@ final class ReverseSteeringModelConfig {
             if (Looper.myLooper() == Looper.getMainLooper()) {
                 throw new IllegalStateException("OEM steering resource selection requires a worker");
             }
-            return resolveResources();
+            return resolve(readRendererMarkerFromApp());
+        }
+
+        Selection resolve(RendererMarker marker) throws Exception {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                throw new IllegalStateException("OEM steering resource selection requires a worker");
+            }
+            return resolveResources(marker);
         }
 
         // The dedicated stock-renderer shell has a Looper but does not host application UI.
         Selection resolveResources() throws Exception {
-            List<String> paths = new ArrayList<>();
-            addIfPresent(paths, "resource_ts/" + carType + "/CarModel/" + subCarType
-                    + "/Vehicle_Configuration.json");
+            return resolveResources(readRendererMarkerFromApp());
+        }
+
+        Selection resolveResources(RendererMarker marker) throws Exception {
+            RendererResolution renderer = resolveRenderer(marker, carType, subCarType,
+                    model, modelValue);
+            String path = configurationPath(carType, subCarType, modelValue,
+                    renderer.renderer, model);
+            boolean ts = "TS".equals(renderer.renderer);
+            String suffix = ts ? "/" + subCarType : bydResourceSuffix(
+                    carType, modelValue, renderer.renderer, model);
             String bydRoot = "resource_byd/" + carType + "/CarModel";
-            addIfPresent(paths, bydRoot + "/configs/vehicle_param.yaml");
-            String[] variants = stockContext.getAssets().list(bydRoot);
-            if (variants != null) {
-                for (String variant : variants) {
-                    requirePathPart("resource variant", variant);
-                    addIfPresent(paths, bydRoot + "/" + variant + "/configs/vehicle_param.yaml");
-                }
-            }
-            String rendererHint = "";
-            // Read the marker written by AutoVideo, never initialize its ADAS-backed renderer.
-            try (InputStream input = new FileInputStream(OEM_RENDERER_FILE)) {
-                rendererHint = readUtf8(input).trim();
-            } catch (IOException | SecurityException unavailable) {
-                // Without a readable marker, only a single model configuration is safe.
-            }
-            String path = selectConfigurationPath(carType, subCarType, paths, rendererHint);
-            boolean ts = path.startsWith("resource_ts/");
-            String root = ts ? "resource_ts/" + carType + "/CarModel" : bydRoot;
-            String ending = ts ? "/Vehicle_Configuration.json" : "/configs/vehicle_param.yaml";
-            String suffix = path.substring(root.length(), path.length() - ending.length());
             return new Selection(stockContext, STOCK_PACKAGE,
                     packageInfo.versionName == null ? "" : packageInfo.versionName,
                     packageInfo.versionCode, packageInfo.lastUpdateTime,
-                    stockContext.getApplicationInfo().sourceDir, model, ts ? "TS" : "BYD",
-                    suffix, path, ts ? "" : "/collect2/autovideo/" + root + suffix
+                    stockContext.getApplicationInfo().sourceDir, model, modelValue,
+                    renderer.renderer, renderer.source, renderer.markerStatus, renderer.markerPath,
+                    suffix, path, ts ? "" : "/collect2/autovideo/" + bydRoot + suffix
                             + "/resource/configs/vehicle_param.yaml", ts ? "json" : "yaml");
-        }
-
-        private void addIfPresent(List<String> paths, String path) throws IOException {
-            int slash = path.lastIndexOf('/');
-            String[] files = stockContext.getAssets().list(path.substring(0, slash));
-            if (files == null) return;
-            for (String file : files) {
-                if (file.equals(path.substring(slash + 1))) {
-                    paths.add(path);
-                    return;
-                }
-            }
         }
     }
 
+    /** Select the one OEM path implied by the active renderer and CarStatus identity. */
     static String selectConfigurationPath(String carType, String subCarType,
-            List<String> paths, String rendererHint) {
+            int modelValue, RendererMarker marker) throws IOException {
         requirePathPart("car type", carType);
         requirePathPart("sub-car type", subCarType);
-        if (!rendererHint.isEmpty() && !"TS".equals(rendererHint) && !"BYD".equals(rendererHint)) {
-            throw new IllegalArgumentException("unsupported OEM renderer: " + rendererHint);
+        RendererResolution renderer = resolveRenderer(marker, carType, subCarType,
+                carType + "/" + subCarType, modelValue);
+        return configurationPath(carType, subCarType, modelValue,
+                renderer.renderer, carType + "/" + subCarType);
+    }
+
+    private static String configurationPath(String carType, String subCarType,
+            int modelValue, String renderer, String model) {
+        if ("TS".equals(renderer)) {
+            return "resource_ts/" + carType + "/CarModel/" + subCarType
+                    + "/Vehicle_Configuration.json";
         }
-        String tsPath = "resource_ts/" + carType + "/CarModel/" + subCarType
-                + "/Vehicle_Configuration.json";
-        String bydRoot = "resource_byd/" + carType + "/CarModel";
-        String bydEnding = "/configs/vehicle_param.yaml";
-        String selected = null;
-        for (String path : paths) {
-            boolean ts = path.equals(tsPath);
-            boolean byd = path.startsWith(bydRoot + "/") && path.endsWith(bydEnding);
-            if (byd) {
-                requireResourceSuffix(path.substring(bydRoot.length(), path.length() - bydEnding.length()));
+        String suffix = bydResourceSuffix(carType, modelValue, renderer, model);
+        requireResourceSuffix(suffix);
+        return "resource_byd/" + carType + "/CarModel" + suffix
+                + "/configs/vehicle_param.yaml";
+    }
+
+    private static RendererMarker readRendererMarkerFromApp() {
+        try (InputStream input = Files.newInputStream(Paths.get(OEM_RENDERER_FILE))) {
+            return new RendererMarker("ok", readUtf8(input, 4096,
+                    "OEM renderer marker is too large"), OEM_RENDERER_FILE, "");
+        } catch (NoSuchFileException missing) {
+            return new RendererMarker("missing", "", OEM_RENDERER_FILE, message(missing));
+        } catch (AccessDeniedException | SecurityException denied) {
+            return new RendererMarker("denied", "", OEM_RENDERER_FILE, message(denied));
+        } catch (IOException readFailure) {
+            return new RendererMarker("error", "", OEM_RENDERER_FILE, message(readFailure));
+        } catch (IllegalArgumentException oversized) {
+            return new RendererMarker("error", "", OEM_RENDERER_FILE, message(oversized));
+        }
+    }
+
+    static RendererResolution resolveRenderer(RendererMarker marker, String carType,
+            String subCarType, String model, int modelValue) throws IOException {
+        String path = marker == null ? OEM_RENDERER_FILE : marker.path;
+        String detail = marker == null ? "" : marker.detail;
+        String identity = "model=" + model + ";model_value=" + modelValue;
+        String status = marker == null ? "missing" : marker.status;
+        if ("ambiguous".equals(status)) {
+            throw new IllegalArgumentException("ambiguous OEM renderer marker: " + path
+                    + "; " + identity + detailSuffix(detail));
+        }
+        if (!"ok".equals(status) && !"missing".equals(status)
+                && !"denied".equals(status) && !"error".equals(status)) {
+            throw new IllegalArgumentException("unsupported OEM renderer marker status '"
+                    + status + "': " + path + "; " + identity + detailSuffix(detail));
+        }
+
+        String renderer = marker == null ? "" : marker.renderer;
+        if ("ok".equals(status) && ("TS".equals(renderer) || "BYD".equals(renderer))) {
+            return new RendererResolution(renderer, "marker", status, path);
+        }
+        boolean hasTs = false;
+        boolean hasByd = false;
+        for (String token : renderer.split("[^A-Za-z0-9]+")) {
+            hasTs |= "TS".equals(token);
+            hasByd |= "BYD".equals(token);
+        }
+        if (hasTs && hasByd) {
+            throw new IllegalArgumentException("ambiguous OEM renderer marker: " + path
+                    + "; value='" + renderer + "'; " + identity);
+        }
+        if ("ok".equals(status) && !renderer.isEmpty()) {
+            throw new IllegalArgumentException("unsupported OEM renderer marker: " + path
+                    + "; value='" + renderer + "'; " + identity + detailSuffix(detail));
+        }
+
+        String knownFallback = knownMissingMarkerRenderer(carType, subCarType, modelValue);
+        if (knownFallback != null) {
+            return new RendererResolution(knownFallback, "oem_model_fallback", status, path);
+        }
+        if ("missing".equals(status)) {
+            throw new FileNotFoundException("OEM renderer marker missing: " + path + "; " + identity);
+        }
+        if ("denied".equals(status)) {
+            throw new SecurityException("OEM renderer marker permission denied: " + path
+                    + "; " + identity + detailSuffix(detail));
+        }
+        if ("error".equals(status)) {
+            throw new IOException("OEM renderer marker read failed: " + path
+                    + "; " + identity + detailSuffix(detail));
+        }
+        throw new IllegalArgumentException("unsupported OEM renderer marker: " + path
+                + "; value='" + renderer + "'; " + identity + detailSuffix(detail));
+    }
+
+    /** Source-backed missing-marker behavior only for these exact installed OEM variants. */
+    private static String knownMissingMarkerRenderer(
+            String carType, String subCarType, int modelValue) {
+        if ("shh".equals(carType) && "shh".equals(subCarType) && modelValue == 235) {
+            return "BYD";
+        }
+        if ("uked".equals(carType) && "uked".equals(subCarType) && modelValue == 286) {
+            return "BYD";
+        }
+        return null;
+    }
+
+    static final class RendererResolution {
+        final String renderer;
+        final String source;
+        final String markerStatus;
+        final String markerPath;
+
+        RendererResolution(String renderer, String source, String markerStatus, String markerPath) {
+            this.renderer = renderer;
+            this.source = source;
+            this.markerStatus = markerStatus;
+            this.markerPath = markerPath;
+        }
+    }
+
+    /** Mirrors PanoResourceController.getCarParamPath without its SDK-helper/ADAS calls. */
+    private static String bydResourceSuffix(
+            String carType, int modelValue, String renderer, String model) {
+        boolean requiresModelValue = "mars".equals(carType) || "stf".equals(carType)
+                || "sa20".equals(carType) || "em3ui".equals(carType)
+                || "ster".equals(carType) || "mr".equals(carType)
+                || "r".equals(carType) || "hc5".equals(carType);
+        if (requiresModelValue && modelValue <= 0) {
+            throw new IllegalArgumentException("ambiguous active BYD trim: model value unavailable"
+                    + "; model=" + model + "; model_value=" + modelValue);
+        }
+        if ("mars".equals(carType)) return modelValue == 126 ? "/bev" : "/phev";
+        if ("hc22".equals(carType)) return "/hc22";
+        if ("stf".equals(carType)) {
+            if (modelValue == 59 || modelValue == 47 || modelValue == 114) return "/bev";
+            if (modelValue == 52 || modelValue == 115) return "/phev";
+            if (modelValue == 136) {
+                throw new IllegalArgumentException("unsupported active BYD trim: model_value=136 "
+                        + "requires ADAS-backed is4Drive; model=" + model);
             }
-            if ((!ts && !byd) || ("TS".equals(rendererHint) && !ts)
-                    || ("BYD".equals(rendererHint) && !byd)) continue;
-            // Multiple renderer/trim resources are not evidence of which one is active.
-            if (selected != null && !selected.equals(path)) {
-                throw new IllegalArgumentException("ambiguous active-model steering configuration");
+            return "/fpv";
+        }
+        if ("sa20".equals(carType)) return modelValue == 68 ? "/fpv" : "/phev";
+        if ("em3ui".equals(carType)) return modelValue == 127 ? "/bev" : "";
+        if ("sc2e".equals(carType)) return "";
+        if ("ster".equals(carType)) return modelValue == 137 ? "/bev" : "";
+        if ("mr".equals(carType)) {
+            return modelValue == 57 || modelValue == 56 ? "/mrh" : "/mre";
+        }
+        if ("r".equals(carType)) return modelValue == 146 ? "/r2" : "/sg";
+        if ("hc5".equals(carType)) {
+            if (modelValue == 121) return "/hchq5";
+            return modelValue == 135 ? "/hcef5" : "";
+        }
+        if ("ukea".equals(carType)) return "/ukea";
+        if ("ukeb".equals(carType)) return "/ukeb";
+        if ("uxe24".equals(carType)) return "/uxe24";
+
+        String[] tsOnlyTypes = {"sk24", "hx24", "ureb", "urec", "ured", "uref",
+                "hc24e", "srha", "srea", "uked", "hc24h", "hkh", "sah25",
+                "hch25", "hce25", "sa3e", "sa3h", "ha3h"};
+        for (String tsOnlyType : tsOnlyTypes) {
+            if (tsOnlyType.equals(carType)) {
+                return "TS".equals(renderer) ? "/" + carType : "";
             }
-            selected = path;
         }
-        if (selected == null) {
-            throw new IllegalArgumentException("active-model steering configuration unavailable");
-        }
-        return selected;
+        // PanoResourceController's default path suffix is the empty string.
+        return "";
+    }
+
+    private static String detailSuffix(String detail) {
+        return detail == null || detail.isEmpty() ? "" : "; detail=" + detail;
     }
 
     boolean sameModel(ReverseSteeringModelConfig other) {
@@ -203,7 +353,11 @@ final class ReverseSteeringModelConfig {
         final long packageLastUpdateTime;
         final String packageSourceDir;
         final String model;
+        final int modelValue;
         final String renderer;
+        final String rendererSelectionSource;
+        final String rendererMarkerStatus;
+        final String rendererMarkerPath;
         final String resourceSuffix;
         final String configurationPath;
         final String externalConfigurationPath;
@@ -212,8 +366,10 @@ final class ReverseSteeringModelConfig {
 
         Selection(Context stockContext, String packageName, String packageVersionName,
                 int packageVersionCode, long packageLastUpdateTime, String packageSourceDir,
-                String model, String renderer, String resourceSuffix, String configurationPath,
-                String externalConfigurationPath, String configurationFormat) {
+                String model, int modelValue, String renderer, String rendererSelectionSource,
+                String rendererMarkerStatus, String rendererMarkerPath, String resourceSuffix,
+                String configurationPath, String externalConfigurationPath,
+                String configurationFormat) {
             this.stockContext = stockContext;
             this.packageName = packageName;
             this.packageVersionName = packageVersionName;
@@ -221,7 +377,11 @@ final class ReverseSteeringModelConfig {
             this.packageLastUpdateTime = packageLastUpdateTime;
             this.packageSourceDir = packageSourceDir;
             this.model = model;
+            this.modelValue = modelValue;
             this.renderer = renderer;
+            this.rendererSelectionSource = rendererSelectionSource;
+            this.rendererMarkerStatus = rendererMarkerStatus;
+            this.rendererMarkerPath = rendererMarkerPath;
             this.resourceSuffix = resourceSuffix;
             this.configurationPath = configurationPath;
             this.externalConfigurationPath = externalConfigurationPath;
@@ -234,7 +394,11 @@ final class ReverseSteeringModelConfig {
                     && packageVersionCode == other.packageVersionCode
                     && packageLastUpdateTime == other.packageLastUpdateTime
                     && packageSourceDir.equals(other.packageSourceDir)
-                    && model.equals(other.model) && renderer.equals(other.renderer)
+                    && model.equals(other.model) && modelValue == other.modelValue
+                    && renderer.equals(other.renderer)
+                    && rendererSelectionSource.equals(other.rendererSelectionSource)
+                    && rendererMarkerStatus.equals(other.rendererMarkerStatus)
+                    && rendererMarkerPath.equals(other.rendererMarkerPath)
                     && resourceSuffix.equals(other.resourceSuffix)
                     && configurationPath.equals(other.configurationPath)
                     && externalConfigurationPath.equals(other.externalConfigurationPath);
@@ -249,7 +413,17 @@ final class ReverseSteeringModelConfig {
             try (InputStream input = stockContext.getAssets().open(configurationPath)) {
                 raw = readUtf8(input);
             } catch (FileNotFoundException missing) {
-                return capture("", message(missing));
+                return capture("", "selected " + renderer + " steering configuration missing: "
+                        + configurationPath);
+            } catch (SecurityException denied) {
+                throw new SecurityException("selected " + renderer
+                        + " steering configuration permission denied: " + configurationPath
+                        + "; model=" + model + "; model_value=" + modelValue,
+                        denied);
+            } catch (IOException readFailure) {
+                throw new IOException("selected " + renderer + " steering configuration read failed: "
+                        + configurationPath + "; model=" + model + "; model_value=" + modelValue
+                        + "; " + message(readFailure), readFailure);
             }
             return capture(raw, "");
         }
@@ -288,7 +462,11 @@ final class ReverseSteeringModelConfig {
         final long packageLastUpdateTime;
         final String packageSourceDir;
         final String model;
+        final int modelValue;
         final String renderer;
+        final String rendererSelectionSource;
+        final String rendererMarkerStatus;
+        final String rendererMarkerPath;
         final String resourceSuffix;
         final String configurationPath;
         final String externalConfigurationPath;
@@ -311,7 +489,11 @@ final class ReverseSteeringModelConfig {
             packageLastUpdateTime = selection.packageLastUpdateTime;
             packageSourceDir = selection.packageSourceDir;
             model = selection.model;
+            modelValue = selection.modelValue;
             renderer = selection.renderer;
+            rendererSelectionSource = selection.rendererSelectionSource;
+            rendererMarkerStatus = selection.rendererMarkerStatus;
+            rendererMarkerPath = selection.rendererMarkerPath;
             resourceSuffix = selection.resourceSuffix;
             configurationPath = selection.configurationPath;
             externalConfigurationPath = selection.externalConfigurationPath;
@@ -526,15 +708,20 @@ final class ReverseSteeringModelConfig {
                 ? failure.getClass().getSimpleName() : message;
     }
 
-    private static String readUtf8(InputStream input) throws Exception {
+    private static String readUtf8(InputStream input) throws IOException {
+        return readUtf8(input, MAX_CONFIG_BYTES, "active model configuration is too large");
+    }
+
+    private static String readUtf8(InputStream input, int maximumBytes, String tooLargeMessage)
+            throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         byte[] buffer = new byte[4096];
         int total = 0;
         int count;
         while ((count = input.read(buffer)) != -1) {
             total += count;
-            if (total > MAX_CONFIG_BYTES) {
-                throw new IllegalArgumentException("active model configuration is too large");
+            if (total > maximumBytes) {
+                throw new IllegalArgumentException(tooLargeMessage);
             }
             output.write(buffer, 0, count);
         }

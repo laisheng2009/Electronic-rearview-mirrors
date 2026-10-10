@@ -10,6 +10,10 @@ import android.view.Surface;
 
 import org.junit.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -202,14 +206,108 @@ public final class PersistentCameraSessionTest {
         } catch (IllegalStateException expected) {
             assertEquals("attach failed", expected.getMessage());
         }
-        CameraHelperMain.HelperBinder.closeFailedPersistentProducer(camera, fanout);
+        CameraHelperMain.HelperBinder.closeFailedPersistentProducer(camera, fanout, session);
 
         assertTrue(trace.values.indexOf("start")
                 < trace.values.indexOf("stop"));
         assertTrue(trace.values.indexOf("stop")
+                < trace.values.indexOf("remove:2"));
+        assertTrue(trace.values.indexOf("remove:2")
                 < trace.values.indexOf("close"));
         assertTrue(trace.values.indexOf("close")
                 < trace.values.indexOf("fanout-close"));
+    }
+
+    @Test
+    public void failedDirectOpenDetachesOnlyAttemptedInputAfterSuccessfulStop()
+            throws Exception {
+        Trace trace = new Trace();
+        FakeCameraPort camera = new FakeCameraPort(trace);
+        camera.failAddCall = 1;
+        FakeFanout fanout = new FakeFanout(trace);
+        CameraHelperMain.HelperBinder.PersistentSession session = session();
+
+        try {
+            session.startProducer(camera, fanout, session.activityGroup,
+                    testSurfaces(1), new int[]{0}, 4,
+                    "stock_avm_input", true, true, true);
+            fail("direct add should fail");
+        } catch (IllegalStateException expected) {
+            assertEquals("attach failed", expected.getMessage());
+        }
+        CameraHelperMain.HelperBinder.closeFailedPersistentProducer(camera, fanout, session);
+
+        assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("remove:0"));
+        assertTrue(trace.values.indexOf("remove:0") < trace.values.indexOf("close"));
+        assertTrue(trace.values.indexOf("close") < trace.values.indexOf("fanout-close"));
+        assertEquals(1, count(trace.values, "remove:0"));
+    }
+
+    @Test
+    public void failedProducerStopSkipsNativeDetachButStillClosesResources() throws Exception {
+        for (boolean throwsFromStop : new boolean[]{false, true}) {
+            Trace trace = new Trace();
+            FakeCameraPort camera = new FakeCameraPort(trace);
+            if (throwsFromStop) camera.stopFailure = new IllegalStateException("stop failed");
+            else camera.stopResult = false;
+            FakeFanout fanout = new FakeFanout(trace);
+            CameraHelperMain.HelperBinder.PersistentSession session = session();
+            session.startProducer(camera, fanout, session.activityGroup,
+                    testSurfaces(2), new int[]{0, 2}, 5,
+                    "reverse_preview_with_stock_base", false, false, true);
+
+            CameraHelperMain.HelperBinder.TeardownOutcome outcome = session.tearDown(
+                    camera, "test_stop_failure", null, false, 0, false,
+                    new FakeShellClose(trace), new FakeEventSink(trace, session), 1);
+
+            assertTrue(outcome.failure != null);
+            assertEquals(1, count(trace.values, "stop"));
+            assertEquals(0, countPrefix(trace.values, "remove:"));
+            assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("close"));
+            assertTrue(trace.values.indexOf("close") < trace.values.indexOf("fanout-close"));
+            assertFalse(session.producerOpen);
+            assertFalse(session.activityGroup.has());
+        }
+    }
+
+    @Test
+    public void detachErrorsDoNotSkipRemainingDetachOrPostCloseReleases() throws Exception {
+        Trace trace = new Trace();
+        FakeCameraPort camera = new FakeCameraPort(trace);
+        camera.failRemoveCall = 1;
+        camera.removeResult = false;
+        FakeFanout fanout = new FakeFanout(trace);
+        fanout.closeFailure = new IllegalStateException("fanout close failed");
+        CameraHelperMain.HelperBinder.PersistentSession session = session();
+        Surface consumerInput = new TestSurface(trace, "consumer");
+        Surface preview = new TestSurface(trace, "activity_preview");
+        session.startProducer(camera, fanout, session.activityGroup,
+                new Surface[]{consumerInput, new TestSurface(trace, "fanout_target")},
+                new int[]{0, 2}, 6, "reverse_preview_with_stock_base",
+                false, false, true);
+        CameraHelperMain.HelperBinder.ActivityPreviewState.Snapshot<Surface> activityPreview =
+                new CameraHelperMain.HelperBinder.ActivityPreviewState.Snapshot<>(
+                        preview, 4, true, true);
+
+        CameraHelperMain.HelperBinder.TeardownOutcome outcome = session.tearDown(
+                camera, "detach_failure", null, false, 0, false,
+                new FakeShellClose(trace), new FakeEventSink(trace, session), 1,
+                activityPreview, new Surface[0]);
+
+        assertTrue(outcome.failure != null);
+        assertEquals(3, camera.removeCalls);
+        assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("remove:0"));
+        for (String removal : new String[]{"remove:0", "remove:2", "remove:4"}) {
+            assertTrue(trace.values.indexOf("stop") < trace.values.indexOf(removal));
+            assertTrue(trace.values.indexOf(removal) < trace.values.indexOf("close"));
+        }
+        assertTrue(trace.values.indexOf("close") < trace.values.indexOf("fanout-close"));
+        assertTrue(trace.values.indexOf("fanout-close")
+                < trace.values.indexOf("surface-release:activity_preview"));
+        assertTrue(trace.values.indexOf("fanout-close")
+                < trace.values.indexOf("surface-release:consumer"));
+        assertTrue(trace.values.indexOf("fanout-close")
+                < trace.values.indexOf("surface-release:fanout_target"));
     }
 
     @Test
@@ -1484,6 +1582,9 @@ public final class PersistentCameraSessionTest {
         assertEquals(1, count(trace.values, "remove:2"));
         assertEquals(1, count(trace.values, "remove:3"));
         assertEquals(1, count(trace.values, "stop"));
+        assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("remove:2"));
+        assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("remove:3"));
+        assertTrue(trace.values.indexOf("remove:2") < trace.values.indexOf("close"));
         assertEquals(1, count(trace.values, "close"));
         assertEquals(1, count(trace.values, "fanout-close"));
         assertFalse(session.producerOpen);
@@ -1730,6 +1831,7 @@ public final class PersistentCameraSessionTest {
         assertEquals(1, count(trace.values, "remove:2"));
         assertEquals(1, count(trace.values, "stop"));
         assertEquals(1, count(trace.values, "close"));
+        assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("remove:2"));
 
         boolean latched = closeFailure != null;
         for (int requestId = 201; requestId <= 202; requestId++) {
@@ -1743,6 +1845,104 @@ public final class PersistentCameraSessionTest {
         assertEquals(2, released.get());
         assertEquals(1, events.count("camera_error", 201));
         assertEquals(1, events.count("camera_error", 202));
+    }
+
+    @Test
+    public void failedOneShotStopClosesWithoutDetachingLiveSurface() {
+        for (boolean throwsFromStop : new boolean[]{false, true}) {
+            Trace trace = new Trace();
+            FakeCameraPort camera = new FakeCameraPort(trace);
+            if (throwsFromStop) camera.stopFailure = new IllegalStateException("stop failed");
+            else camera.stopResult = false;
+            CameraHelperMain.HelperBinder.ActivityPreviewState.Snapshot<Surface> activity =
+                    activityPreviewSnapshot(trace);
+
+            Throwable failure = CameraHelperMain.HelperBinder.closeOneShotPort(
+                    camera, testSurfaces(1), new int[]{2}, new boolean[]{true}, activity);
+
+            assertTrue(failure != null);
+            assertEquals(1, count(trace.values, "stop"));
+            assertEquals(0, countPrefix(trace.values, "remove:"));
+            assertEquals(1, count(trace.values, "close"));
+            assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("close"));
+            assertFalse(trace.values.contains("surface-release:activity_preview"));
+        }
+    }
+
+    @Test
+    public void oneShotRetirementStopsBeforeRemovingEveryOwnedTarget() {
+        Trace trace = new Trace();
+        FakeCameraPort camera = new FakeCameraPort(trace);
+        CameraHelperMain.HelperBinder.ActivityPreviewState.Snapshot<Surface> activity =
+                activityPreviewSnapshot(trace);
+
+        Throwable failure = CameraHelperMain.HelperBinder.closeOneShotPort(
+                camera, testSurfaces(1), new int[]{2}, new boolean[]{true}, activity);
+
+        assertEquals(null, failure);
+        assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("remove:2"));
+        assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("remove:4"));
+        assertTrue(trace.values.indexOf("remove:2") < trace.values.indexOf("close"));
+        assertTrue(trace.values.indexOf("remove:4") < trace.values.indexOf("close"));
+        assertTrue(trace.values.indexOf("remove:2") < trace.values.indexOf("remove:4"));
+        assertEquals(1, count(trace.values, "close"));
+    }
+
+    @Test
+    public void oneShotActivityRemovalFailureDoesNotSkipOtherRemovalsOrClose() {
+        Trace trace = new Trace();
+        FakeCameraPort camera = new FakeCameraPort(trace);
+        camera.failRemoveCall = 1;
+        CameraHelperMain.HelperBinder.ActivityPreviewState.Snapshot<Surface> activity =
+                activityPreviewSnapshot(trace);
+
+        Throwable failure = CameraHelperMain.HelperBinder.closeOneShotPort(
+                camera, testSurfaces(1), new int[]{2}, new boolean[]{true}, activity);
+
+        assertTrue(failure != null);
+        assertEquals(2, camera.removeCalls);
+        assertTrue(trace.values.indexOf("stop") < trace.values.indexOf("remove:2"));
+        assertTrue(trace.values.indexOf("remove:2") < trace.values.indexOf("remove:4"));
+        assertTrue(trace.values.indexOf("remove:4") < trace.values.indexOf("close"));
+        assertEquals(1, count(trace.values, "close"));
+    }
+
+    @Test
+    public void oneShotFailedMultiOpenRoutesActivityPreviewThroughStoppedCleanup()
+            throws Exception {
+        Path sourcePath = Paths.get("src/main/java/com/byd/extend/CameraHelperMain.java");
+        if (!Files.exists(sourcePath)) {
+            sourcePath = Paths.get("app/src/main/java/com/byd/extend/CameraHelperMain.java");
+        }
+        String source = new String(Files.readAllBytes(sourcePath), StandardCharsets.UTF_8)
+                .replace("\r\n", "\n");
+        int methodEnd = source.indexOf("void prepareOverlayWindow(");
+        int methodStart = source.lastIndexOf(
+                "private synchronized String openMultiCamera(", methodEnd);
+        int successState = source.indexOf("activityPreview.setAttached(activityAttached)",
+                methodStart);
+        int cleanupStart = source.indexOf("catch (Throwable error)", successState);
+        int cleanupEnd = source.indexOf("releaseSurfaces(requestedSurfaces)", cleanupStart);
+        assertTrue(methodStart >= 0);
+        assertTrue(successState > methodStart);
+        assertTrue(cleanupStart > successState);
+        assertTrue(cleanupEnd > cleanupStart);
+        String cleanup = source.substring(cleanupStart, cleanupEnd);
+        assertTrue(cleanup.contains("new ActivityPreviewState.Snapshot<>("));
+        assertTrue(cleanup.contains("tryClose(opened, requestedSurfaces, indexes, attached,"));
+        assertFalse(cleanup.contains("rmPreviewSurface"));
+
+        int closeStart = source.indexOf("private synchronized String closeOneShotCamera(",
+                methodEnd);
+        int closeEnd = source.indexOf("synchronized String closeCameraForOwner(", closeStart);
+        String oneShotClose = source.substring(closeStart, closeEnd);
+        assertTrue(oneShotClose.contains("activeMultiIndexes, null, activeActivityPreview"));
+        assertTrue(oneShotClose.contains("activeActivityPreview);"));
+        assertTrue(oneShotClose.indexOf("tryClose(activeCamera")
+                < oneShotClose.indexOf("activeSurface.release()"));
+        assertTrue(oneShotClose.indexOf("tryClose(activeCamera")
+                < oneShotClose.indexOf("releaseSurfaces(pendingReverseSurfaces)"));
+        assertFalse(oneShotClose.contains("rmPreviewSurface"));
     }
 
     @Test
@@ -1908,6 +2108,12 @@ public final class PersistentCameraSessionTest {
         return result;
     }
 
+    private static CameraHelperMain.HelperBinder.ActivityPreviewState.Snapshot<Surface>
+            activityPreviewSnapshot(Trace trace) {
+        return new CameraHelperMain.HelperBinder.ActivityPreviewState.Snapshot<>(
+                new TestSurface(trace, "activity_preview"), 4, true, true);
+    }
+
     private static List<Boolean> list(Boolean... values) {
         List<Boolean> result = new ArrayList<>();
         for (Boolean value : values) result.add(value);
@@ -1931,12 +2137,22 @@ public final class PersistentCameraSessionTest {
     }
 
     private static final class TestSurface extends Surface {
+        final Trace trace;
+        final String name;
+
         TestSurface() {
+            this(null, "");
+        }
+
+        TestSurface(Trace trace, String name) {
             super((android.graphics.SurfaceTexture) null);
+            this.trace = trace;
+            this.name = name;
         }
 
         @Override
         public void release() {
+            if (trace != null) trace.values.add("surface-release:" + name);
         }
 
         @Override
@@ -1952,6 +2168,11 @@ public final class PersistentCameraSessionTest {
         int failAddCall;
         boolean addResult = true;
         boolean removeResult = true;
+        int removeCalls;
+        int failRemoveCall;
+        boolean stopResult = true;
+        RuntimeException stopFailure;
+        RuntimeException closeFailure;
 
         FakeCameraPort(Trace trace) {
             this.trace = trace;
@@ -1968,6 +2189,8 @@ public final class PersistentCameraSessionTest {
         @Override
         public boolean remove(Surface value, int index) {
             trace.values.add("remove:" + index);
+            removeCalls++;
+            if (removeCalls == failRemoveCall) throw new IllegalStateException("remove failed");
             return removeResult;
         }
 
@@ -1978,13 +2201,16 @@ public final class PersistentCameraSessionTest {
         }
 
         @Override
-        public void stop() {
+        public boolean stop() {
             trace.values.add("stop");
+            if (stopFailure != null) throw stopFailure;
+            return stopResult;
         }
 
         @Override
         public void close() {
             trace.values.add("close");
+            if (closeFailure != null) throw closeFailure;
         }
     }
 
@@ -2000,6 +2226,7 @@ public final class PersistentCameraSessionTest {
         int setActiveCalls;
         int failSetActiveCall;
         Surface forgottenTarget;
+        RuntimeException closeFailure;
 
         FakeFanout(Trace trace) {
             this.trace = trace;
@@ -2012,7 +2239,7 @@ public final class PersistentCameraSessionTest {
         }
 
         @Override
-        public void attach(Surface[] values, int[] indexes) {
+        public void attach(Surface[] values, int[] indexes, int requestId, int producerEpoch) {
             attachCalls++;
             if (attachCalls == failAttachCall || attachCalls == failAttachCall2) {
                 throw new IllegalStateException("attach failed");
@@ -2052,6 +2279,7 @@ public final class PersistentCameraSessionTest {
         public void close() {
             activeTargets = 0;
             trace.values.add("fanout-close");
+            if (closeFailure != null) throw closeFailure;
         }
     }
 

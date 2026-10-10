@@ -76,6 +76,18 @@ public final class CameraFrameRateTest {
         assertTrue(helper.contains("\"effective_fps_verified\", false"));
         assertTrue(helper.contains("\"fps_window_stable\""));
         assertTrue(helper.contains("\"new_buffer_fps\""));
+        assertTrue(helper.contains("\"measured_new_buffer_fps\""));
+        assertTrue(helper.contains("\"camera_fps_window_stats\""));
+        int statsStart = helper.indexOf("public void onStats(int index");
+        int statsEnd = helper.indexOf("public void onTargetStall(", statsStart);
+        String stats = helper.substring(statsStart, statsEnd);
+        assertTrue(stats.contains("if (stats.fpsWindow)"));
+        assertTrue(stats.contains("emit(\"camera_fps_window_stats\""));
+        assertTrue(stats.contains("if (extended)"));
+        assertTrue(stats.contains("emit(\"camera_source_hub_stats\""));
+        assertTrue(stats.contains("\"requested_fps\", requestedFrameRate"));
+        assertFalse(stats.contains("emit(extended ?"));
+        assertTrue(helper.contains("collectStatsForWindow(requestedFrameRate)"));
         assertTrue(helper.contains("\"new_buffer_fps_valid\", stats.producerTimestampInvalid == 0"));
         String screen = source("kotlin/com/byd/extend/ui/SettingsScreen.kt");
         assertTrue(screen.indexOf("row(\"quality\")") < screen.indexOf("row(\"frame-rate\")"));

@@ -5,11 +5,12 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -17,49 +18,111 @@ import org.junit.Assume;
 import org.junit.Test;
 
 public final class ReverseSteeringModelConfigTest {
-    @Test public void selectsUniqueTsAndBydModelResourcesWithoutOemInitialization() {
-        String ts = "resource_ts/ukea/CarModel/ukea/Vehicle_Configuration.json";
-        String byd = "resource_byd/shh/CarModel/configs/vehicle_param.yaml";
-        assertEquals(ts, ReverseSteeringModelConfig.selectConfigurationPath(
-                "ukea", "ukea", List.of(ts, byd), ""));
-        assertEquals(byd, ReverseSteeringModelConfig.selectConfigurationPath(
-                "shh", "shh", List.of(ts, byd), ""));
+    @Test public void ownerUked286UsesActiveRendererAndExactStockTrimFixtures() throws Exception {
+        String tsPath = ReverseSteeringModelConfig.selectConfigurationPath(
+                "uked", "uked", 286, marker("TS"));
+        String bydPath = ReverseSteeringModelConfig.selectConfigurationPath(
+                "uked", "uked", 286, marker("BYD"));
+        assertEquals("resource_ts/uked/CarModel/uked/Vehicle_Configuration.json", tsPath);
+        assertEquals("resource_byd/uked/CarModel/configs/vehicle_param.yaml", bydPath);
+
+        Path tsAsset = checkedInAsset(tsPath);
+        Path bydAsset = checkedInAsset(bydPath);
+        Assume.assumeTrue("owner TS fixture is outside this checkout", tsAsset != null);
+        Assume.assumeTrue("owner BYD fixture is outside this checkout", bydAsset != null);
+        ReverseSteeringModelConfig ts = ReverseSteeringModelConfig.fromJson(
+                "ocean/uked/uked", new String(Files.readAllBytes(tsAsset), StandardCharsets.UTF_8));
+        ReverseSteeringModelConfig byd = ReverseSteeringModelConfig.fromYaml(
+                "ocean/uked/uked", new String(Files.readAllBytes(bydAsset), StandardCharsets.UTF_8));
+        assertEquals(-543.163f, ts.minimumDegrees, .0001f);
+        assertEquals(543.163f, ts.maximumDegrees, .0001f);
+        assertEquals(-512.0f, byd.minimumDegrees, 0.0f);
+        assertEquals(512.0f, byd.maximumDegrees, 0.0f);
     }
 
-    @Test public void oemMarkerDisambiguatesDualRendererModelWithoutCrossRendererFallback() {
-        String ts = "resource_ts/uked/CarModel/uked/Vehicle_Configuration.json";
-        String byd = "resource_byd/uked/CarModel/configs/vehicle_param.yaml";
-        List<String> paths = List.of(ts, byd);
-        assertEquals(ts, ReverseSteeringModelConfig.selectConfigurationPath(
-                "uked", "uked", paths, "TS"));
-        assertEquals(byd, ReverseSteeringModelConfig.selectConfigurationPath(
-                "uked", "uked", paths, "BYD"));
-        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+    @Test public void markerFailuresKeepMissingDeniedAmbiguousAndUnsupportedDistinct() {
+        FileNotFoundException missing = org.junit.Assert.assertThrows(FileNotFoundException.class,
                 () -> ReverseSteeringModelConfig.selectConfigurationPath(
-                        "uked", "uked", paths, ""));
-        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                        "unmapped", "trim", 999, new ReverseSteeringModelConfig.RendererMarker(
+                                "missing", "", "/collect2/autovideo/sdk/pano_sdk.txt", "")));
+        assertTrue(missing.getMessage().contains("marker missing"));
+        assertTrue(missing.getMessage().contains("model_value=999"));
+
+        SecurityException denied = org.junit.Assert.assertThrows(SecurityException.class,
                 () -> ReverseSteeringModelConfig.selectConfigurationPath(
-                        "uked", "uked", List.of(ts), "BYD"));
-        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                        "unmapped", "trim", 999, new ReverseSteeringModelConfig.RendererMarker(
+                                "denied", "", "/collect2/autovideo/sdk/pano_sdk.txt", "EACCES")));
+        assertTrue(denied.getMessage().contains("permission denied"));
+        assertTrue(denied.getMessage().contains("EACCES"));
+
+        IOException readError = org.junit.Assert.assertThrows(IOException.class,
                 () -> ReverseSteeringModelConfig.selectConfigurationPath(
-                        "uked", "uked", paths, "APA"));
+                        "unmapped", "trim", 999, new ReverseSteeringModelConfig.RendererMarker(
+                                "error", "", "/collect2/autovideo/sdk/pano_sdk.txt", "EIO")));
+        assertTrue(readError.getMessage().contains("marker read failed"));
+        assertTrue(readError.getMessage().contains("EIO"));
+
+        IllegalArgumentException ambiguous = org.junit.Assert.assertThrows(
+                IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath(
+                        "uked", "uked", 286, marker("TS,BYD")));
+        assertTrue(ambiguous.getMessage().contains("ambiguous OEM renderer marker"));
+
+        IllegalArgumentException unsupported = org.junit.Assert.assertThrows(
+                IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath(
+                        "uked", "uked", 286, marker("APA")));
+        assertTrue(unsupported.getMessage().contains("unsupported OEM renderer marker"));
     }
 
-    @Test public void doesNotGuessBydTrimOrUseAnotherTsSubtype() {
-        String bev = "resource_byd/body/CarModel/bev/configs/vehicle_param.yaml";
-        String phev = "resource_byd/body/CarModel/phev/configs/vehicle_param.yaml";
-        org.junit.Assert.assertThrows(IllegalArgumentException.class,
+    @Test public void onlySourceConfirmedModelsUseOemDefinedMissingMarkerFallback() throws Exception {
+        ReverseSteeringModelConfig.RendererMarker missing = new ReverseSteeringModelConfig.RendererMarker(
+                "missing", "", "/collect2/autovideo/sdk/pano_sdk.txt", "");
+        assertEquals("resource_byd/uked/CarModel/configs/vehicle_param.yaml",
+                ReverseSteeringModelConfig.selectConfigurationPath("uked", "uked", 286, missing));
+        assertEquals("resource_byd/shh/CarModel/configs/vehicle_param.yaml",
+                ReverseSteeringModelConfig.selectConfigurationPath("shh", "shh", 235, missing));
+
+        ReverseSteeringModelConfig.RendererResolution ownerFallback =
+                ReverseSteeringModelConfig.resolveRenderer(
+                        missing, "uked", "uked", "ocean/uked/uked", 286);
+        assertEquals("BYD", ownerFallback.renderer);
+        assertEquals("oem_model_fallback", ownerFallback.source);
+        assertEquals("missing", ownerFallback.markerStatus);
+        ReverseSteeringModelConfig.RendererResolution ownerDeniedFallback =
+                ReverseSteeringModelConfig.resolveRenderer(
+                        new ReverseSteeringModelConfig.RendererMarker(
+                                "denied", "", "/collect2/autovideo/sdk/pano_sdk.txt", "EACCES"),
+                        "uked", "uked", "ocean/uked/uked", 286);
+        assertEquals("BYD", ownerDeniedFallback.renderer);
+        assertEquals("denied", ownerDeniedFallback.markerStatus);
+        org.junit.Assert.assertThrows(FileNotFoundException.class,
                 () -> ReverseSteeringModelConfig.selectConfigurationPath(
-                        "body", "trim", List.of(bev, phev), "BYD"));
-        org.junit.Assert.assertThrows(IllegalArgumentException.class,
-                () -> ReverseSteeringModelConfig.selectConfigurationPath("body", "trim",
-                        List.of("resource_ts/body/CarModel/other/Vehicle_Configuration.json"), "TS"));
-        org.junit.Assert.assertThrows(IllegalArgumentException.class,
-                () -> ReverseSteeringModelConfig.selectConfigurationPath("../body", "trim",
-                        List.of(bev), "BYD"));
-        org.junit.Assert.assertThrows(IllegalArgumentException.class,
-                () -> ReverseSteeringModelConfig.selectConfigurationPath("body", "trim",
-                        List.of("resource_byd/body/CarModel/../configs/vehicle_param.yaml"), "BYD"));
+                        "uked", "uked", 285, missing));
+    }
+
+    @Test public void mirrorsOemBydTrimRulesWithoutAdasAndRejectsUnknownRequiredValue()
+            throws Exception {
+        assertEquals("resource_byd/mars/CarModel/bev/configs/vehicle_param.yaml",
+                ReverseSteeringModelConfig.selectConfigurationPath(
+                        "mars", "trim", 126, marker("BYD")));
+        assertEquals("resource_byd/mars/CarModel/phev/configs/vehicle_param.yaml",
+                ReverseSteeringModelConfig.selectConfigurationPath(
+                        "mars", "trim", 125, marker("BYD")));
+        assertEquals("resource_byd/uked/CarModel/configs/vehicle_param.yaml",
+                ReverseSteeringModelConfig.selectConfigurationPath(
+                        "uked", "uked", 286, marker("BYD")));
+
+        IllegalArgumentException unknownValue = org.junit.Assert.assertThrows(
+                IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath(
+                        "mars", "trim", -1, marker("BYD")));
+        assertTrue(unknownValue.getMessage().contains("ambiguous active BYD trim"));
+        IllegalArgumentException adasDependent = org.junit.Assert.assertThrows(
+                IllegalArgumentException.class,
+                () -> ReverseSteeringModelConfig.selectConfigurationPath(
+                        "stf", "trim", 136, marker("BYD")));
+        assertTrue(adasDependent.getMessage().contains("requires ADAS-backed is4Drive"));
     }
 
     @Test public void shellSnapshotValidatesBoundsAndIdentityWithoutOemLookup() {
@@ -116,6 +179,9 @@ public final class ReverseSteeringModelConfigTest {
 
         assertTrue(capture.boundsAvailable);
         assertTrue(capture.provisionalBounds);
+        assertEquals(235, capture.modelValue);
+        assertEquals("marker", capture.rendererSelectionSource);
+        assertEquals("ok", capture.rendererMarkerStatus);
         assertEquals(-512.0f, capture.minimumDegrees, 0.0f);
         assertEquals(512.0f, capture.maximumDegrees, 0.0f);
         assertEquals("512", capture.rawSteeringParameters.get("steering_angle_max"));
@@ -170,6 +236,9 @@ public final class ReverseSteeringModelConfigTest {
         assertFalse(selected.sameIdentity(selection(
                 "TS", "/ukea", "resource_ts/ukea/CarModel/ukea/Vehicle_Configuration.json",
                 "json", 4)));
+        assertFalse(selected.sameIdentity(selection(
+                "TS", "/ukea", "resource_ts/ukea/CarModel/ukea/Vehicle_Configuration.json",
+                "json", 3, "com.byd.avc", "ocean/ukea/ukea", 286)));
     }
 
     @Test public void deterministicFailureSuppressesOnlyRepeatedLoadOfSameSelection() {
@@ -224,9 +293,12 @@ public final class ReverseSteeringModelConfigTest {
     }
 
     @Test public void readsTheRetainedSl06BydYamlFromResearchApkWhenPresent() throws Exception {
+        String selectedPath = ReverseSteeringModelConfig.selectConfigurationPath(
+                "shh", "shh", 235, marker("BYD"));
+        assertEquals("resource_byd/shh/CarModel/configs/vehicle_param.yaml", selectedPath);
         Path apk = retainedBydApk();
         Assume.assumeTrue("SL06 research APK is outside this checkout", apk != null);
-        String path = "assets/resource_byd/shh/CarModel/configs/vehicle_param.yaml";
+        String path = "assets/" + selectedPath;
         String yaml;
         try (ZipFile zip = new ZipFile(apk.toFile())) {
             ZipEntry entry = zip.getEntry(path);
@@ -257,10 +329,14 @@ public final class ReverseSteeringModelConfigTest {
     }
 
     private static Path checkedInUkeaAsset() {
+        return checkedInAsset("resource_ts/ukea/CarModel/ukea/Vehicle_Configuration.json");
+    }
+
+    private static Path checkedInAsset(String resourcePath) {
         Path directory = Paths.get(System.getProperty("user.dir")).toAbsolutePath();
         for (int depth = 0; directory != null && depth < 8; depth++, directory = directory.getParent()) {
             Path candidate = directory.resolve("research/AutoVideo-jadx/resources/assets/"
-                    + "resource_ts/ukea/CarModel/ukea/Vehicle_Configuration.json");
+                    + resourcePath);
             if (Files.isRegularFile(candidate)) return candidate;
         }
         return null;
@@ -279,19 +355,32 @@ public final class ReverseSteeringModelConfigTest {
     private static ReverseSteeringModelConfig.Selection selection(
             String renderer, String suffix, String path, String format, int packageVersionCode) {
         return selection(renderer, suffix, path, format, packageVersionCode,
-                "com.byd.avc", "ocean/shh/shh");
+                "com.byd.avc", "ocean/shh/shh", 235);
     }
 
     private static ReverseSteeringModelConfig.Selection selection(
             String renderer, String suffix, String path, String format, int packageVersionCode,
             String packageName, String model) {
+        return selection(renderer, suffix, path, format, packageVersionCode,
+                packageName, model, 235);
+    }
+
+    private static ReverseSteeringModelConfig.Selection selection(
+            String renderer, String suffix, String path, String format, int packageVersionCode,
+            String packageName, String model, int modelValue) {
         String external = "BYD".equals(renderer)
                 ? "/collect2/autovideo/resource_byd/shh/CarModel" + suffix
                         + "/resource/configs/vehicle_param.yaml"
                 : "";
         return new ReverseSteeringModelConfig.Selection(
                 null, packageName, "1.0", packageVersionCode, 10L,
-                "/system/app/AutoVideo.apk", model, renderer, suffix,
+                "/system/app/AutoVideo.apk", model, modelValue, renderer,
+                "marker", "ok", "/collect2/autovideo/sdk/pano_sdk.txt", suffix,
                 path, external, format);
+    }
+
+    private static ReverseSteeringModelConfig.RendererMarker marker(String renderer) {
+        return new ReverseSteeringModelConfig.RendererMarker(
+                "ok", renderer, "/collect2/autovideo/sdk/pano_sdk.txt", "");
     }
 }

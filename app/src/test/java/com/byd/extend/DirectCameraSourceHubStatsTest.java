@@ -64,6 +64,89 @@ public final class DirectCameraSourceHubStatsTest {
     }
 
     @Test
+    public void fpsCollectionWindowIsBoundedAndKeepsFiveSecondCadence() {
+        long startedNs = 1_000_000_000L;
+        long untilNs = startedNs + DirectCameraSourceHub.FPS_STATS_WINDOW_NS;
+
+        assertEquals(15_000_000_000L, DirectCameraSourceHub.FPS_STATS_WINDOW_NS);
+        assertFalse(DirectCameraSourceHub.statsCollectionActive(
+                false, startedNs - 1, startedNs, untilNs));
+        assertTrue(DirectCameraSourceHub.statsCollectionActive(
+                false, startedNs, startedNs, untilNs));
+        assertTrue(DirectCameraSourceHub.statsCollectionActive(
+                false, untilNs - 1, startedNs, untilNs));
+        assertFalse(DirectCameraSourceHub.statsCollectionActive(
+                false, untilNs, startedNs, untilNs));
+        assertTrue(DirectCameraSourceHub.statsCollectionActive(
+                true, untilNs, startedNs, untilNs));
+        assertTrue(DirectCameraSourceHub.isFpsStatsWindowActive(
+                startedNs, 7, 7, startedNs, untilNs));
+        assertFalse(DirectCameraSourceHub.isFpsStatsWindowActive(
+                startedNs, 6, 7, startedNs, untilNs));
+    }
+
+    @Test
+    public void swapFailureDiagnosticsAreRateLimited() {
+        long firstFailureNs = 10_000_000L;
+        assertTrue(DirectCameraSourceHub.shouldReportSwapFailure(
+                firstFailureNs, Long.MIN_VALUE));
+        assertFalse(DirectCameraSourceHub.shouldReportSwapFailure(
+                firstFailureNs + 4_999_999_999L, firstFailureNs));
+        assertTrue(DirectCameraSourceHub.shouldReportSwapFailure(
+                firstFailureNs + 5_000_000_000L, firstFailureNs));
+    }
+
+    @Test
+    public void finalPartialIntervalIsFlushedOnceWithoutRecordingAnExpiredFrame() {
+        DirectCameraSourceHub.StatsWindow window = new DirectCameraSourceHub.StatsWindow();
+        long started = 10_100_000_000L;
+        long expiry = 15_000_000_000L;
+        assertNull(window.record(started, 1L,
+                0L, 0L, 0L, 0L, 0L, 0L, 1, 0L,
+                1, 100L, 10, 10, new int[]{10}, new int[]{10}, 1, 1920, 1300));
+        assertNull(window.record(expiry - 1L, 2L,
+                0L, 0L, 0L, 0L, 0L, 0L, 1, 0L,
+                1, 100L, 10, 10, new int[]{10}, new int[]{10}, 1, 1920, 1300));
+        DirectCameraSourceHub.Stats tail = window.finish(expiry, 1, 100L,
+                new int[]{10}, new int[]{10}, 1, 1920, 1300, "source");
+        assertNotNull(tail);
+        assertEquals(expiry - started, tail.intervalNs);
+        assertEquals(2, tail.callbacks);
+        assertNull(window.finish(expiry, 1, 100L,
+                new int[]{10}, new int[]{10}, 1, 1920, 1300, "source"));
+    }
+
+    @Test
+    public void expiryFlushPrecedesResetAndExcludesTheFirstPostWindowFrame() throws Exception {
+        String source = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(
+                "src/main/java/com/byd/extend/DirectCameraSourceHub.java")),
+                java.nio.charset.StandardCharsets.UTF_8);
+        int expiry = source.indexOf("if (!statsWindowFinished && windowGeneration > 0L");
+        int flush = source.indexOf("stats.finish(fpsStatsWindowUntilNs", expiry);
+        int inactive = source.indexOf("if (!DiagnosticLogPolicy.extended() && !fpsWindowActive)", expiry);
+        int record = source.indexOf("Stats report = stats.record(", expiry);
+        assertTrue(expiry >= 0 && flush > expiry && inactive > flush && record > inactive);
+    }
+
+    @Test
+    public void lifecycleOnlyOutputStaysRawAndSwapFailureCapturesContextImmediately()
+            throws Exception {
+        String source = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(
+                "src/main/java/com/byd/extend/DirectCameraSourceHub.java")),
+                java.nio.charset.StandardCharsets.UTF_8).replace("\r\n", "\n");
+
+        assertTrue(source.contains("target.mapping == null\n                    || target.mapping.lifecycleOnly ? null"));
+        assertTrue(source.contains("target.timestampFrames = mapping != null && mapping.lifecycleOnly"));
+        assertTrue(source.contains("isFusedTarget(target)"));
+        assertTrue(source.contains("isLifecycleOnlyTarget(target)"));
+        assertTrue(source.contains("int eglError = EGL14.eglGetError();\n"
+                + "                reportSwapFailure(target, eglError);"));
+        assertTrue(source.contains("target.requestId"));
+        assertTrue(source.contains("target.producerEpoch"));
+        assertTrue(source.contains("target.retiring"));
+    }
+
+    @Test
     public void reportsAndResetsFiveSecondPerSourceWindow() {
         DirectCameraSourceHub.StatsWindow first = new DirectCameraSourceHub.StatsWindow();
         DirectCameraSourceHub.StatsWindow second = new DirectCameraSourceHub.StatsWindow();

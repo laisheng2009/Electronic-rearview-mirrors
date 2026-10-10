@@ -83,6 +83,7 @@ final class CameraDewarpRenderer {
     private volatile Handler handler;
     private volatile Surface cameraSurface;
     private CameraGpuOutput fusedOutput;
+    private volatile CameraGpuOutput inputLease;
     private volatile boolean preserveInputFrameTimestamp;
     private SurfaceTexture cameraTexture;
     private EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
@@ -483,7 +484,14 @@ final class CameraDewarpRenderer {
             reportStopped(null);
             return;
         }
-        activeHandler.post(() -> cleanupAndStop(null));
+        CameraGpuOutput lease = inputLease;
+        if (lease != null) {
+            CameraGpuOutput.unregister(cameraSurface);
+            // The helper must disconnect EGL before this consumer abandons its buffer queue.
+            lease.release(() -> activeHandler.post(() -> cleanupAndStop(null)));
+        } else {
+            activeHandler.post(() -> cleanupAndStop(null));
+        }
     }
 
     private void startInternal() {
@@ -640,6 +648,9 @@ final class CameraDewarpRenderer {
         }, handler);
         cameraTexture = input;
         cameraSurface = new Surface(input);
+        inputLease = new CameraGpuOutput(width, height,
+                CameraDewarpConfig.disabled(request.config.lens), 0L, event -> { }, true);
+        CameraGpuOutput.register(cameraSurface, inputLease);
     }
 
     private void releaseCameraInput() {
@@ -648,6 +659,8 @@ final class CameraDewarpRenderer {
         if (input != null) input.setOnFrameAvailableListener(null);
         Surface surface = cameraSurface;
         cameraSurface = null;
+        CameraGpuOutput.unregister(surface);
+        inputLease = null;
         if (surface != null) surface.release();
         if (input != null) input.release();
     }
@@ -695,6 +708,8 @@ final class CameraDewarpRenderer {
         try {
             long updateStartedNs = SystemClock.elapsedRealtimeNanos();
             cameraTexture.updateTexImage();
+            // Keep draining while detach is pending, without drawing into removed UI hosts.
+            if (released.get()) return;
             long updateNs = SystemClock.elapsedRealtimeNanos() - updateStartedNs;
             updateSamples++;
             updateTotalNs += updateNs;

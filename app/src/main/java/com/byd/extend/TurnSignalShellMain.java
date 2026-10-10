@@ -35,6 +35,35 @@ public final class TurnSignalShellMain {
 
     private TurnSignalShellMain() {}
 
+    static String readCameraRendererMarker() throws Exception {
+        JSONObject result = new JSONObject();
+        result.put("path", "/collect2/autovideo/sdk/pano_sdk.txt");
+        try (InputStream input = java.nio.file.Files.newInputStream(
+                java.nio.file.Paths.get("/collect2/autovideo/sdk/pano_sdk.txt"))) {
+            result.put("renderer", readCameraRendererMarkerText(input));
+            result.put("status", "ok");
+        } catch (java.nio.file.NoSuchFileException missing) {
+            result.put("status", "missing");
+        } catch (java.nio.file.AccessDeniedException | SecurityException denied) {
+            result.put("status", "denied");
+        } catch (java.io.IOException error) {
+            result.put("status", "error");
+            result.put("error", error.getClass().getSimpleName() + ": " + error.getMessage());
+        }
+        return result.toString();
+    }
+
+    static String readCameraRendererMarkerText(InputStream input) throws java.io.IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        byte[] buffer = new byte[256];
+        int count;
+        while ((count = input.read(buffer)) != -1) {
+            if (bytes.size() + count > 4096) throw new java.io.IOException("renderer marker too large");
+            bytes.write(buffer, 0, count);
+        }
+        return new String(bytes.toByteArray(), StandardCharsets.UTF_8).trim();
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length != 3) throw new IllegalArgumentException(
                 "usage: TurnSignalShellMain <appUid> <apkPath> <versionCode>");
@@ -188,6 +217,13 @@ public final class TurnSignalShellMain {
             }
             try {
                 data.enforceInterface(TurnSignalShellProtocol.DESCRIPTOR);
+                if (code == TurnSignalShellProtocol.TX_READ_CAMERA_RENDERER_MARKER) {
+                    if (data.dataAvail() != 0) throw new IllegalArgumentException("marker request takes no arguments");
+                    String marker = readCameraRendererMarker();
+                    reply.writeNoException();
+                    reply.writeString(marker);
+                    return true;
+                }
                 if (code == TurnSignalShellProtocol.TX_CAMERA_RUNTIME) {
                     CameraRuntimeHost cameras;
                     synchronized (this) {

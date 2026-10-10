@@ -47,7 +47,9 @@ final class DirectCameraSourceHub
 
     private static final int CALL_TIMEOUT_MS = 1500;
     private static final long STATS_INTERVAL_NS = TimeUnit.SECONDS.toNanos(5);
+    static final long FPS_STATS_WINDOW_NS = TimeUnit.SECONDS.toNanos(15);
     private static final long STALL_REPORT_INTERVAL_NS = TimeUnit.SECONDS.toNanos(5);
+    private static final long SWAP_FAILURE_LOG_INTERVAL_NS = TimeUnit.SECONDS.toNanos(5);
     private static final int MAX_INDEX = 4;
     private static final String LOG_TAG = "BydCameraProbe";
     private static final String VERTEX_SHADER =
@@ -79,10 +81,15 @@ final class DirectCameraSourceHub
     private final SourceWorker[] workers = new SourceWorker[MAX_INDEX + 1];
     private final IdentityHashMap<Surface, Target> targets = new IdentityHashMap<>();
     private final Listener listener;
+    private long lastSwapFailureLogNs = Long.MIN_VALUE;
     private Handler coordinatorHandler;
     private EGLDisplay display = EGL14.EGL_NO_DISPLAY;
     private EGLConfig config;
     private volatile boolean closed;
+    private volatile long fpsStatsWindowId;
+    private volatile long fpsStatsWindowStartedNs;
+    private volatile long fpsStatsWindowUntilNs;
+    private volatile int fpsStatsRequestedRate;
 
     private DirectCameraSourceHub(Listener listener) {
         this.listener = listener;
@@ -114,8 +121,32 @@ final class DirectCameraSourceHub
         return call(() -> worker(index).sourceSurface());
     }
 
+    synchronized long collectStatsForWindow(int requestedFps) {
+        long nowNs = SystemClock.elapsedRealtimeNanos();
+        long nextWindowId = fpsStatsWindowId + 1L;
+        if (nextWindowId <= 0L) nextWindowId = 1L;
+        fpsStatsRequestedRate = requestedFps;
+        fpsStatsWindowStartedNs = nowNs;
+        fpsStatsWindowUntilNs = nowNs + FPS_STATS_WINDOW_NS;
+        fpsStatsWindowId = nextWindowId;
+        return nextWindowId;
+    }
+
+    boolean statsCollectionActive() {
+        return statsCollectionActive(DiagnosticLogPolicy.extended(),
+                SystemClock.elapsedRealtimeNanos(),
+                fpsStatsWindowStartedNs, fpsStatsWindowUntilNs);
+    }
+
+    static boolean statsCollectionActive(
+            boolean extended, long nowNs, long windowStartedNs, long windowUntilNs) {
+        return extended || windowStartedNs > 0L && nowNs >= windowStartedNs
+                && nowNs < windowUntilNs;
+    }
+
     @Override
-    public void attach(Surface[] surfaces, int[] indexes) throws Exception {
+    public void attach(Surface[] surfaces, int[] indexes,
+            int requestId, int producerEpoch) throws Exception {
         if (surfaces == null || indexes == null || surfaces.length != indexes.length) {
             throw new IllegalArgumentException("surface/index batch length mismatch");
         }
@@ -131,7 +162,8 @@ final class DirectCameraSourceHub
                         }
                     }
                     SourceWorker sourceWorker = worker(indexes[i]);
-                    Target target = sourceWorker.attachTarget(surfaces[i], indexes[i]);
+                    Target target = sourceWorker.attachTarget(
+                            surfaces[i], indexes[i], requestId, producerEpoch);
                     synchronized (targets) {
                         targets.put(surfaces[i], target);
                     }
@@ -309,6 +341,56 @@ final class DirectCameraSourceHub
         return active && sourceIndex == targetIndex;
     }
 
+    static boolean isFpsStatsWindowActive(
+            long nowNs, long windowId, long activeWindowId,
+            long windowStartedNs, long windowUntilNs) {
+        return windowId > 0L && windowId == activeWindowId
+                && windowStartedNs > 0L && nowNs >= windowStartedNs
+                && nowNs < windowUntilNs;
+    }
+
+    static boolean isFusedTarget(CameraGpuOutput.Binding mapping) {
+        return mapping != null && !mapping.lifecycleOnly;
+    }
+
+    private static boolean isFusedTarget(Target target) {
+        return isFusedTarget(target.mapping);
+    }
+
+    static boolean isLifecycleOnlyTarget(CameraGpuOutput.Binding mapping) {
+        return mapping != null && mapping.lifecycleOnly;
+    }
+
+    private static boolean isLifecycleOnlyTarget(Target target) {
+        return isLifecycleOnlyTarget(target.mapping);
+    }
+
+    static boolean shouldReportSwapFailure(long nowNs, long lastReportNs) {
+        return lastReportNs == Long.MIN_VALUE
+                || nowNs - lastReportNs >= SWAP_FAILURE_LOG_INTERVAL_NS;
+    }
+
+    private synchronized boolean acquireSwapFailureLog(long nowNs) {
+        if (!shouldReportSwapFailure(nowNs, lastSwapFailureLogNs)) return false;
+        lastSwapFailureLogNs = nowNs;
+        return true;
+    }
+
+    private void reportSwapFailure(Target target, int eglError) {
+        long nowNs = SystemClock.elapsedRealtimeNanos();
+        if (!acquireSwapFailureLog(nowNs)) return;
+        long mappingToken = target.mapping == null || target.mapping.request == null
+                ? -1L : target.mapping.request.token;
+        Log.w(LOG_TAG, "{\"kind\":\"camera_gpu_swap_failure\",\"source_index\":"
+                + target.index + ",\"output_surface_id\":"
+                + System.identityHashCode(target.surface)
+                + ",\"request_id\":" + target.requestId
+                + ",\"producer_epoch\":" + target.producerEpoch
+                + ",\"mapping_token\":" + mappingToken
+                + ",\"retiring\":" + target.retiring
+                + ",\"egl_error\":" + eglError + "}");
+    }
+
     static String workerThreadName(int index) {
         requireIndex(index);
         return "direct-camera-source-" + index;
@@ -341,6 +423,8 @@ final class DirectCameraSourceHub
         boolean renderQueued;
         int pendingFrameSignals;
         long firstPendingSignalNs = -1L;
+        long statsWindowGeneration;
+        boolean statsWindowFinished;
         SerializedCall<Void> closeCall;
         volatile boolean released;
 
@@ -365,7 +449,9 @@ final class DirectCameraSourceHub
             });
         }
 
-        Target attachTarget(Surface value, int targetIndex) throws Exception {
+        Target attachTarget(
+                Surface value, int targetIndex, int requestId, int producerEpoch)
+                throws Exception {
             return call(() -> {
                 require(value != null && value.isValid(), "downstream Surface is invalid");
                 // Lease first: the owner must not abandon its TextureView during EGL attachment.
@@ -385,11 +471,16 @@ final class DirectCameraSourceHub
                     if (mapping != null) mapping.close();
                     throw failure;
                 }
-                Target target = new Target(this, value, targetIndex, eglSurface);
+                Target target = new Target(
+                        this, value, targetIndex, eglSurface, requestId, producerEpoch);
                 target.mapping = mapping;
+                target.timestampFrames = mapping != null && mapping.lifecycleOnly;
                 targets.add(target);
                 Log.i(LOG_TAG, "{\"kind\":\"camera_gpu_output_attached\",\"source_index\":"
-                        + targetIndex + ",\"fused\":" + (target.mapping != null) + "}");
+                        + targetIndex + ",\"request_id\":" + requestId
+                        + ",\"producer_epoch\":" + producerEpoch
+                        + ",\"fused\":" + isFusedTarget(target)
+                        + ",\"lifecycle_only\":" + isLifecycleOnlyTarget(target) + "}");
                 return target;
             });
         }
@@ -397,6 +488,7 @@ final class DirectCameraSourceHub
         void detachTarget(Target target) throws Exception {
             call(() -> {
                 if (!targets.contains(target)) return null;
+                target.retiring = true;
                 destroyTarget(target);
                 targets.remove(target);
                 return null;
@@ -404,6 +496,7 @@ final class DirectCameraSourceHub
         }
 
         private void destroyTarget(Target target) {
+            target.retiring = true;
             makeCurrent(idleSurface);
             require(EGL14.eglDestroySurface(display, target.eglSurface), "downstream EGL release failed");
             if (target.mapping != null) target.mapping.close();
@@ -603,7 +696,25 @@ final class DirectCameraSourceHub
                 reportSourceFailure(error);
                 return;
             }
-            if (!DiagnosticLogPolicy.extended()) {
+            long windowGeneration = fpsStatsWindowId;
+            if (windowGeneration != statsWindowGeneration) {
+                stats.reset(callbackStartedNs);
+                statsWindowGeneration = windowGeneration;
+                statsWindowFinished = false;
+            }
+            boolean fpsWindowActive = isFpsStatsWindowActive(
+                    callbackStartedNs, windowGeneration, fpsStatsWindowId,
+                    fpsStatsWindowStartedNs, fpsStatsWindowUntilNs);
+            if (!statsWindowFinished && windowGeneration > 0L
+                    && callbackStartedNs >= fpsStatsWindowUntilNs) {
+                statsWindowFinished = true;
+                // Flush only already collected frames; the current frame is outside the window.
+                Stats tail = stats.finish(fpsStatsWindowUntilNs, targetCount,
+                        targetPixelsCurrent, targetWidths, targetHeights, targetDimensionCount,
+                        1920, index == 0 ? 990 : 1300, workerThreadName(index));
+                publishStats(tail, true, windowGeneration);
+            }
+            if (!DiagnosticLogPolicy.extended() && !fpsWindowActive) {
                 stats.reset(callbackStartedNs);
                 return;
             }
@@ -631,7 +742,14 @@ final class DirectCameraSourceHub
                     1920,
                     index == 0 ? 990 : 1300,
                     workerThreadName(index));
+            publishStats(report, fpsWindowActive, windowGeneration);
+        }
+
+        private void publishStats(Stats report, boolean fpsWindowActive, long windowGeneration) {
             if (report != null) {
+                report.fpsWindow = fpsWindowActive;
+                report.fpsWindowId = fpsWindowActive ? windowGeneration : 0L;
+                report.requestedFps = fpsWindowActive ? fpsStatsRequestedRate : 0;
                 Stats completed = report;
                 postCoordinator(() -> listener.onStats(index, completed));
             }
@@ -667,7 +785,8 @@ final class DirectCameraSourceHub
             texCoords.position(0);
             GLES20.glEnableVertexAttribArray(positionLocation);
             GLES20.glEnableVertexAttribArray(texCoordLocation);
-            CameraDewarpRenderer.MappingRequest rendered = target.mapping == null ? null
+            CameraDewarpRenderer.MappingRequest rendered = target.mapping == null
+                    || target.mapping.lifecycleOnly ? null
                     : target.mesh.prepare(target.mapping.request, target.mapping.width, target.mapping.height);
             if (rendered == null) {
                 GLES20.glVertexAttribPointer(positionLocation, 2, GLES20.GL_FLOAT, false, 0, positions);
@@ -696,8 +815,14 @@ final class DirectCameraSourceHub
                         "downstream frame timestamp failed");
             }
             long swapStartedNs = SystemClock.elapsedRealtimeNanos();
-            require(EGL14.eglSwapBuffers(display, target.eglSurface),
-                    "downstream buffer swap failed");
+            if (!EGL14.eglSwapBuffers(display, target.eglSurface)) {
+                int eglError = EGL14.eglGetError();
+                reportSwapFailure(target, eglError);
+                throw new IllegalStateException("downstream buffer swap failed: source="
+                        + target.index + " output=" + System.identityHashCode(target.surface)
+                        + " request=" + target.requestId + " epoch=" + target.producerEpoch
+                        + " retiring=" + target.retiring + " egl=" + eglError);
+            }
             long swapWaitNs = SystemClock.elapsedRealtimeNanos() - swapStartedNs;
             if (rendered != null && target.acknowledgedToken != rendered.token) {
                 target.mapping.applied(rendered.token, target.mesh.rawFallback,
@@ -995,6 +1120,9 @@ final class DirectCameraSourceHub
         final String targetDimensions;
         final int sourceWidth;
         final int sourceHeight;
+        boolean fpsWindow;
+        long fpsWindowId;
+        int requestedFps;
 
         Stats(
                 long intervalNs,
@@ -1179,10 +1307,19 @@ final class DirectCameraSourceHub
             targetWidthMax = Math.max(targetWidthMax, frameTargetWidthMax);
             targetHeightMax = Math.max(targetHeightMax, frameTargetHeightMax);
             if (callbackNs - startedNs < STATS_INTERVAL_NS) return null;
+            return finish(callbackNs, targetsCurrent, targetPixelsCurrent,
+                    frameTargetWidths, frameTargetHeights, frameTargetCount,
+                    sourceWidth, sourceHeight, workerName);
+        }
+
+        Stats finish(long endNs, int targetsCurrent, long targetPixelsCurrent,
+                int[] frameTargetWidths, int[] frameTargetHeights, int frameTargetCount,
+                int sourceWidth, int sourceHeight, String workerName) {
+            if (callbacks == 0 || startedNs < 0L || endNs <= startedNs) return null;
             targetDimensions = formatDimensions(
                     frameTargetWidths, frameTargetHeights, frameTargetCount);
             Stats result = new Stats(
-                    callbackNs - startedNs,
+                    endNs - startedNs,
                     callbacks, frameSignals, renderedFrames, coalescedFrames,
                     queueDelayTotalNs, queueDelayMaxNs, workerName,
                     callbackGaps, callbackGapTotalNs, callbackGapMaxNs,
@@ -1193,7 +1330,7 @@ final class DirectCameraSourceHub
                     targetsCurrent, targetsMax, targetPixelsCurrent, targetPixelsMax,
                     targetWidthMax, targetHeightMax, targetDimensions,
                     sourceWidth, sourceHeight);
-            reset(callbackNs);
+            reset(endNs);
             return result;
         }
 
@@ -1269,18 +1406,24 @@ final class DirectCameraSourceHub
         final Surface surface;
         final int index;
         final EGLSurface eglSurface;
+        final int requestId;
+        final int producerEpoch;
         long lastStallReportNs;
         boolean active = true;
         boolean timestampFrames;
+        boolean retiring;
         CameraGpuOutput.Binding mapping;
         final MappingMesh mesh = new MappingMesh();
         long acknowledgedToken = -1;
 
-        Target(SourceWorker worker, Surface surface, int index, EGLSurface eglSurface) {
+        Target(SourceWorker worker, Surface surface, int index, EGLSurface eglSurface,
+                int requestId, int producerEpoch) {
             this.worker = worker;
             this.surface = surface;
             this.index = index;
             this.eglSurface = eglSurface;
+            this.requestId = requestId;
+            this.producerEpoch = producerEpoch;
         }
     }
 

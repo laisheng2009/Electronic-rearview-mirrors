@@ -2133,7 +2133,7 @@ final class TurnSignalController {
         ReverseSteeringModelConfig.Selection selection = null;
         if (failure == null) {
             try {
-                selection = prepared.resolve();
+                selection = prepared.resolve(readCameraRendererMarker(helper));
             } catch (Throwable error) {
                 failure = error;
             }
@@ -2197,6 +2197,29 @@ final class TurnSignalController {
         }
     }
 
+    private ReverseSteeringModelConfig.RendererMarker readCameraRendererMarker(IBinder value)
+            throws Exception {
+        if (value == null || !value.isBinderAlive()) {
+            throw new IllegalStateException("renderer marker helper unavailable");
+        }
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
+            requireTransact(value, TurnSignalShellProtocol.TX_READ_CAMERA_RENDERER_MARKER,
+                    data, reply);
+            JSONObject marker = new JSONObject(reply.readString());
+            return new ReverseSteeringModelConfig.RendererMarker(
+                    marker.optString("status", "error"),
+                    marker.optString("renderer", ""),
+                    marker.optString("path", ""),
+                    marker.optString("error", ""));
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
     private void configureSteeringModel(
             IBinder value, ReverseSteeringModelConfig model,
             ReverseSteeringModelConfig.Capture capture) {
@@ -2218,6 +2241,10 @@ final class TurnSignalController {
                     steeringFailureSelection = null;
                     steeringFailureMessage = "";
                     emit("reverse_steering_model", "available", true, "model", model.model,
+                            "model_value", capture.modelValue,
+                            "renderer_selection_source", capture.rendererSelectionSource,
+                            "renderer_marker_status", capture.rendererMarkerStatus,
+                            "renderer_marker_path", capture.rendererMarkerPath,
                             "renderer", capture.renderer, "resource_suffix", capture.resourceSuffix,
                             "configuration_path", capture.configurationPath,
                             "minimum_degrees", model.minimumDegrees,
@@ -2251,11 +2278,22 @@ final class TurnSignalController {
         steeringFailureMessage = message;
         if (capture == null) {
             emit("reverse_steering_model", "available", false, "error", message,
+                    "model", selection == null ? "" : selection.model,
+                    "model_value", selection == null ? -1 : selection.modelValue,
+                    "renderer", selection == null ? "" : selection.renderer,
+                    "renderer_selection_source", selection == null ? "" : selection.rendererSelectionSource,
+                    "renderer_marker_status", selection == null ? "" : selection.rendererMarkerStatus,
+                    "renderer_marker_path", selection == null ? "" : selection.rendererMarkerPath,
+                    "configuration_path", selection == null ? "" : selection.configurationPath,
                     "stack", Log.getStackTraceString(failure));
             return;
         }
         emit("reverse_steering_model", "available", false, "error", message,
                 "stack", Log.getStackTraceString(failure), "model", capture.model,
+                "model_value", capture.modelValue,
+                "renderer_selection_source", capture.rendererSelectionSource,
+                "renderer_marker_status", capture.rendererMarkerStatus,
+                "renderer_marker_path", capture.rendererMarkerPath,
                 "renderer", capture.renderer, "resource_suffix", capture.resourceSuffix,
                 "configuration_path", capture.configurationPath,
                 "raw_steering_parameters", capture.rawSteeringParameters,
@@ -2708,7 +2746,7 @@ final class TurnSignalController {
             int returnedCameraId = reply.readInt();
             int returnedRequestId = reply.readInt();
             int surfaceGeneration = reply.readInt();
-            Surface surface = Surface.CREATOR.createFromParcel(reply);
+            Surface surface = CameraGpuOutput.readSurface(reply);
             if (returnedCameraId != cameraId || returnedRequestId != requestId
                     || surfaceGeneration <= 0
                     || surface == null || !surface.isValid()) {
@@ -2926,7 +2964,7 @@ final class TurnSignalController {
                 for (int i = 0; i < count; i++) {
                     int sourceIndex = groupSources[i];
                     int generation = groupGenerations[i];
-                    Surface surface = Surface.CREATOR.createFromParcel(reply);
+                    Surface surface = CameraGpuOutput.readSurface(reply);
                     if (surface == null || !surface.isValid()) {
                         if (surface != null) surface.release();
                         throw new IllegalStateException("invalid reverse Surface");

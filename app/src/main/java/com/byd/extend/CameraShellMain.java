@@ -219,7 +219,7 @@ public final class CameraShellMain {
                     reply.writeInt(cameraId);
                     reply.writeInt(snapshot.requestId);
                     reply.writeInt(snapshot.surfaceGeneration);
-                    snapshot.surface.writeToParcel(reply, 0);
+                    CameraGpuOutput.writeSurface(reply, snapshot.surface);
                     return true;
                 }
                 if (code == CameraShellProtocol.TX_OVERLAY_ARM_FRAME) {
@@ -348,7 +348,7 @@ public final class CameraShellMain {
                             reply.writeInt(snapshot.generations[index]);
                         }
                         for (int index = offset; index < offset + count; index++) {
-                            snapshot.surfaces[index].writeToParcel(reply, 0);
+                            CameraGpuOutput.writeSurface(reply, snapshot.surfaces[index]);
                         }
                         offset += count;
                     }

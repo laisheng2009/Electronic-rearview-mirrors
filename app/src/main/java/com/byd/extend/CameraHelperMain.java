@@ -1164,12 +1164,14 @@ final class CameraHelperMain {
             } catch (Throwable error) {
                 if (opened != null) {
                     try {
-                        if (activityAttached && activityPreview.has()) {
-                            invokeBoolean(opened.getClass(), opened, "rmPreviewSurface",
-                                    new Class<?>[]{Surface.class, int.class},
-                                    activityPreview.value(), activityPreview.index());
-                        }
-                        tryClose(opened, requestedSurfaces, indexes, attached);
+                        ActivityPreviewState.Snapshot<Surface> attachedActivityPreview =
+                                activityAttached
+                                        ? new ActivityPreviewState.Snapshot<>(
+                                                activityPreview.value(),
+                                                activityPreview.index(), true, false)
+                                        : null;
+                        tryClose(opened, requestedSurfaces, indexes, attached,
+                                attachedActivityPreview);
                     } catch (Throwable closeError) {
                         Log.e(TAG, "Multi-Surface cleanup after failed open also failed",
                                 root(closeError));
@@ -1625,6 +1627,9 @@ final class CameraHelperMain {
                 }
                 requestCameraFrameRate(camera, activeCameraId, activeCameraTag, "settings_changed");
                 if (!port.start()) throw new IllegalStateException("FPS restart: startPreview returned false");
+                if (rawSourceHub != null) {
+                    rawSourceHub.collectStatsForWindow(requestedFrameRate);
+                }
                 emit("camera_frame_rate_restarted", "requested_fps", requestedFrameRate,
                         "api_accepted", frameRateRequestAccepted, "producer_epoch", producerEpoch);
             } catch (Throwable failure) {
@@ -1678,8 +1683,6 @@ final class CameraHelperMain {
             ActivityPreviewState.Snapshot<Surface> activeActivityPreview =
                     activityPreview.close(preserveActivityPreview);
             Surface activeActivitySurface = activeActivityPreview.value;
-            int activeActivityIndex = activeActivityPreview.index;
-            boolean activeActivityAttached = activeActivityPreview.attached;
             int closedCameraId = activeCameraId;
             String closedCameraTag = activeCameraTag;
             String closedCameraOwner = activeCameraOwner;
@@ -1696,29 +1699,15 @@ final class CameraHelperMain {
             activeCameraOwner = "none";
             activeCameraRequestId = 0;
             String error = null;
-            releaseSurfaces(pendingReverseSurfaces);
             if (activeCamera != null) {
                 Throwable first = null;
-                if (activeActivityAttached && activeActivitySurface != null) {
-                    try {
-                        boolean removed = invokeBoolean(
-                                activeCamera.getClass(), activeCamera, "rmPreviewSurface",
-                                new Class<?>[]{Surface.class, int.class},
-                                activeActivitySurface, activeActivityIndex);
-                        if (!removed) {
-                            throw new IllegalStateException(
-                                    "rmPreviewSurface returned false for Activity preview");
-                        }
-                    } catch (Throwable failure) {
-                        first = root(failure);
-                    }
-                }
                 try {
                     if (activeMultiSurfaces.length > 0) {
                         tryClose(activeCamera, activeMultiSurfaces,
-                                activeMultiIndexes, null);
+                                activeMultiIndexes, null, activeActivityPreview);
                     } else {
-                        tryClose(activeCamera, activeSurface, activeIndex);
+                        tryClose(activeCamera, activeSurface, activeIndex,
+                                activeActivityPreview);
                     }
                 } catch (Throwable failure) {
                     if (first == null) first = root(failure);
@@ -1746,6 +1735,7 @@ final class CameraHelperMain {
                     && activeActivityPreview.release && activeActivitySurface != null) {
                 activeActivitySurface.release();
             }
+            releaseSurfaces(pendingReverseSurfaces);
             if (closeStock) {
                 turnController.closeStockAvm(reason, stockRequestId);
                 emit("camera_shell_request", "action", "close", "view", activeView,
@@ -2052,73 +2042,94 @@ final class CameraHelperMain {
 
                     @Override
                     public void onStats(int index, DirectCameraSourceHub.Stats stats) {
-                        if (!DiagnosticLogPolicy.extended()) return;
                         long observedAt = SystemClock.elapsedRealtime();
                         long processCpuMs = Process.getElapsedCpuTime();
                         callbackHandler.post(() -> {
                             if (sourceHubGeneration != openedHubGeneration
                                     || !persistentPanoProducer) return;
-                            emit("camera_source_hub_stats",
-                                "requested_fps", requestedFrameRate,
-                                "fps_api_accepted", frameRateRequestAccepted,
-                                "fps_request_elapsed_ms", frameRateRequestElapsedMs,
-                                "sample_elapsed_ms", observedAt,
-                                "fps_window_stable", observedAt - frameRateRequestElapsedMs
-                                        >= milliseconds(stats.intervalNs),
-                                "process_cpu_time_ms", processCpuMs,
-                                "process_pid", Process.myPid(),
-                                "new_buffer_fps", ratePerSecond(stats.callbacks
-                                        - stats.producerTimestampRepeated - stats.producerTimestampInvalid,
-                                        stats.intervalNs),
-                                "new_buffer_fps_valid", stats.producerTimestampInvalid == 0,
-                                "producer_epoch", producerEpoch,
-                                "preview_index", index,
-                                "source_width", stats.sourceWidth,
-                                "source_height", stats.sourceHeight,
-                                "interval_ms", milliseconds(stats.intervalNs),
-                                "worker", stats.workerName,
-                                "callbacks", stats.callbacks,
-                                "frame_signals", stats.frameSignals,
-                                "rendered_frames", stats.renderedFrames,
-                                "coalesced_frames", stats.coalescedFrames,
-                                "queue_delay_avg_ms", averageMs(
-                                        stats.queueDelayTotalNs, stats.renderedFrames),
-                                "queue_delay_max_ms", milliseconds(
-                                        stats.queueDelayMaxNs),
-                                "processed_fps", ratePerSecond(
-                                        stats.callbacks, stats.intervalNs),
-                                "callback_gap_avg_ms", averageMs(
-                                        stats.callbackGapTotalNs, stats.callbackGaps),
-                                "callback_gap_max_ms", milliseconds(
-                                        stats.callbackGapMaxNs),
-                                "producer_timestamp_clock", "unverified",
-                                "producer_timestamp_repeated", stats.producerTimestampRepeated,
-                                "producer_timestamp_invalid", stats.producerTimestampInvalid,
-                                "update_tex_image_avg_ms", averageMs(
-                                        stats.updateTotalNs, stats.callbacks),
-                                "update_tex_image_max_ms", milliseconds(
-                                        stats.updateMaxNs),
-                                "draw_swaps", stats.swaps,
-                                "pre_swap_avg_ms", averageMs(
-                                        stats.preSwapTotalNs, stats.swaps),
-                                "pre_swap_max_ms", milliseconds(stats.preSwapMaxNs),
-                                "swap_wait_avg_ms", averageMs(
-                                        stats.swapWaitTotalNs, stats.swaps),
-                                "swap_wait_max_ms", milliseconds(stats.swapWaitMaxNs),
-                                "draw_swap_avg_ms", averageMs(
-                                        stats.preSwapTotalNs + stats.swapWaitTotalNs,
-                                        stats.swaps),
-                                "draw_swap_max_ms", milliseconds(stats.drawMaxNs),
-                                "render_avg_ms", averageMs(
-                                        stats.renderTotalNs, stats.callbacks),
-                                "render_max_ms", milliseconds(stats.renderMaxNs),
-                                "targets_current", stats.targetsCurrent,
-                                "targets_max", stats.targetsMax,
-                                "target_pixels_current", stats.targetPixelsCurrent,
-                                "target_pixels_max", stats.targetPixelsMax,
-                                "target_width_max", stats.targetWidthMax,
-                                "target_height_max", stats.targetHeightMax,
-                                "target_dimensions", stats.targetDimensions);
+                            boolean extended = DiagnosticLogPolicy.extended();
+                            if (!extended && !stats.fpsWindow) return;
+                            double measuredNewBufferFps = ratePerSecond(stats.callbacks
+                                    - stats.producerTimestampRepeated
+                                    - stats.producerTimestampInvalid, stats.intervalNs);
+                            if (stats.fpsWindow) {
+                                emit("camera_fps_window_stats",
+                                        "requested_fps", stats.requestedFps,
+                                        "measured_new_buffer_fps", measuredNewBufferFps,
+                                        "new_buffer_fps_valid", stats.producerTimestampInvalid == 0,
+                                        "effective_fps_verified", false,
+                                        "fps_window_id", stats.fpsWindowId,
+                                        "fps_api_accepted", frameRateRequestAccepted,
+                                        "fps_request_elapsed_ms", frameRateRequestElapsedMs,
+                                        "sample_elapsed_ms", observedAt,
+                                        "interval_ms", milliseconds(stats.intervalNs),
+                                        "producer_epoch", producerEpoch,
+                                        "preview_index", index,
+                                        "callbacks", stats.callbacks,
+                                        "processed_fps", ratePerSecond(
+                                                stats.callbacks, stats.intervalNs));
+                            }
+                            if (extended) {
+                                emit("camera_source_hub_stats",
+                                    "requested_fps", requestedFrameRate,
+                                    "fps_api_accepted", frameRateRequestAccepted,
+                                    "fps_request_elapsed_ms", frameRateRequestElapsedMs,
+                                    "sample_elapsed_ms", observedAt,
+                                    "fps_window_stable", observedAt - frameRateRequestElapsedMs
+                                            >= milliseconds(stats.intervalNs),
+                                    "process_cpu_time_ms", processCpuMs,
+                                    "process_pid", Process.myPid(),
+                                    "new_buffer_fps", measuredNewBufferFps,
+                                    "new_buffer_fps_valid", stats.producerTimestampInvalid == 0,
+                                    "producer_epoch", producerEpoch,
+                                    "preview_index", index,
+                                    "source_width", stats.sourceWidth,
+                                    "source_height", stats.sourceHeight,
+                                    "interval_ms", milliseconds(stats.intervalNs),
+                                    "worker", stats.workerName,
+                                    "callbacks", stats.callbacks,
+                                    "frame_signals", stats.frameSignals,
+                                    "rendered_frames", stats.renderedFrames,
+                                    "coalesced_frames", stats.coalescedFrames,
+                                    "queue_delay_avg_ms", averageMs(
+                                            stats.queueDelayTotalNs, stats.renderedFrames),
+                                    "queue_delay_max_ms", milliseconds(
+                                            stats.queueDelayMaxNs),
+                                    "processed_fps", ratePerSecond(
+                                            stats.callbacks, stats.intervalNs),
+                                    "callback_gap_avg_ms", averageMs(
+                                            stats.callbackGapTotalNs, stats.callbackGaps),
+                                    "callback_gap_max_ms", milliseconds(
+                                            stats.callbackGapMaxNs),
+                                    "producer_timestamp_clock", "unverified",
+                                    "producer_timestamp_repeated", stats.producerTimestampRepeated,
+                                    "producer_timestamp_invalid", stats.producerTimestampInvalid,
+                                    "update_tex_image_avg_ms", averageMs(
+                                            stats.updateTotalNs, stats.callbacks),
+                                    "update_tex_image_max_ms", milliseconds(
+                                            stats.updateMaxNs),
+                                    "draw_swaps", stats.swaps,
+                                    "pre_swap_avg_ms", averageMs(
+                                            stats.preSwapTotalNs, stats.swaps),
+                                    "pre_swap_max_ms", milliseconds(stats.preSwapMaxNs),
+                                    "swap_wait_avg_ms", averageMs(
+                                            stats.swapWaitTotalNs, stats.swaps),
+                                    "swap_wait_max_ms", milliseconds(stats.swapWaitMaxNs),
+                                    "draw_swap_avg_ms", averageMs(
+                                            stats.preSwapTotalNs + stats.swapWaitTotalNs,
+                                            stats.swaps),
+                                    "draw_swap_max_ms", milliseconds(stats.drawMaxNs),
+                                    "render_avg_ms", averageMs(
+                                            stats.renderTotalNs, stats.callbacks),
+                                    "render_max_ms", milliseconds(stats.renderMaxNs),
+                                    "targets_current", stats.targetsCurrent,
+                                    "targets_max", stats.targetsMax,
+                                    "target_pixels_current", stats.targetPixelsCurrent,
+                                    "target_pixels_max", stats.targetPixelsMax,
+                                    "target_width_max", stats.targetWidthMax,
+                                    "target_height_max", stats.targetHeightMax,
+                                    "target_dimensions", stats.targetDimensions);
+                            }
                         });
                     }
 
@@ -2142,7 +2153,8 @@ final class CameraHelperMain {
                 persistentSession.startProducer(
                         port, openedHub, target, requestedSurfaces, requestedIndexes,
                         requestId, requestedView, exclusive, shellOwned,
-                        firstSurfaceDirect, sourceDemandMask);
+                        firstSurfaceDirect, sourceDemandMask, producerEpoch + 1);
+                openedHub.collectStatsForWindow(requestedFrameRate);
                 if (isReverseGroup(target, requestedView)) cancelReverseWarmExpiry();
 
                 camera = opened;
@@ -2160,7 +2172,7 @@ final class CameraHelperMain {
                 if (rawSourceHub == openedHub) rawSourceHub = null;
                 if (openedPort != null) {
                     Throwable closeError = closeFailedPersistentProducer(
-                            openedPort, openedHub);
+                            openedPort, openedHub, persistentSession);
                     if (closeError != null) error.addSuppressed(closeError);
                 } else {
                     if (opened != null) {
@@ -2178,7 +2190,11 @@ final class CameraHelperMain {
                         }
                     }
                 }
-                releaseSurfaces(requestedSurfaces);
+                try {
+                    PersistentSession.releaseTeardownSurfaces(requestedSurfaces);
+                } catch (Throwable cleanupError) {
+                    error.addSuppressed(root(cleanupError));
+                }
                 String message = summary(error);
                 emit("camera_error", "stage", errorStage,
                         "camera_id", requestedCameraId,
@@ -2384,15 +2400,17 @@ final class CameraHelperMain {
             reverseStockRequestId = 0;
             reverseStockProducerEpoch = 0;
             reverseStockAvmShellEpoch = 0L;
-            releaseSurfaces(pendingReversePreviewSurfaces);
+            Surface[] retiringPendingReverseSurfaces = pendingReversePreviewSurfaces;
             pendingReversePreviewSurfaces = new Surface[0];
             pendingReversePreviewRequestId = 0;
-            releaseActivityPreview();
+            ActivityPreviewState.Snapshot<Surface> retiringActivityPreview =
+                    activityPreview.close(false);
             TeardownOutcome outcome = persistentSession.tearDown(
                     active == null ? null : new ReflectivePersistentCameraPort(active),
                     reason, failure, closeStock, stockRequestId,
                     shellCloseAlreadyQueued, this::queueStockClose,
-                    this::emit, closedEpoch);
+                    this::emit, closedEpoch, retiringActivityPreview,
+                    retiringPendingReverseSurfaces);
             clearLegacyCameraState();
             String error = outcome.failure == null ? null : summary(outcome.failure);
             return result(persistentCloseResultKind(outcome.shellCloseQueued),
@@ -2406,17 +2424,29 @@ final class CameraHelperMain {
         }
 
         static Throwable stopAndClosePersistentProducer(PersistentCameraPort port) {
-            Throwable first = null;
-            try {
-                port.stop();
-            } catch (Throwable error) {
-                first = root(error);
-            }
+            Throwable first = stopPersistentProducer(port);
             try {
                 port.close();
             } catch (Throwable error) {
-                if (first == null) first = root(error);
+                first = mergeFailure(first, error);
             }
+            return first;
+        }
+
+        private static Throwable stopPersistentProducer(PersistentCameraPort port) {
+            try {
+                return port.stop() ? null
+                        : new IllegalStateException("stopPreview returned false");
+            } catch (Throwable error) {
+                return root(error);
+            }
+        }
+
+        private static Throwable mergeFailure(Throwable first, Throwable next) {
+            if (next == null) return first;
+            Throwable failure = root(next);
+            if (first == null) return failure;
+            if (first != failure) first.addSuppressed(failure);
             return first;
         }
 
@@ -2435,14 +2465,39 @@ final class CameraHelperMain {
 
         static Throwable closeFailedPersistentProducer(
                 PersistentCameraPort port, PersistentSurfaceFanout fanout) {
-            Throwable first = stopAndClosePersistentProducer(port);
+            return closeFailedPersistentProducer(port, fanout, null);
+        }
+
+        static Throwable closeFailedPersistentProducer(
+                PersistentCameraPort port, PersistentSurfaceFanout fanout,
+                PersistentSession failedSession) {
+            Throwable first;
+            boolean stopped;
+            if (failedSession != null && failedSession.failedOpenStopAttempted) {
+                first = failedSession.failedOpenStopFailure;
+                stopped = first == null;
+            } else {
+                first = stopPersistentProducer(port);
+                stopped = first == null;
+            }
+            if (failedSession != null && stopped
+                    && !failedSession.failedOpenStopAttempted) {
+                first = mergeFailure(first, failedSession.detachDirectInputs(port));
+                first = mergeFailure(first, failedSession.detachSources(port));
+            }
+            try {
+                port.close();
+            } catch (Throwable error) {
+                first = mergeFailure(first, error);
+            }
             if (fanout != null) {
                 try {
                     fanout.close();
                 } catch (Throwable error) {
-                    if (first == null) first = root(error);
+                    first = mergeFailure(first, error);
                 }
             }
+            if (failedSession != null) failedSession.clearFailedOpenState();
             return first;
         }
 
@@ -2694,7 +2749,7 @@ final class CameraHelperMain {
         private static void releaseAndClear(ConsumerGroup group) {
             ConsumerGroup.Snapshot snapshot = group.snapshot();
             group.clear();
-            snapshot.release();
+            PersistentSession.releaseTeardownSurfaces(snapshot.surfaces);
         }
 
         static boolean isSuccessfulCameraCloseResult(String result) {
@@ -2823,52 +2878,81 @@ final class CameraHelperMain {
 
         private void tryClose(Object activeCamera, Surface activeSurface, int activeIndex)
                 throws Exception {
+            tryClose(activeCamera, activeSurface, activeIndex, null);
+        }
+
+        private void tryClose(
+                Object activeCamera, Surface activeSurface, int activeIndex,
+                ActivityPreviewState.Snapshot<Surface> activityPreview) throws Exception {
             Throwable first = closeOneShotPort(
                     new ReflectivePersistentCameraPort(activeCamera),
                     new Surface[]{activeSurface}, new int[]{activeIndex},
-                    new boolean[]{activeSurface != null && activeIndex >= 0});
+                    new boolean[]{activeSurface != null && activeIndex >= 0},
+                    activityPreview);
             if (first != null) throw new Exception(first);
         }
 
         private void tryClose(
                 Object activeCamera, Surface[] activeSurfaces, int[] activeIndexes,
                 boolean[] attached) throws Exception {
+            tryClose(activeCamera, activeSurfaces, activeIndexes, attached, null);
+        }
+
+        private void tryClose(
+                Object activeCamera, Surface[] activeSurfaces, int[] activeIndexes,
+                boolean[] attached,
+                ActivityPreviewState.Snapshot<Surface> activityPreview) throws Exception {
             Throwable first = closeOneShotPort(
                     new ReflectivePersistentCameraPort(activeCamera),
-                    activeSurfaces, activeIndexes, attached);
+                    activeSurfaces, activeIndexes, attached, activityPreview);
             if (first != null) throw new Exception(first);
         }
 
         static Throwable closeOneShotPort(
                 PersistentCameraPort port, Surface[] activeSurfaces,
                 int[] activeIndexes, boolean[] attached) {
-            Throwable first = null;
-            for (int i = 0; i < activeSurfaces.length; i++) {
-                boolean shouldRemove = attached == null
-                        ? activeSurfaces[i] != null
-                        : i < attached.length && attached[i];
-                if (!shouldRemove || i >= activeIndexes.length || activeIndexes[i] < 0) {
-                    continue;
-                }
-                try {
-                    if (!port.remove(activeSurfaces[i], activeIndexes[i])) {
-                        throw new IllegalStateException(
-                                "rmPreviewSurface returned false for index "
-                                        + activeIndexes[i]);
+            return closeOneShotPort(port, activeSurfaces, activeIndexes, attached, null);
+        }
+
+        static Throwable closeOneShotPort(
+                PersistentCameraPort port, Surface[] activeSurfaces,
+                int[] activeIndexes, boolean[] attached,
+                ActivityPreviewState.Snapshot<Surface> activityPreview) {
+            Throwable first = stopPersistentProducer(port);
+            if (first == null) {
+                for (int i = 0; i < activeSurfaces.length; i++) {
+                    boolean shouldRemove = attached == null
+                            ? activeSurfaces[i] != null
+                            : i < attached.length && attached[i];
+                    if (!shouldRemove || i >= activeIndexes.length || activeIndexes[i] < 0) {
+                        continue;
                     }
-                } catch (Throwable error) {
-                    if (first == null) first = root(error);
+                    try {
+                        if (!port.remove(activeSurfaces[i], activeIndexes[i])) {
+                            throw new IllegalStateException(
+                                    "rmPreviewSurface returned false for index "
+                                            + activeIndexes[i]);
+                        }
+                    } catch (Throwable error) {
+                        first = mergeFailure(first, error);
+                    }
                 }
-            }
-            try {
-                port.stop();
-            } catch (Throwable error) {
-                if (first == null) first = root(error);
+                if (activityPreview != null && activityPreview.attached
+                        && activityPreview.value != null) {
+                    try {
+                        if (!port.remove(activityPreview.value, activityPreview.index)) {
+                            throw new IllegalStateException(
+                                    "rmPreviewSurface returned false for Activity preview");
+                        }
+                    } catch (Throwable error) {
+                        first = mergeFailure(first, error);
+                    }
+                }
             }
             try {
                 port.close();
             } catch (Throwable error) {
-                if (first == null) first = root(error);
+                first = mergeFailure(first, error);
             }
             return first;
         }
@@ -2949,13 +3033,14 @@ final class CameraHelperMain {
             boolean add(Surface value, int index) throws Exception;
             boolean remove(Surface value, int index) throws Exception;
             boolean start() throws Exception;
-            void stop() throws Exception;
+            boolean stop() throws Exception;
             void close() throws Exception;
         }
 
         interface PersistentSurfaceFanout {
             Surface source(int index) throws Exception;
-            void attach(Surface[] surfaces, int[] indexes) throws Exception;
+            void attach(Surface[] surfaces, int[] indexes,
+                    int requestId, int producerEpoch) throws Exception;
             void detach(Surface[] surfaces) throws Exception;
             void setActive(Surface surface, boolean active) throws Exception;
             void releaseSource(int index) throws Exception;
@@ -2977,6 +3062,9 @@ final class CameraHelperMain {
             final Surface[] sourceSurfaces = new Surface[5];
             final boolean[] sourceAttached = new boolean[5];
             boolean producerOpen;
+            boolean failedOpenStopAttempted;
+            Throwable failedOpenStopFailure;
+            int activeProducerEpoch;
             Throwable restoreFailure;
             boolean restoreFailureFatal;
             PersistentSurfaceFanout fanout;
@@ -3011,9 +3099,23 @@ final class CameraHelperMain {
                     Surface[] surfaces, int[] indexes, int requestId,
                     String view, boolean exclusive, boolean shellOwned,
                     boolean firstSurfaceDirect, int sourceDemandMask) throws Exception {
+                startProducer(port, requestedFanout, target, surfaces, indexes, requestId,
+                        view, exclusive, shellOwned, firstSurfaceDirect, sourceDemandMask, 0);
+            }
+
+            void startProducer(
+                    PersistentCameraPort port, PersistentSurfaceFanout requestedFanout,
+                    ConsumerGroup target,
+                    Surface[] surfaces, int[] indexes, int requestId,
+                    String view, boolean exclusive, boolean shellOwned,
+                    boolean firstSurfaceDirect, int sourceDemandMask, int producerEpoch)
+                    throws Exception {
                 clearDetachedConsumerIdentities();
                 fanout = requestedFanout;
-                boolean targetAttached = false;
+                boolean[] directAttempted = {false};
+                failedOpenStopAttempted = false;
+                failedOpenStopFailure = null;
+                activeProducerEpoch = producerEpoch;
                 try {
                     int demanded = sourceDemandMask | retainedSourceDemandMask();
                     ensureSources(port, indexesFromMask(demanded));
@@ -3021,8 +3123,8 @@ final class CameraHelperMain {
                         throw new IllegalStateException("startPreview returned false");
                     }
                     boolean[] attachedTargets = attachGroup(
-                            port, surfaces, indexes, firstSurfaceDirect, sourceDemandMask);
-                    targetAttached = true;
+                            port, surfaces, indexes, firstSurfaceDirect, sourceDemandMask,
+                            requestId, producerEpoch, true, directAttempted);
                     target.set(surfaces, indexes, requestId,
                             view, exclusive, shellOwned, true, firstSurfaceDirect,
                             sourceDemandMask);
@@ -3032,23 +3134,45 @@ final class CameraHelperMain {
                     if (isReverseOwner(target)) reverseWarmLease.clear();
                     reconcileSourceDemand(port);
                 } catch (Throwable error) {
-                    if (targetAttached) {
+                    failedOpenStopAttempted = true;
+                    failedOpenStopFailure = stopPersistentProducer(port);
+                    if (failedOpenStopFailure != null) {
+                        error.addSuppressed(failedOpenStopFailure);
+                    } else {
+                        Throwable detachError = null;
                         try {
-                            detachRequestedGroup(
-                                    port, surfaces, indexes, firstSurfaceDirect,
-                                    sourceDemandMask);
-                        } catch (Throwable ignored) {
-                            // The failed hub is released below.
+                            if (target.attached) detachGroup(port, target);
+                            else detachRequestedGroup(port, surfaces, indexes,
+                                    firstSurfaceDirect, directAttempted[0], sourceDemandMask);
+                        } catch (Throwable cleanupError) {
+                            detachError = root(cleanupError);
                         }
+                        detachError = mergeFailure(detachError, detachSources(port));
+                        if (detachError != null) error.addSuppressed(detachError);
                     }
-                    Throwable detachError = detachSources(port);
-                    if (detachError != null) error.addSuppressed(detachError);
                     target.clear();
                     fanout = null;
                     clearSources();
                     producerOpen = false;
+                    activeProducerEpoch = 0;
                     throw error;
                 }
+            }
+
+            private void clearFailedOpenState() {
+                failedOpenStopAttempted = false;
+                failedOpenStopFailure = null;
+                activityGroup.clear();
+                overlayGroup.clear();
+                parkingGroup.clear();
+                mirrorGroup.clear();
+                reverseGroup.clear();
+                clearSources();
+                producerOpen = false;
+                activeProducerEpoch = 0;
+                restoreFailure = null;
+                restoreFailureFatal = false;
+                fanout = null;
             }
 
             void attach(
@@ -3082,6 +3206,7 @@ final class CameraHelperMain {
                     int cameraId, int epoch,
                     boolean firstSurfaceDirect, int sourceDemandMask)
                     throws PersistentSessionFailure {
+                activeProducerEpoch = epoch;
                 try {
                     ensureSources(port, indexesFromMask(
                             sourceDemandMask | retainedSourceDemandMask()));
@@ -3108,7 +3233,8 @@ final class CameraHelperMain {
 
                 try {
                     boolean[] attachedTargets = attachGroup(
-                            port, surfaces, indexes, firstSurfaceDirect, sourceDemandMask);
+                            port, surfaces, indexes, firstSurfaceDirect, sourceDemandMask,
+                            requestId, epoch, false, null);
                     target.set(surfaces, indexes, requestId,
                             view, exclusive, shellOwned, true, firstSurfaceDirect,
                             sourceDemandMask);
@@ -3406,54 +3532,131 @@ final class CameraHelperMain {
                     boolean shellCloseAlreadyQueued,
                     PersistentShellCloseSink shellClose,
                     PersistentEventSink events, int epoch) {
+                return tearDown(port, reason, failure, closeStock, stockRequestId,
+                        shellCloseAlreadyQueued, shellClose, events, epoch,
+                        null, new Surface[0]);
+            }
+
+            TeardownOutcome tearDown(
+                    PersistentCameraPort port, String reason, Throwable failure,
+                    boolean closeStock, int stockRequestId,
+                    boolean shellCloseAlreadyQueued,
+                    PersistentShellCloseSink shellClose,
+                    PersistentEventSink events, int epoch,
+                    ActivityPreviewState.Snapshot<Surface> activityPreview,
+                    Surface[] pendingReverseSurfaces) {
                 clearDetachedConsumerIdentities();
                 Throwable first = failure;
                 ConsumerGroup.Snapshot[] abandoned = activeSnapshots();
                 String terminalError = first == null ? reason : summary(first);
                 for (ConsumerGroup.Snapshot consumer : abandoned) {
-                    events.emit("camera_error", "stage", reason,
-                            "camera_tag", "pano_h", "camera_owner", consumer.owner,
-                            "request_id", consumer.requestId,
-                            "view", consumer.view == null ? "unknown" : consumer.view,
-                            "preview_indexes", Arrays.toString(consumer.indexes),
-                            "producer_epoch", epoch, "error", terminalError);
+                    try {
+                        events.emit("camera_error", "stage", reason,
+                                "camera_tag", "pano_h", "camera_owner", consumer.owner,
+                                "request_id", consumer.requestId,
+                                "view", consumer.view == null ? "unknown" : consumer.view,
+                                "preview_indexes", Arrays.toString(consumer.indexes),
+                                "producer_epoch", epoch, "error", terminalError);
+                    } catch (Throwable error) {
+                        first = mergeFailure(first, error);
+                    }
                 }
                 if (port != null) {
-                    Throwable directError = detachDirectInputs(port);
-                    if (first == null) first = directError;
-                    Throwable detachError = detachSources(port);
-                    if (first == null) first = detachError;
-                    Throwable closeError = stopAndClosePersistentProducer(port);
-                    if (first == null) first = closeError;
+                    Throwable stopError = stopPersistentProducer(port);
+                    first = mergeFailure(first, stopError);
+                    if (stopError == null) {
+                        first = mergeFailure(first, detachDirectInputs(port));
+                        first = mergeFailure(first, detachActivityPreview(port, activityPreview));
+                        first = mergeFailure(first, detachSources(port));
+                    }
+                    try {
+                        port.close();
+                    } catch (Throwable error) {
+                        first = mergeFailure(first, error);
+                    }
                 }
                 if (fanout != null) {
                     try {
                         fanout.close();
                     } catch (Throwable closeError) {
-                        if (first == null) first = root(closeError);
+                        first = mergeFailure(first, closeError);
                     }
                 }
-                releaseAndClear(activityGroup);
-                releaseAndClear(overlayGroup);
-                releaseAndClear(parkingGroup);
-                releaseAndClear(mirrorGroup);
-                releaseAndClear(reverseGroup);
+                if (activityPreview != null && activityPreview.release
+                        && activityPreview.value != null) {
+                    try {
+                        activityPreview.value.release();
+                    } catch (Throwable error) {
+                        first = mergeFailure(first, error);
+                    }
+                }
+                try {
+                    releaseTeardownSurfaces(pendingReverseSurfaces);
+                } catch (Throwable error) {
+                    first = mergeFailure(first, error);
+                }
+                for (ConsumerGroup group : new ConsumerGroup[]{activityGroup, overlayGroup,
+                        parkingGroup, mirrorGroup, reverseGroup}) {
+                    try {
+                        releaseAndClear(group);
+                    } catch (Throwable error) {
+                        first = mergeFailure(first, error);
+                    }
+                }
                 // Controller demand survives a producer retry; only its owner clears it.
                 reverseWarmLease.clear();
                 fanout = null;
                 clearSources();
                 producerOpen = false;
+                activeProducerEpoch = 0;
                 restoreFailure = null;
                 restoreFailureFatal = false;
                 boolean shellCloseQueued = shellCloseAlreadyQueued;
                 if (closeStock && !shellCloseQueued) {
-                    shellCloseQueued = shellClose.close(reason, stockRequestId);
+                    try {
+                        shellCloseQueued = shellClose.close(reason, stockRequestId);
+                    } catch (Throwable error) {
+                        first = mergeFailure(first, error);
+                    }
                 }
                 String error = first == null ? "" : summary(first);
-                events.emit("camera_producer_closed", "reason", reason,
-                        "camera_tag", "pano_h", "producer_epoch", epoch,
-                        "error", error);
+                try {
+                    events.emit("camera_producer_closed", "reason", reason,
+                            "camera_tag", "pano_h", "producer_epoch", epoch,
+                            "error", error);
+                } catch (Throwable emitError) {
+                    first = mergeFailure(first, emitError);
+                }
                 return new TeardownOutcome(shellCloseQueued, first);
+            }
+
+            private static Throwable detachActivityPreview(
+                    PersistentCameraPort port,
+                    ActivityPreviewState.Snapshot<Surface> preview) {
+                if (preview == null || !preview.attached || preview.value == null) return null;
+                try {
+                    return port.remove(preview.value, preview.index) ? null
+                            : new IllegalStateException(
+                                    "rmPreviewSurface returned false for Activity preview");
+                } catch (Throwable error) {
+                    return root(error);
+                }
+            }
+
+            private static void releaseTeardownSurfaces(Surface[] surfaces) {
+                Throwable first = null;
+                if (surfaces != null) {
+                    for (Surface surface : surfaces) {
+                        if (surface == null) continue;
+                        try {
+                            surface.release();
+                        } catch (Throwable error) {
+                            first = mergeFailure(first, error);
+                        }
+                    }
+                }
+                if (first != null) throw new IllegalStateException(
+                        "camera Surface cleanup failed", first);
             }
 
             void rememberDetached(ConsumerGroup.Snapshot snapshot, int epoch) {
@@ -3581,7 +3784,8 @@ final class CameraHelperMain {
                     try {
                         group.fanoutAttached = attachGroup(port,
                                 group.surfaces, group.indexes,
-                                group.firstSurfaceDirect, group.sourceDemandMask);
+                                group.firstSurfaceDirect, group.sourceDemandMask,
+                                group.requestId, epoch, false, null);
                         group.attached = true;
                         group.directSurfaceAttached = group.firstSurfaceDirect;
                         applyActiveState(group);
@@ -3637,7 +3841,8 @@ final class CameraHelperMain {
                 try {
                     boolean[] attachedTargets = attachGroup(port,
                             previous.surfaces, previous.indexes,
-                            previous.firstSurfaceDirect, previous.sourceDemandMask);
+                            previous.firstSurfaceDirect, previous.sourceDemandMask,
+                            previous.requestId, epoch, false, null);
                     target.set(previous.surfaces, previous.indexes, previous.requestId,
                             previous.view, previous.exclusive, previous.shellOwned,
                             true, previous.firstSurfaceDirect, previous.sourceDemandMask);
@@ -3824,7 +4029,9 @@ final class CameraHelperMain {
 
             private boolean[] attachGroup(
                     PersistentCameraPort port, Surface[] surfaces, int[] indexes,
-                    boolean firstSurfaceDirect, int sourceDemandMask) throws Exception {
+                    boolean firstSurfaceDirect, int sourceDemandMask,
+                    int requestId, int producerEpoch, boolean deferRollbackOnFailure,
+                    boolean[] directAttemptedOnCall) throws Exception {
                 ArrayList<Surface> targetSurfaces = new ArrayList<>();
                 ArrayList<Integer> targetIndexValues = new ArrayList<>();
                 boolean[] attachedTargets = new boolean[surfaces.length];
@@ -3847,11 +4054,12 @@ final class CameraHelperMain {
                 boolean directAttempted = false;
                 try {
                     if (targets.length > 0) {
-                        fanout.attach(targets, targetIndexes);
+                        fanout.attach(targets, targetIndexes, requestId, producerEpoch);
                         fanoutAttached = true;
                     }
                     if (firstSurfaceDirect) {
                         directAttempted = true;
+                        if (directAttemptedOnCall != null) directAttemptedOnCall[0] = true;
                         if (!port.add(surfaces[0], indexes[0])) {
                             throw new IllegalStateException(
                                     "addPreviewSurface returned false for direct index "
@@ -3859,6 +4067,7 @@ final class CameraHelperMain {
                         }
                     }
                 } catch (Exception error) {
+                    if (deferRollbackOnFailure) throw error;
                     Exception rollbackError = null;
                     if (directAttempted) {
                         try {
@@ -3909,9 +4118,10 @@ final class CameraHelperMain {
 
             private void detachRequestedGroup(
                     PersistentCameraPort port, Surface[] surfaces, int[] indexes,
-                    boolean firstSurfaceDirect, int sourceDemandMask) throws Exception {
+                    boolean firstSurfaceDirect, boolean directAttempted,
+                    int sourceDemandMask) throws Exception {
                 Exception first = null;
-                if (firstSurfaceDirect) {
+                if (firstSurfaceDirect && directAttempted) {
                     try {
                         if (!port.remove(surfaces[0], indexes[0])) {
                             first = new IllegalStateException(
@@ -3935,6 +4145,7 @@ final class CameraHelperMain {
                         fanout.detach(attached.toArray(new Surface[0]));
                     } catch (Exception error) {
                         if (first == null) first = error;
+                        else if (first != error) first.addSuppressed(error);
                     }
                 }
                 if (first != null) throw first;
@@ -3947,16 +4158,14 @@ final class CameraHelperMain {
                     if (!group.directSurfaceAttached) continue;
                     try {
                         if (!port.remove(group.surfaces[0], group.indexes[0])) {
-                            if (first == null) {
-                                first = new IllegalStateException(
-                                        "rmPreviewSurface returned false for direct index "
-                                                + group.indexes[0]);
-                            }
+                            first = mergeFailure(first, new IllegalStateException(
+                                    "rmPreviewSurface returned false for direct index "
+                                            + group.indexes[0]));
                         } else {
                             group.directSurfaceAttached = false;
                         }
                     } catch (Throwable error) {
-                        if (first == null) first = root(error);
+                        first = mergeFailure(first, error);
                     }
                 }
                 return first;
@@ -4066,7 +4275,8 @@ final class CameraHelperMain {
                             fanout.detach(new Surface[]{group.surfaces[i]});
                             group.fanoutAttached[i] = false;
                         } else if (!group.fanoutAttached[i] && demanded) {
-                            fanout.attach(new Surface[]{group.surfaces[i]}, new int[]{index});
+                            fanout.attach(new Surface[]{group.surfaces[i]}, new int[]{index},
+                                    group.requestId, activeProducerEpoch);
                             group.fanoutAttached[i] = true;
                             if (!group.active[i]) fanout.setActive(group.surfaces[i], false);
                         }
@@ -4129,12 +4339,15 @@ final class CameraHelperMain {
                 for (int index = 0; index < sourceAttached.length; index++) {
                     if (!sourceAttached[index]) continue;
                     try {
-                        if (!port.remove(sourceSurfaces[index], index) && first == null) {
-                            first = new IllegalStateException(
-                                    "rmPreviewSurface returned false for RAW index " + index);
+                        if (!port.remove(sourceSurfaces[index], index)) {
+                            first = mergeFailure(first, new IllegalStateException(
+                                    "rmPreviewSurface returned false for RAW index " + index));
+                        } else {
+                            sourceAttached[index] = false;
+                            sourceSurfaces[index] = null;
                         }
                     } catch (Throwable error) {
-                        if (first == null) first = root(error);
+                        first = mergeFailure(first, error);
                     }
                 }
                 return first;
@@ -4220,8 +4433,8 @@ final class CameraHelperMain {
             }
 
             @Override
-            public void stop() throws Exception {
-                type.getMethod("stopPreview").invoke(target);
+            public boolean stop() throws Exception {
+                return invokeBoolean(type, target, "stopPreview", new Class<?>[0]);
             }
 
             @Override
