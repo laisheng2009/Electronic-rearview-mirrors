@@ -259,6 +259,19 @@ final class CompatibilityBundleExporter {
                 }
                 textTotal += value.length;
                 text.add(new TextCapture(spec, result, value));
+                if ("huawei_package_metadata".equals(spec.type)) {
+                    List<String> nativeDirs = CompatibilityBundleEvidence.huaweiNativeLibraryDirs(
+                            new String(value, StandardCharsets.UTF_8));
+                    for (int i = 0; i < nativeDirs.size(); i++) {
+                        String directory = nativeDirs.get(i);
+                        textSpecs.add(new TextSpec(
+                                spec.entry.replace("package.txt", "native-libraries-" + i + ".txt"),
+                                "huawei_native_inventory",
+                                "find -L " + shellQuote(directory)
+                                        + " -maxdepth 3 -type f -name '*.so' -print 2>/dev/null",
+                                directory));
+                    }
+                }
                 progress.report(Progress.Phase.TEXT, spec.entry, textIndex + 1,
                         textSpecs.size(), value.length, textTotal, false);
             }
@@ -307,6 +320,23 @@ final class CompatibilityBundleExporter {
         addPaths(remote, paths, text.get(7).result.output, "allowlisted_jar", true);
         addPaths(remote, paths, text.get(8).result.output, "avm_config", false);
         if (evidence != null) addEvidencePaths(remote, paths, evidence);
+        for (TextCapture capture : text) {
+            boolean apkPaths = "huawei_package_paths".equals(capture.spec.type);
+            if (!apkPaths && capture.spec.nativeRoot == null) continue;
+            for (String line : new String(capture.value, StandardCharsets.UTF_8).split("\\r?\\n")) {
+                String path = line.trim();
+                if (apkPaths) {
+                    if (!path.startsWith("package:")) continue;
+                    path = path.substring("package:".length());
+                    if (!CompatibilityBundleEvidence.isHuaweiApk(path)) continue;
+                } else if (!CompatibilityBundleEvidence.isHuaweiNativeLibrary(
+                        path, capture.spec.nativeRoot)) continue;
+                addRemote(remote, paths, path, apkPaths ? "huawei_apk" : "huawei_native_library");
+            }
+        }
+        for (String path : CompatibilityBundleEvidence.CAMERA_FIRMWARE_FILES) {
+            addRemote(remote, paths, path, "camera_firmware");
+        }
         try {
             checkCancelled(control);
         } catch (CancellationException error) {
@@ -540,6 +570,7 @@ final class CompatibilityBundleExporter {
     static boolean isAllowedRemotePath(String path) {
         if (path == null || path.isEmpty() || path.indexOf('\0') >= 0
                 || path.contains("..") || !path.startsWith("/")) return false;
+        if (CompatibilityBundleEvidence.isCameraFirmwareFile(path)) return true;
         for (String root : ALLOWED_ROOTS) {
             if (path.startsWith(root) && path.length() > root.length()) return true;
         }
@@ -602,6 +633,13 @@ final class CompatibilityBundleExporter {
         specs.add(new TextSpec("com.byd.avc/paths.txt", "package_metadata", PACKAGE_COMMAND));
         specs.add(new TextSpec("framework/allowlisted-jars.txt", "jar_metadata", JAR_FIND_COMMAND));
         specs.add(new TextSpec("camera/allowlisted-config-files.txt", "config_metadata", CONFIG_FIND_COMMAND));
+        for (String packageName : CompatibilityBundleEvidence.HUAWEI_PACKAGES) {
+            String directory = "packages/" + packageName + "/";
+            specs.add(new TextSpec(directory + "paths.txt", "huawei_package_paths",
+                    "pm path " + packageName + " 2>/dev/null"));
+            specs.add(new TextSpec(directory + "package.txt", "huawei_package_metadata",
+                    "dumpsys package " + packageName));
+        }
         return specs;
     }
 
@@ -871,10 +909,14 @@ final class CompatibilityBundleExporter {
     }
 
     private static String catCommand(String path) {
-        String quoted = "'" + path.replace("'", "'\\''") + "'";
+        String quoted = shellQuote(path);
         return "(if [ ! -e " + quoted + " ]; then exit 44; "
                 + "elif [ ! -r " + quoted + " ]; then exit 13; "
                 + "else cat " + quoted + " 2>/dev/null; fi)";
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
     }
 
     private static boolean isAllowedConfigPath(String path) {
@@ -1307,8 +1349,11 @@ final class CompatibilityBundleExporter {
     }
 
     private static final class TextSpec {
-        final String entry, type, command;
-        TextSpec(String entry, String type, String command) { this.entry = entry; this.type = type; this.command = command; }
+        final String entry, type, command, nativeRoot;
+        TextSpec(String entry, String type, String command) { this(entry, type, command, null); }
+        TextSpec(String entry, String type, String command, String nativeRoot) {
+            this.entry = entry; this.type = type; this.command = command; this.nativeRoot = nativeRoot;
+        }
     }
     private static final class TextCapture {
         final TextSpec spec;

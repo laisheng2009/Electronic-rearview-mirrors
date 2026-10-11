@@ -8,6 +8,31 @@ import java.util.Locale;
 /** Narrow path policy for the extra evidence used by the compatibility bundle. */
 final class CompatibilityBundleEvidence {
     private static final String LIBRARY_NAME = "libavmapi.so";
+    static final String[] HUAWEI_PACKAGES = {
+            "com.huawei.maps.car.app", "com.huawei.hibaic.adshmiic"
+    };
+    static final String[] CAMERA_FIRMWARE_FILES = {
+            "/system/bin/bmmcameraserver",
+            "/system/lib64/libbmmcamera.so",
+            "/system/lib64/libbmmcamera_client.so",
+            "/system/lib64/libbmmcamera_jni.so",
+            "/system/lib64/libbmmcameraservice.so",
+            "/system/lib64/libbmmcamsrv_client.so",
+            "/system/lib64/libbmmcamsrv_device.so",
+            "/system/lib64/libbmmcamera_utils.so",
+            "/system/lib64/libbmmcamera_watermark.so",
+            "/system/lib64/libbyd_cameramanager_jni.so",
+            "/system/etc/selinux/plat_property_contexts",
+            "/vendor/etc/selinux/vendor_property_contexts",
+            "/system_ext/etc/selinux/system_ext_property_contexts",
+            "/product/etc/selinux/product_property_contexts",
+            "/vendor/etc/selinux/precompiled_sepolicy",
+            "/sys/fs/selinux/policy",
+            "/system/etc/selinux/plat_sepolicy.cil",
+            "/vendor/etc/selinux/vendor_sepolicy.cil",
+            "/system_ext/etc/selinux/system_ext_sepolicy.cil",
+            "/product/etc/selinux/product_sepolicy.cil"
+    };
     private static final String[] APP_NATIVE_ROOTS = {
             "/data/app/", "/system/app/", "/system/priv-app/",
             "/system_ext/app/", "/system_ext/priv-app/", "/vendor/app/",
@@ -28,6 +53,35 @@ final class CompatibilityBundleEvidence {
             "/resource/configs/vehicle_param.yaml";
 
     private CompatibilityBundleEvidence() {}
+
+    static boolean isCameraFirmwareFile(String path) {
+        for (String candidate : CAMERA_FIRMWARE_FILES) {
+            if (candidate.equals(path)) return true;
+        }
+        return false;
+    }
+
+    static List<String> huaweiNativeLibraryDirs(String packageDump) {
+        List<String> result = new ArrayList<>();
+        for (String line : packageDump.split("\\r?\\n")) {
+            String value = line.trim();
+            if (!value.startsWith("legacyNativeLibraryDir=")
+                    && !value.startsWith("nativeLibraryDir=")
+                    && !value.startsWith("secondaryNativeLibraryDir=")) continue;
+            String path = value.substring(value.indexOf('=') + 1).trim();
+            if (isSafeApplicationNativeDir(path) && !result.contains(path)) result.add(path);
+        }
+        return result;
+    }
+
+    static boolean isHuaweiNativeLibrary(String path, String nativeRoot) {
+        return isSafeApplicationNativeDir(nativeRoot) && isSafeAbsolutePath(path)
+                && path.startsWith(nativeRoot + "/") && path.endsWith(".so");
+    }
+
+    static boolean isHuaweiApk(String path) {
+        return isSafeApplicationNativeDir(path) && path.endsWith(".apk");
+    }
 
     static PackageAbi resolvePackageAbi(String nativeLibraryDir) {
         String abi = abiFromPath(nativeLibraryDir);
