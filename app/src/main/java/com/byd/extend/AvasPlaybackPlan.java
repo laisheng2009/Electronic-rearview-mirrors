@@ -13,14 +13,16 @@ final class AvasPlaybackPlan {
 
     static float exteriorPlayerVolume(int volume, boolean loudnessEnabled) {
         int percent = Math.max(0, Math.min(100, volume));
-        // The enhancer already applies the percentage; retain attenuation only without it.
-        return percent == 0 ? 0f : loudnessEnabled ? 1f : percent / 100f;
+        // The enhancer cannot attenuate: the track handles the sub-unity end of the curve.
+        return loudnessEnabled ? (float) Math.min(1.0,
+                Math.pow(10.0, 34.0 / 20.0) * percent / 100.0) : percent / 100f;
     }
 
     static int exteriorTargetGainMb(int volume) {
         int percent = Math.max(0, Math.min(100, volume));
-        // Linear amplitude: 1%=1x, 50%=50x, 100%=100x (+40 dB); zero is muted by the track.
-        return percent == 0 ? 0 : (int) Math.round(2000.0 * Math.log10(percent));
+        // Linear amplitude, capped at +34 dB; zero is muted by the track.
+        return percent == 0 ? 0 : Math.max(0,
+                (int) Math.round(3400.0 + 2000.0 * Math.log10(percent / 100.0)));
     }
 
     static float interiorPcmGain(int volume) {

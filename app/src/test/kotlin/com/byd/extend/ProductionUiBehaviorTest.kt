@@ -100,6 +100,32 @@ class ProductionUiBehaviorTest {
         assertEquals("navigation must not rewrite feature settings", saved, prefs.all.filterKeys { !it.startsWith("ui_") })
     }
 
+    @Test fun engineButtonOnlyIsKeyGatedAndRetainsItsSavedValue() {
+        click("AVAS (external speaker)")
+        ui.onNode(hasScrollToIndexAction()).performScrollToNode(hasTestTag("avas-engine"))
+        val label = "Toggle engine sound only with the button"
+        switch(label).assertIsOff().assertIsNotEnabled()
+        switch("ENGINE SIMULATION").performSemanticsAction(SemanticsActions.OnClick) { it() }
+        switch(label).assertIsOff().assertIsNotEnabled()
+        CameraButtonBindings.save(prefs, CameraButtonBindings.Action.AvasEngine,
+            CameraButtonBindings.Binding(305, CameraButtonBindings.Press.Single))
+        controller.reload()
+        ui.waitForIdle()
+        switch(label).assertIsEnabled().performSemanticsAction(SemanticsActions.OnClick) { it() }
+        switch(label).assertIsOn()
+        assertTrue(AvasAudioLibrary(app, prefs).loadConfig().engine.buttonOnly)
+        controller.dispatch(BydExtendUiAction.ResetCameraButton(CameraButtonBindings.Action.AvasEngine))
+        ui.waitForIdle()
+        switch(label).assertIsOn().assertIsNotEnabled()
+        assertTrue("removing a key must not erase the saved option", AvasAudioLibrary(app, prefs).loadConfig().engine.buttonOnly)
+        switch("ENGINE SIMULATION").performSemanticsAction(SemanticsActions.OnClick) { it() }
+        switch(label).assertIsOn().assertIsNotEnabled()
+        activity.recreate()
+        ui.waitForIdle()
+        assertTrue(activity.get().productionAvasState().engine.buttonOnly)
+        assertFalse(activity.get().productionAvasState().engine.enabled)
+    }
+
     @Test fun backgroundChangesBecomeVisibleAfterResume() {
         mirror()
         switch("Rearview mirror").assertIsOff()

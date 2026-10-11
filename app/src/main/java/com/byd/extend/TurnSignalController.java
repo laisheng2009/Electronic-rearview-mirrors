@@ -450,7 +450,7 @@ final class TurnSignalController {
                 }
                 if (!sessionId.equals(desiredAvasAudition)) return;
                 config = avasLibrary.loadConfig();
-                transactAvasConfig(value, config.toJson());
+                transactAvasConfig(value, config);
                 if (!sessionId.equals(desiredAvasAudition)) return;
                 Parcel data = Parcel.obtain(), reply = Parcel.obtain();
                 try {
@@ -1826,7 +1826,7 @@ final class TurnSignalController {
                 reportAvasStatus(value);
                 return;
             }
-            transactAvasConfig(value, config.toJson());
+            transactAvasConfig(value, config);
             transactAvasProfile(value, TurnSignalShellProtocol.TX_START_AVAS_MANUAL, profileId);
         } catch (Throwable error) {
             emitAvasError("manual_start", profileId, profile.selectedAssetId, summary(error));
@@ -1859,7 +1859,7 @@ final class TurnSignalController {
             return;
         }
         try {
-            transactAvasConfig(value, config.toJson());
+            transactAvasConfig(value, config);
             transactNoArgs(value, liveToggle ? TurnSignalShellProtocol.TX_TOGGLE_AVAS_ENGINE
                     : TurnSignalShellProtocol.TX_START_AVAS_ENGINE);
         } catch (Throwable error) {
@@ -1877,7 +1877,7 @@ final class TurnSignalController {
                     ensureAvasAsset(value, profile.id, profile.assets, asset.id);
                 }
             }
-            transactAvasConfig(value, avasLibrary.loadConfig().toJson());
+            transactAvasConfig(value, avasLibrary.loadConfig());
         } catch (Throwable error) {
             emitAvasError("config", null, null, summary(error));
         }
@@ -2333,12 +2333,19 @@ final class TurnSignalController {
         }
     }
 
-    private static void transactAvasConfig(IBinder value, String configJson) throws Exception {
+    private void transactAvasConfig(IBinder value, AvasConfig config) throws Exception {
+        AvasConfig.Engine engine = config.engine;
+        if (engine.buttonOnly && CameraButtonBindings.load(settings,
+                CameraButtonBindings.Action.AvasEngine).keyCode < 0) {
+            config = config.withEngine(new AvasConfig.Engine(engine.enabled, engine.packId,
+                    engine.exteriorEnabled, engine.exteriorVolume, engine.interiorEnabled,
+                    engine.interiorVolume, engine.navigationPriority, false));
+        }
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
-            data.writeString(configJson);
+            data.writeString(config.toJson());
             requireTransact(value, TurnSignalShellProtocol.TX_CONFIGURE_AVAS, data, reply);
         } finally {
             data.recycle();

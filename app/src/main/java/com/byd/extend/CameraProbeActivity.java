@@ -3254,7 +3254,7 @@ public final class CameraProbeActivity extends ComponentActivity
                         config.engine.interiorEnabled, config.engine.interiorVolume,
                         avasEngineState, avasEngineError, avasEngineTestActive,
                         CameraButtonBindings.load(preferences, CameraButtonBindings.Action.AvasEngine),
-                        config.engine.navigationPriority));
+                        config.engine.navigationPriority, config.engine.buttonOnly));
     }
 
     @Override
@@ -3408,11 +3408,15 @@ public final class CameraProbeActivity extends ComponentActivity
             boolean interiorEnabled = engine.interiorEnabled;
             int interiorVolume = engine.interiorVolume;
             boolean navigationPriority = engine.navigationPriority;
+            boolean buttonOnly = engine.buttonOnly;
             if (kind == AvasActionKind.SetEnabled && action.getBooleanValue() != null) {
                 enabled = action.getBooleanValue();
             } else if (kind == AvasActionKind.SetEngineNavigationPriority
                     && action.getBooleanValue() != null) {
                 navigationPriority = action.getBooleanValue();
+            } else if (kind == AvasActionKind.SetEngineButtonOnly && action.getBooleanValue() != null
+                    && CameraButtonBindings.load(preferences, CameraButtonBindings.Action.AvasEngine).keyCode >= 0) {
+                buttonOnly = action.getBooleanValue();
             } else if (kind == AvasActionKind.SetEnginePack && action.getStringValue() != null) {
                 packId = action.getStringValue();
             } else if (kind == AvasActionKind.SetEngineExterior
@@ -3431,7 +3435,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 return;
             }
             AvasConfig.Engine updated = new AvasConfig.Engine(enabled, packId,
-                    exteriorEnabled, exteriorVolume, interiorEnabled, interiorVolume, navigationPriority);
+                    exteriorEnabled, exteriorVolume, interiorEnabled, interiorVolume, navigationPriority, buttonOnly);
             avasLibrary.saveConfig(config.withEngine(updated));
             if (!enabled && productionUi != null
                     && productionUi.getState().getDialog() != null
@@ -3682,6 +3686,7 @@ public final class CameraProbeActivity extends ComponentActivity
             if (cameraButtonActionEnabled(target)) {
                 cancelReverseButtonLearning();
                 CameraButtonBindings.reset(preferences, target);
+                if (target == CameraButtonBindings.Action.AvasEngine) CameraHelperService.configureAvas(this);
                 productionUi.reload();
             }
         } else if (action instanceof BydExtendUiAction.SetCameraButtonPress) {

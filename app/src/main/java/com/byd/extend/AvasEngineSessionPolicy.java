@@ -26,8 +26,26 @@ public final class AvasEngineSessionPolicy {
     private Boolean ready;
     private Boolean lastKnownReady;
     private boolean ignitionPending;
+    private boolean configured;
+    private boolean buttonOnly;
+    private Boolean rememberedChoice;
+
+    public AvasEngineSessionPolicy() { this(null); }
+
+    AvasEngineSessionPolicy(Boolean rememberedChoice) {
+        this.rememberedChoice = rememberedChoice;
+    }
 
     public Action configure(boolean enabled, boolean outputsPresent) {
+        return configure(enabled, outputsPresent, false);
+    }
+
+    public Action configure(boolean enabled, boolean outputsPresent, boolean buttonOnly) {
+        if (buttonOnly && !this.buttonOnly && (configured || rememberedChoice == null)) {
+            rememberedChoice = liveRequested;
+        }
+        this.buttonOnly = buttonOnly;
+        configured = true;
         boolean wasPlaying = active || tailing;
         this.enabled = enabled;
         this.outputsPresent = outputsPresent;
@@ -52,12 +70,15 @@ public final class AvasEngineSessionPolicy {
         if (present != null) {
             if (present) {
                 boolean wasLive = liveRequested;
-                if (Boolean.FALSE.equals(lastKnownReady)) {
+                if (buttonOnly) {
+                    liveRequested = Boolean.TRUE.equals(rememberedChoice);
+                    if (!wasLive && liveRequested && !testing) ignitionPending = true;
+                } else if (Boolean.FALSE.equals(lastKnownReady)) {
                     liveRequested = true;
                     if (!wasLive && !testing) ignitionPending = true;
                 } else if (lastKnownReady == null && !liveChoiceMade) {
                     liveRequested = true;
-                    ignitionPending = false;
+                    ignitionPending = true;
                 }
             } else {
                 ignitionPending = false;
@@ -120,6 +141,7 @@ public final class AvasEngineSessionPolicy {
         if (!available()) return Action.NONE;
         liveChoiceMade = true;
         liveRequested = !liveRequested;
+        if (buttonOnly) rememberedChoice = liveRequested;
         recoveryPending = false;
         if (!liveRequested) {
             ignitionPending = false;
@@ -190,6 +212,7 @@ public final class AvasEngineSessionPolicy {
     public boolean desiredActive() { return liveRequested || testing; }
     public boolean testActive() { return testing; }
     public boolean liveRequested() { return liveRequested; }
+    Boolean rememberedChoice() { return rememberedChoice; }
     public boolean hasValidPower() { return hasValidPower && !powerUnknown; }
     public int rawPower() { return rawPower; }
     public int lastValidPower() { return lastValidPower; }

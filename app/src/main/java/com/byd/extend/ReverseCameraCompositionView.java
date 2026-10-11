@@ -96,7 +96,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     private int visibilityMask = ReverseCameraLayout.VISIBILITY_ALL;
     private int displayTarget = CameraDisplayTarget.TABLET;
     private boolean forceDewarpPipeline;
-    private boolean fusedOutput = true;
+    private boolean fusedOutput;
     private int[] borderDp = new int[CameraShellProtocol.ReverseOverlaySpec.BORDER_COUNT];
     private int[] borderArgb = defaultBorderColors();
 

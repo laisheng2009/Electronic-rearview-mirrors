@@ -21,7 +21,9 @@ final class AvasEngineRuntime implements AutoCloseable {
     private final AvasEngineCueGate cueGate;
     private final AvasEngineTelemetry telemetry;
     private final AvasEngineReadyMonitor readiness;
-    private final AvasEngineSessionPolicy policy = new AvasEngineSessionPolicy();
+    private final AvasEngineSessionPolicy policy;
+    private final Consumer<Boolean> saveChoice;
+    private Boolean savedChoice;
     private final ExecutorService render = Executors.newSingleThreadExecutor(r ->
             new Thread(r, "avas-engine-pcm"));
     private volatile AvasConfig.Engine config = AvasConfig.Engine.defaults();
@@ -35,12 +37,22 @@ final class AvasEngineRuntime implements AutoCloseable {
     AvasEngineRuntime(Context context, Callable<AvasAudioPlayer> player,
             BooleanSupplier microphoneActive, ScheduledExecutorService executor,
             Consumer<JSONObject> events, Runnable changed, AvasEngineCueGate cueGate) {
+        this(context, player, microphoneActive, executor, events, changed, cueGate, null, value -> {});
+    }
+
+    AvasEngineRuntime(Context context, Callable<AvasAudioPlayer> player,
+            BooleanSupplier microphoneActive, ScheduledExecutorService executor,
+            Consumer<JSONObject> events, Runnable changed, AvasEngineCueGate cueGate,
+            Boolean savedChoice, Consumer<Boolean> saveChoice) {
         this.context = context;
         this.player = player;
         this.microphoneActive = microphoneActive;
         this.changed = changed;
         this.events = events;
         this.cueGate = cueGate;
+        this.savedChoice = savedChoice;
+        this.saveChoice = saveChoice;
+        policy = new AvasEngineSessionPolicy(savedChoice);
         telemetry = new AvasEngineTelemetry(context, executor, events);
         readiness = new AvasEngineReadyMonitor(context, executor, this::onReady, events);
     }
@@ -51,7 +63,8 @@ final class AvasEngineRuntime implements AutoCloseable {
         config = next;
         telemetry.setEnabled(next.enabled && hasOutput(next));
         readiness.setEnabled(next.enabled && hasOutput(next));
-        AvasEngineSessionPolicy.Action action = policy.configure(next.enabled, hasOutput(next));
+        AvasEngineSessionPolicy.Action action = policy.configure(next.enabled, hasOutput(next), next.buttonOnly);
+        persistChoice();
         if (action != AvasEngineSessionPolicy.Action.NONE) {
             logPolicy("configure", policy.rawPower(), false, action);
         }
@@ -65,7 +78,7 @@ final class AvasEngineRuntime implements AutoCloseable {
                 || previous.interiorEnabled != next.interiorEnabled;
         if (action == AvasEngineSessionPolicy.Action.NONE && reroute && current != null
                 && !current.tail && next.enabled && hasOutput(next)) {
-            start(false);
+            start(!previous.packId.equals(next.packId));
         } else apply(action);
     }
 
@@ -110,8 +123,21 @@ final class AvasEngineRuntime implements AutoCloseable {
     synchronized void toggleLive() {
         if (closed) return;
         AvasEngineSessionPolicy.Action action = policy.toggleLive();
+        persistChoice();
         logPolicy("live_toggle", policy.rawPower(), false, action);
         apply(action, "live_toggle");
+    }
+
+    private void persistChoice() {
+        Boolean choice = policy.rememberedChoice();
+        if (choice != null && !choice.equals(savedChoice)) {
+            try {
+                saveChoice.accept(choice);
+                savedChoice = choice;
+            } catch (RuntimeException failure) {
+                log("avas_engine_choice_error", "operation", "save", "error", failure.toString());
+            }
+        }
     }
 
     synchronized JSONObject status() {

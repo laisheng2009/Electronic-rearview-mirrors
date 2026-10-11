@@ -105,6 +105,10 @@ internal fun AvasEngineCard(
             MirrorBindingRow(strings.resource(R.string.avas_engine_key_binding),
                 CameraButtonBindings.Action.AvasEngine, state.binding, state.enabled,
                 strings, colors, onAction)
+            SwitchLine(strings.resource(R.string.avas_engine_button_only),
+                strings.resource(R.string.avas_engine_button_only_hint), state.buttonOnly,
+                { send(AvasActionKind.SetEngineButtonOnly, enabled = it) }, colors,
+                enabled = state.enabled && state.binding.keyCode >= 0)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton(strings.resource(R.string.avas_engine_start), colors,
                     Modifier.weight(1f), icon = Icons.Outlined.PlayArrow, primary = true,

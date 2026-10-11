@@ -389,7 +389,7 @@ final class MusicMetadataRuntime {
                 if (!dispatched) failure = "session_rejected";
             } else if (pending.binding == null && pending.receiver != null
                     && mediaContext != null && isLiveMediaProcess(pending.packageName, false)) {
-                mediaContext.sendBroadcast(new Intent(Intent.ACTION_MEDIA_BUTTON)
+                sendMediaButtonBroadcast(mediaContext, new Intent(Intent.ACTION_MEDIA_BUTTON)
                         .setComponent(pending.receiver).putExtra(Intent.EXTRA_KEY_EVENT, key));
                 dispatched = true;
             } else failure = "endpoint_unavailable";
@@ -405,8 +405,25 @@ final class MusicMetadataRuntime {
                 "action", action, "accepted", dispatched, "dispatched", dispatched,
                 "delivery", pending.binding != null ? "session_api" : "broadcast_enqueued_only",
                 "acknowledged", false,
+                "temporary_fgs_allowlist_ms", pending.binding == null
+                        && android.os.Build.VERSION.SDK_INT >= 31 && dispatched ? 10_000 : 0,
                 "error", failure);
         return dispatched;
+    }
+
+    static void sendMediaButtonBroadcast(Context context, Intent intent) throws Exception {
+        if (android.os.Build.VERSION.SDK_INT < 31) {
+            context.sendBroadcast(intent);
+            return;
+        }
+        // Match MediaButtonReceiverHolder; permission enforcement remains in system_server.
+        Class<?> optionsType = Class.forName("android.app.BroadcastOptions");
+        Object options = optionsType.getMethod("makeBasic").invoke(null);
+        optionsType.getMethod("setTemporaryAppAllowlist", long.class, int.class, int.class, String.class)
+                .invoke(options, 10_000L, 0, 313, ""); // FGS_ALLOWED, MEDIA_BUTTON
+        android.os.Bundle bundle = (android.os.Bundle) optionsType.getMethod("toBundle").invoke(options);
+        Context.class.getMethod("sendBroadcast", Intent.class, String.class, android.os.Bundle.class)
+                .invoke(context, intent, null, bundle);
     }
 
     private Map<Object, Integer> receiverPlaybackStates(String packageName) throws Throwable {

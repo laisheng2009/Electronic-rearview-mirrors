@@ -21,6 +21,33 @@ import static org.robolectric.Shadows.shadowOf;
 @ConscryptMode(ConscryptMode.Mode.OFF)
 @Config(sdk = 29, application = Application.class, shadows = MediaKeyRuntimeBehaviorTest.FrameworkBoundary.class)
 public class MediaKeyRuntimeBehaviorTest {
+    public static class BroadcastContext extends ContextWrapper {
+        final List<Bundle> options = new ArrayList<>();
+        boolean reject;
+        BroadcastContext(Context base) { super(base); }
+        public void sendBroadcast(Intent intent, String permission, Bundle options) {
+            if (reject) throw new SecurityException("temporary allowance denied");
+            this.options.add(options);
+            super.sendBroadcast(intent);
+        }
+        @Override public void sendBroadcast(Intent intent) {
+            throw new AssertionError("modern receiver dispatch must never fall back to a plain broadcast");
+        }
+    }
+
+    @Test @Config(sdk = 33)
+    public void modernLiveReceiverCyclesCarryTemporaryForegroundAllowance() throws Exception {
+        livePlayerFallbackIsCancelledBySessionResponse();
+        BroadcastContext denied = new BroadcastContext(RuntimeEnvironment.getApplication());
+        denied.reject = true;
+        try {
+            MusicMetadataRuntime.sendMediaButtonBroadcast(denied,
+                    new Intent(Intent.ACTION_MEDIA_BUTTON).setComponent(new ComponentName("test.player", "Receiver")));
+            fail("denied allowance must not be retried as a plain broadcast");
+        } catch (java.lang.reflect.InvocationTargetException failure) {
+            assertTrue(failure.getCause() instanceof SecurityException);
+        }
+    }
     @Implements(MusicMetadataRuntime.class)
     public static class FrameworkBoundary {
         // DiLink framework bootstrap is absent from the host; routing/observation remain real.
@@ -54,7 +81,8 @@ public class MediaKeyRuntimeBehaviorTest {
         MusicMetadataRuntime runtime = new MusicMetadataRuntime(app, new Handler(Looper.getMainLooper()),
                 (kind, fields) -> events.add(kind + Arrays.toString(fields)),
                 (reason, action) -> action.run(), oemAudio(), processes);
-        AndroidBehaviorHarness.field(runtime, "mediaContext", app);
+        BroadcastContext broadcastContext = new BroadcastContext(app);
+        AndroidBehaviorHarness.field(runtime, "mediaContext", Build.VERSION.SDK_INT >= 31 ? broadcastContext : app);
         try {
             runtime.configure(true);
             runtime.powerStateChanged(true, "test_wake");
@@ -86,6 +114,16 @@ public class MediaKeyRuntimeBehaviorTest {
             shadowOf(processes).setProcesses(Collections.emptyList());
             press(runtime, player, false);
             assertEquals(6, keys(app).size());
+            if (Build.VERSION.SDK_INT >= 31) {
+                assertEquals(6, broadcastContext.options.size());
+                Class<?> type = Class.forName("android.app.BroadcastOptions");
+                for (Bundle bundle : broadcastContext.options) {
+                    Object options = type.getConstructor(Bundle.class).newInstance(bundle);
+                    assertEquals(10_000L, type.getMethod("getTemporaryAppAllowlistDuration").invoke(options));
+                    assertEquals(0, type.getMethod("getTemporaryAppAllowlistType").invoke(options));
+                    assertEquals(313, type.getMethod("getTemporaryAppAllowlistReasonCode").invoke(options));
+                }
+            }
             assertTrue(events.toString(), events.stream().anyMatch(e -> e.contains("observed_response")));
         } catch (PackageManager.NameNotFoundException failure) {
             throw new AssertionError(failure);

@@ -65,7 +65,7 @@ final class BlindSpotCameraView extends TextureView
     private int dewarpGeneration;
     private long dewarpRequestToken;
     private boolean forceDewarpPipeline;
-    private boolean fusedOutput = true;
+    private boolean fusedOutput;
     private boolean preserveInputFrameTimestamp;
     private boolean externalTransform;
     private float dewarpRoiCenterX = 0.5f;

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="avas_engine_button_only">Перемикати звук двигуна лише кнопкою</string>
+    <string name="avas_engine_button_only_hint">Запам’ятовувати стан звуку між увімкненнями авто.</string>
     <string name="avas_engine_navigation_priority">Пріоритет навігації</string>
     <string name="avas_engine_navigation_priority_hint">Звільняти зовнішній аудіоканал для навігації. Початок повідомлення може бути втрачено.</string>
     <string name="correction_strength">"Сила"</string>

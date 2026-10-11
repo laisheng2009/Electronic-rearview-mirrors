@@ -353,6 +353,9 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
             CameraButtonBindings.save(preferences, result.learnedAction,
                     new CameraButtonBindings.Binding(result.learnedKeyCode, current.press));
             CameraProbeActivity.publishCameraSteeringButtonCaptured(result.learnedAction);
+            if (result.learnedAction == CameraButtonBindings.Action.AvasEngine) {
+                CameraHelperService.configureAvas(this);
+            }
         }
         if (result.actions.contains(CameraButtonBindings.Action.ReverseSource)) {
             CameraHelperService.requestReverseSteeringToggle(this);

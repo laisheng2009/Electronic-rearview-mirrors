@@ -27,6 +27,153 @@ import static org.junit.Assert.*;
         AvasRuntimeBehaviorTest.NavBoundary.class, AvasRuntimeBehaviorTest.TrackBoundary.class,
         AvasRuntimeBehaviorTest.AutoServiceBoundary.class, AvasRuntimeBehaviorTest.AudioBoundary.class})
 public class AvasRuntimeBehaviorTest {
+    @org.junit.Before public void resetAudioBoundaryCounters() {
+        assertEquals("previous test leaked an audio owner", 0, TrackBoundary.live.get());
+        TrackBoundary.opened.set(0);
+        TrackBoundary.maxLive.set(0);
+        TrackBoundary.frames.set(0);
+        RouteBoundary.acquired = RouteBoundary.released = 0;
+        AutoServiceBoundary.ok = 2;
+    }
+
+    @Test public void exteriorGainHas34DbCeilingWithoutChangingInterior() {
+        assertEquals(3400, AvasPlaybackPlan.exteriorTargetGainMb(100));
+        assertEquals(2798, AvasPlaybackPlan.exteriorTargetGainMb(50));
+        assertEquals(0, AvasPlaybackPlan.exteriorTargetGainMb(1));
+        assertEquals(.501187f, AvasPlaybackPlan.exteriorPlayerVolume(1, true), .00001f);
+        assertEquals(1f, AvasPlaybackPlan.exteriorPlayerVolume(50, true), 0f);
+        assertEquals(.5f, AvasPlaybackPlan.exteriorPlayerVolume(50, false), 0f);
+        assertEquals(0f, AvasPlaybackPlan.exteriorPlayerVolume(0, true), 0f);
+        assertEquals(2f, AvasPlaybackPlan.interiorPcmGain(100), 0f);
+    }
+
+    @Test public void savedButtonChoiceSurvivesPowerAndHelperRestartWithoutAuditionWrites() throws Exception {
+        var file = new java.io.File(RuntimeEnvironment.getApplication().getCacheDir(), "engine-choice.json");
+        var store = new AvasEngineChoiceStore(file, 12345);
+        assertNull(store.load());
+        AvasEngineSessionPolicy policy = new AvasEngineSessionPolicy();
+        policy.configure(true, true);
+        policy.observePower(2, true);
+        assertEquals(AvasEngineSessionPolicy.Action.START, policy.observeReady(true));
+        assertEquals(AvasEngineSessionPolicy.Action.NONE, policy.configure(true, true, true));
+        assertEquals(Boolean.TRUE, policy.rememberedChoice()); // Adopt the current live state.
+        store.save(policy.rememberedChoice());
+        assertEquals(AvasEngineSessionPolicy.Action.STOP_WITH_TAIL, policy.observePower(0, false));
+        policy.playbackTailFinished();
+        assertEquals(Boolean.TRUE, policy.rememberedChoice());
+        policy.observePower(2, false);
+        assertEquals(AvasEngineSessionPolicy.Action.START, policy.observeReady(true));
+        assertEquals(AvasEngineSessionPolicy.Action.STOP_WITH_TAIL, policy.toggleLive());
+        store.save(policy.rememberedChoice());
+        policy.playbackTailFinished();
+        assertEquals(AvasEngineSessionPolicy.Action.START, policy.manualStart());
+        assertEquals(AvasEngineSessionPolicy.Action.STOP_NOW, policy.manualStop());
+        assertEquals(Boolean.FALSE, store.load());
+        assertEquals(Boolean.FALSE, policy.rememberedChoice());
+        AvasEngineSessionPolicy restarted = new AvasEngineSessionPolicy(store.load());
+        restarted.configure(true, true, true);
+        restarted.observePower(2, true);
+        assertEquals(AvasEngineSessionPolicy.Action.NONE, restarted.observeReady(true));
+        restarted.observeReady(false);
+        assertEquals(AvasEngineSessionPolicy.Action.NONE, restarted.observeReady(true));
+        assertEquals(AvasEngineSessionPolicy.Action.START, restarted.toggleLive());
+        store.save(restarted.rememberedChoice());
+        AvasEngineSessionPolicy restoredOn = new AvasEngineSessionPolicy(store.load());
+        restoredOn.configure(true, true, true);
+        restoredOn.observePower(2, true);
+        assertEquals(AvasEngineSessionPolicy.Action.START, restoredOn.observeReady(true));
+        assertEquals(AvasEngineSessionPolicy.Action.NONE, restoredOn.configure(true, true, true));
+        assertNull("another install owner must not inherit the choice", new AvasEngineChoiceStore(file, 54321).load());
+        JSONObject old = new JSONObject(AvasConfig.empty().toJson());
+        old.getJSONObject("engine").remove("buttonOnly");
+        assertFalse(AvasConfig.parse(old.toString()).engine.buttonOnly);
+        old.getJSONObject("engine").put("buttonOnly", true).put("exteriorVolume", 67);
+        AvasConfig loaded = AvasConfig.parse(old.toString());
+        assertTrue(AvasConfig.parse(loaded.toJson()).engine.buttonOnly);
+        assertEquals(67, AvasConfig.parse(loaded.toJson()).engine.exteriorVolume);
+    }
+
+    @Test public void runtimeRestoresChoiceAndStartsNewPacksWithIgnition() throws Exception {
+        var store = new AvasEngineChoiceStore(new java.io.File(
+                RuntimeEnvironment.getApplication().getCacheDir(), "runtime-engine-choice.json"), 12345);
+        store.save(true);
+        List<JSONObject> events = new CopyOnWriteArrayList<>();
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        AvasEngineCueGate cues = new AvasEngineCueGate();
+        try (AvasAudioPlayer player = new AvasAudioPlayer(RuntimeEnvironment.getApplication(), events::add, cues)) {
+            AvasEngineRuntime runtime = new AvasEngineRuntime(RuntimeEnvironment.getApplication(), () -> player,
+                    () -> false, executor, events::add, () -> {}, cues, store.load(), choice -> {
+                        try { store.save(choice); } catch (Exception error) { throw new IllegalStateException(error); }
+                    });
+            try {
+                AutoServiceBoundary.ok = 1;
+                runtime.onPower(2, true);
+                AvasConfig.Engine enabled = new AvasConfig.Engine(true, AvasEngineSettings.DEFAULT_PACK_ID,
+                        false, 25, true, 40, true, true);
+                runtime.configure(enabled);
+                AndroidBehaviorHarness.await("initial restored live output needs ignition", () -> startCues(events) == 1);
+                Object session = AndroidBehaviorHarness.field(runtime, "current");
+                runtime.configure(enabled);
+                runtime.configure(new AvasConfig.Engine(true, enabled.packId, false, 25, true, 41, true, true));
+                assertSame("unchanged config and volume must not restart playback", session,
+                        AndroidBehaviorHarness.field(runtime, "current"));
+                runtime.configure(new AvasConfig.Engine(true, AvasEngineSettings.JAGUAR_V6,
+                        false, 25, true, 41, true, true));
+                AndroidBehaviorHarness.await("new pack needs ignition", () -> startCues(events) == 2);
+                runtime.startManual();
+                runtime.stopManual();
+                assertEquals("test override must not change live choice", Boolean.TRUE, store.load());
+                runtime.toggleLive();
+                assertEquals("steering choice must reach disk before power-off", Boolean.FALSE, store.load());
+                runtime.onPower(0, false);
+                runtime.configure(enabled);
+                assertEquals("power/config replay must preserve the button choice", Boolean.FALSE, store.load());
+            } finally {
+                runtime.close();
+                AndroidBehaviorHarness.await("render worker must finish", () -> TrackBoundary.live.get() == 0);
+            }
+        } finally { executor.shutdownNow(); assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS)); }
+    }
+
+    private static long startCues(List<JSONObject> events) {
+        return events.stream().filter(e -> e.optString("kind").equals("avas_engine_cue")
+                && e.optString("cue").equals("start") && e.optString("phase").equals("begin")).count();
+    }
+
+    @Test public void helperConfigurationUsesBindingWithoutRewritingSavedOption() {
+        android.content.Context app = RuntimeEnvironment.getApplication();
+        AndroidBehaviorHarness.settings(app);
+        var settings = app.getSharedPreferences("settings", 0);
+        AvasConfig config = AvasConfig.empty().withEngine(new AvasConfig.Engine(
+                true, AvasEngineSettings.DEFAULT_PACK_ID, true, 65, false, 32, true, true));
+        new AvasAudioLibrary(app, settings).saveConfig(config);
+        List<AvasConfig> received = new ArrayList<>();
+        Binder endpoint = new Binder() {
+            @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
+                assertEquals(TurnSignalShellProtocol.TX_CONFIGURE_AVAS, code);
+                data.enforceInterface(TurnSignalShellProtocol.DESCRIPTOR);
+                received.add(AvasConfig.parse(data.readString()));
+                reply.writeNoException();
+                return true;
+            }
+        };
+        TurnSignalController controller = new TurnSignalController(app, new Handler(Looper.getMainLooper()),
+                event -> {}, (kind, fields) -> {});
+        try {
+            AndroidBehaviorHarness.call(controller, "transactAvasConfig", endpoint, config);
+            assertFalse(received.get(0).engine.buttonOnly);
+            CameraButtonBindings.save(settings, CameraButtonBindings.Action.AvasEngine,
+                    new CameraButtonBindings.Binding(305, CameraButtonBindings.Press.Single));
+            AndroidBehaviorHarness.call(controller, "transactAvasConfig", endpoint, config);
+            assertTrue(received.get(1).engine.buttonOnly);
+            assertEquals(config.toJson(), new AvasAudioLibrary(app, settings).loadConfig().toJson());
+            CameraButtonBindings.reset(settings, CameraButtonBindings.Action.AvasEngine);
+            AndroidBehaviorHarness.call(controller, "transactAvasConfig", endpoint, config);
+            assertFalse(received.get(2).engine.buttonOnly);
+            assertEquals(65, received.get(2).engine.exteriorVolume);
+        } finally { controller.shutdown(false); }
+    }
+
     @Test public void concurrentOwnersReleaseRouteOnlyAfterLastClose() throws Exception {
         List<JSONObject> events = new CopyOnWriteArrayList<>();
         AtomicInteger firstVolume = new AtomicInteger(20);

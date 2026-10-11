@@ -68,6 +68,13 @@ final class AvasRuntime implements AutoCloseable {
         this.context = context;
         this.ownerUid = ownerUid;
         this.eventSink = eventSink;
+        AvasEngineChoiceStore choiceStore = new AvasEngineChoiceStore(
+                new File(CACHE, "engine-choice.json"), ownerUid);
+        Boolean savedChoice = null;
+        try { savedChoice = choiceStore.load(); }
+        catch (Exception failure) {
+            event("avas_engine_choice_error", "operation", "load", "error", failure.toString());
+        }
         queue = new AvasPlaybackQueue(SystemClock::elapsedRealtime, Process.myPid());
         engine = new AvasEngineRuntime(context, () -> {
                     queue.stopAllAuditions();
@@ -78,7 +85,14 @@ final class AvasRuntime implements AutoCloseable {
                     return session != null && "active".equals(session.state);
                 }, telemetry, this::emit, () -> {
                     if (!closed) telemetry.execute(this::reportStatus);
-                }, cueGate);
+                }, cueGate, savedChoice, choice -> {
+                    try {
+                        ensureCache();
+                        choiceStore.save(choice);
+                    } catch (Exception failure) {
+                        throw new IllegalStateException("engine choice persistence failed", failure);
+                    }
+                });
         AvasVehicleTelemetryTransport transport = new AvasVehicleTelemetryTransport(context);
         telemetryController = new AvasTelemetryController(SystemClock::elapsedRealtime,
                 new AvasTelemetryController.Executor() {
