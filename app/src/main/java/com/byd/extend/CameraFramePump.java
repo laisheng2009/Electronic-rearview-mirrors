@@ -50,6 +50,7 @@ final class CameraFramePump {
     private final Runnable capture = this::capture;
     private int signals;
     private boolean queued, failed, matrixReported;
+    private long lastFrameTimestamp;
     private volatile long outputSize;
     private volatile boolean closed;
 
@@ -125,43 +126,55 @@ final class CameraFramePump {
             input.updateTexImage();
             long acquired = System.nanoTime();
             long updated = SystemClock.elapsedRealtimeNanos();
-            long timestamp = input.getTimestamp();
-            input.getTransformMatrix(matrix);
-            if (!matrixReported) {
-                matrixReported = true;
-                Log.i("BydCameraProbe", "{\"kind\":\"camera_texture_matrix\","
-                        + "\"source\":\"direct_camera_source_hub\",\"stage\":\"avm_source\","
-                        + "\"preview_index\":" + index + ",\"surface_texture_id\":"
-                        + System.identityHashCode(input) + ",\"matrix\":" + Arrays.toString(matrix)
-                        + ",\"worker\":\"" + thread.getName() + "\"}");
-            }
-            long size = outputSize;
-            int width = (int) (size >>> 32), height = (int) size;
-            if (width > 0 && height > 0) {
-                int slot = mailbox.reserve(this::readyToWrite);
-                if (slot >= 0) {
-                    Frame frame = frames[slot];
-                    allocate(frame, width, height);
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, frame.framebuffer);
-                    GLES20.glViewport(0, 0, width, height);
-                    GLES20.glUseProgram(program);
-                    GLES20.glEnableVertexAttribArray(positionLocation);
-                    GLES20.glEnableVertexAttribArray(coordsLocation);
-                    GLES20.glVertexAttribPointer(positionLocation, 2, GLES20.GL_FLOAT, false, 0, positions);
-                    GLES20.glVertexAttribPointer(coordsLocation, 2, GLES20.GL_FLOAT, false, 0, coords);
-                    GLES20.glUniformMatrix4fv(matrixLocation, 1, false, matrix, 0);
-                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-                    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTexture);
-                    GLES20.glUniform1i(textureLocation, 0);
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
-                    require(GLES20.glGetError() == GLES20.GL_NO_ERROR, "camera snapshot draw failed");
-                    frame.acquiredNs = acquired;
-                    frame.producerNs = timestamp;
-                    frame.fence = finishUse();
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-                    mailbox.publish(slot);
-                    listener.available();
+            long timestamp;
+            int slot = -1;
+            try {
+                timestamp = input.getTimestamp();
+                // A late callback can find only the placeholder left by releaseTexImage().
+                if (timestamp <= 0 || timestamp == lastFrameTimestamp) return;
+                lastFrameTimestamp = timestamp;
+                input.getTransformMatrix(matrix);
+                if (!matrixReported) {
+                    matrixReported = true;
+                    Log.i("BydCameraProbe", "{\"kind\":\"camera_texture_matrix\","
+                            + "\"source\":\"direct_camera_source_hub\",\"stage\":\"avm_source\","
+                            + "\"preview_index\":" + index + ",\"surface_texture_id\":"
+                            + System.identityHashCode(input) + ",\"matrix\":" + Arrays.toString(matrix)
+                            + ",\"worker\":\"" + thread.getName() + "\"}");
                 }
+                long size = outputSize;
+                int width = (int) (size >>> 32), height = (int) size;
+                if (width > 0 && height > 0) {
+                    slot = mailbox.reserve(this::readyToWrite);
+                    if (slot >= 0) {
+                        Frame frame = frames[slot];
+                        allocate(frame, width, height);
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, frame.framebuffer);
+                        GLES20.glViewport(0, 0, width, height);
+                        GLES20.glUseProgram(program);
+                        GLES20.glEnableVertexAttribArray(positionLocation);
+                        GLES20.glEnableVertexAttribArray(coordsLocation);
+                        GLES20.glVertexAttribPointer(positionLocation, 2, GLES20.GL_FLOAT, false, 0, positions);
+                        GLES20.glVertexAttribPointer(coordsLocation, 2, GLES20.GL_FLOAT, false, 0, coords);
+                        GLES20.glUniformMatrix4fv(matrixLocation, 1, false, matrix, 0);
+                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+                        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTexture);
+                        GLES20.glUniform1i(textureLocation, 0);
+                        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+                        require(GLES20.glGetError() == GLES20.GL_NO_ERROR, "camera snapshot draw failed");
+                        frame.acquiredNs = acquired;
+                        frame.producerNs = timestamp;
+                        frame.fence = finishUse();
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+                    }
+                }
+            } finally {
+                // GLConsumer supplies the release fence; do not retain OEM input until the next frame.
+                input.releaseTexImage();
+            }
+            if (slot >= 0) {
+                mailbox.publish(slot);
+                listener.available();
             }
             listener.acquired(started, timestamp, updated - started,
                     SystemClock.elapsedRealtimeNanos() - updated, count);

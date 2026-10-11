@@ -10,6 +10,8 @@ import android.os.Parcel;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 final class ClusterFullscreenProtocol {
     private static final ComponentName SERVICE = new ComponentName(
@@ -23,10 +25,25 @@ final class ClusterFullscreenProtocol {
     private static final int ACTION_SET = 1;
     private static final int OPERATION_FULLSCREEN = 4;
     private static final long TIMEOUT_MS = 3_000;
+    private static final AtomicBoolean TRANSACTION_IN_FLIGHT = new AtomicBoolean();
+
+    static final class Result {
+        final String error;
+        final boolean retryable, indeterminate;
+
+        Result(String error, boolean retryable, boolean indeterminate) {
+            this.error = error;
+            this.retryable = retryable;
+            this.indeterminate = indeterminate;
+        }
+
+        boolean succeeded() { return error.isEmpty(); }
+        String state() { return succeeded() ? "success" : indeterminate ? "indeterminate" : "failed"; }
+    }
 
     private ClusterFullscreenProtocol() {}
 
-    static String dispatch(Context context) {
+    static Result dispatch(Context context, BooleanSupplier current) {
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         CountDownLatch connected = new CountDownLatch(1);
         AtomicReference<IBinder> binder = new AtomicReference<>();
@@ -44,33 +61,50 @@ final class ClusterFullscreenProtocol {
             }
         };
         boolean bound = false;
+        boolean submitted = false;
         try {
+            if (!current.getAsBoolean()) return new Result("cancelled", false, false);
+            if (TRANSACTION_IN_FLIGHT.get())
+                return new Result("previous transaction still in flight", false, true);
             Intent intent = new Intent(SERVICE_ACTION).setComponent(SERVICE);
             bound = context.bindService(intent, connection, Context.BIND_AUTO_CREATE);
-            if (!bound) return "bind rejected";
+            if (!bound) return new Result("bind rejected", true, false);
             if (!await(connected, deadlineNanos)) {
-                return "bind timeout after " + TIMEOUT_MS + "ms";
+                return new Result("bind timeout after " + TIMEOUT_MS + "ms", true, false);
             }
             IBinder service = binder.get();
-            if (service == null) return "service disconnected";
+            if (service == null) return new Result("service disconnected", true, false);
+            if (!current.getAsBoolean()) return new Result("cancelled", false, false);
+            if (!TRANSACTION_IN_FLIGHT.compareAndSet(false, true))
+                return new Result("previous transaction still in flight", false, true);
             CountDownLatch transacted = new CountDownLatch(1);
             AtomicReference<String> result = new AtomicReference<>("transaction failed");
-            new Thread(() -> {
-                try {
-                    result.set(transact(service, context.getPackageName()));
-                } finally {
-                    transacted.countDown();
-                }
-            }, "BydExtendCameraProtocol30011").start();
-            if (!await(transacted, deadlineNanos)) {
-                return "transaction outcome indeterminate after " + TIMEOUT_MS + "ms";
+            try {
+                new Thread(() -> {
+                    try {
+                        result.set(current.getAsBoolean()
+                                ? transact(service, context.getPackageName()) : "cancelled");
+                    } finally {
+                        TRANSACTION_IN_FLIGHT.set(false);
+                        transacted.countDown();
+                    }
+                }, "BydExtendCameraProtocol30011").start();
+                submitted = true;
+            } catch (RuntimeException | Error error) {
+                TRANSACTION_IN_FLIGHT.set(false);
+                throw error;
             }
-            return result.get();
+            if (!await(transacted, deadlineNanos)) {
+                return new Result("transaction outcome indeterminate after " + TIMEOUT_MS + "ms",
+                        false, true);
+            }
+            return new Result(result.get(), false, false);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            return "interrupted";
+            return new Result("interrupted", false, submitted);
         } catch (RuntimeException error) {
-            return error.getClass().getSimpleName() + ": " + safe(error.getMessage());
+            return new Result(error.getClass().getSimpleName() + ": " + safe(error.getMessage()),
+                    false, submitted);
         } finally {
             if (bound) {
                 try {

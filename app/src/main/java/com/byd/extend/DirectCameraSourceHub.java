@@ -73,6 +73,16 @@ final class DirectCameraSourceHub
                     + "||vTexCoord.x<0.0||vTexCoord.x>1.0||vTexCoord.y<0.0||vTexCoord.y>1.0)"
                     + "{gl_FragColor=vec4(0.0,0.0,0.0,1.0);return;}\n"
                     + " gl_FragColor=texture2D(uTexture,vTexCoord); }\n";
+    private static final String SNAPSHOT_FRAGMENT_SHADER =
+            "precision mediump float;\n"
+                    + "uniform sampler2D uTexture;\n"
+                    + "uniform bool uCheckBounds;\n"
+                    + "varying vec2 vTexCoord;\n"
+                    + "void main(){\n"
+                    + " if(uCheckBounds && (vTexCoord.x<0.0||vTexCoord.x>1.0"
+                    + "||vTexCoord.y<0.0||vTexCoord.y>1.0))"
+                    + "{gl_FragColor=vec4(0.0,0.0,0.0,1.0);return;}\n"
+                    + " gl_FragColor=texture2D(uTexture,vTexCoord); }\n";
 
     /** The coordinator owns the shared display/config and all identity routing. */
     private final HandlerThread coordinatorThread =
@@ -410,6 +420,7 @@ final class DirectCameraSourceHub
         int texCoordLocation;
         int matrixLocation;
         int textureLocation;
+        int checkBoundsLocation;
         FloatBuffer positions;
         FloatBuffer texCoords;
         int textureName;
@@ -419,6 +430,7 @@ final class DirectCameraSourceHub
         final float[] matrix = new float[16];
         final int[] targetWidths = new int[8];
         final int[] targetHeights = new int[8];
+        final int[] queriedSize = new int[1];
         final AtomicBoolean sourceFailureReported = new AtomicBoolean();
         boolean renderQueued;
         int pendingFrameSignals;
@@ -479,14 +491,11 @@ final class DirectCameraSourceHub
                         this, value, targetIndex, eglSurface, requestId, producerEpoch);
                 target.mapping = mapping;
                 target.timestampFrames = mapping != null && mapping.lifecycleOnly;
-                int[] size = new int[1];
-                target.width = EGL14.eglQuerySurface(display, eglSurface, EGL14.EGL_WIDTH, size, 0)
-                        ? size[0] : 1920;
-                target.height = EGL14.eglQuerySurface(display, eglSurface, EGL14.EGL_HEIGHT, size, 0)
-                        ? size[0] : (index == 0 ? 990 : 1300);
-                targets.add(target);
                 try {
+                    updateTargetSize(target);
+                    targets.add(target);
                     refreshCaptureSize();
+                    resetOutputStats();
                 } catch (Throwable error) {
                     targets.remove(target);
                     try { destroyTarget(target); }
@@ -509,6 +518,7 @@ final class DirectCameraSourceHub
                 destroyTarget(target);
                 targets.remove(target);
                 refreshCaptureSize();
+                resetOutputStats();
                 return null;
             });
         }
@@ -525,6 +535,7 @@ final class DirectCameraSourceHub
                 if (!targets.contains(target)) {
                     throw new IllegalStateException("downstream Surface is not attached");
                 }
+                if (target.active != active) resetOutputStats();
                 target.active = active;
                 if (active) target.timestampFrames = true;
                 refreshCaptureSize();
@@ -587,13 +598,12 @@ final class DirectCameraSourceHub
                     new int[]{EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE}, 0);
             require(idleSurface != EGL14.EGL_NO_SURFACE, "EGL idle surface failed");
             makeCurrent(idleSurface);
-            program = linkProgram(VERTEX_SHADER, FRAGMENT_SHADER
-                    .replace("#extension GL_OES_EGL_image_external : require\n", "")
-                    .replace("samplerExternalOES", "sampler2D"));
+            program = linkProgram(VERTEX_SHADER, SNAPSHOT_FRAGMENT_SHADER);
             positionLocation = GLES20.glGetAttribLocation(program, "aPosition");
             texCoordLocation = GLES20.glGetAttribLocation(program, "aTexCoord");
             matrixLocation = GLES20.glGetUniformLocation(program, "uTextureMatrix");
             textureLocation = GLES20.glGetUniformLocation(program, "uTexture");
+            checkBoundsLocation = GLES20.glGetUniformLocation(program, "uCheckBounds");
             positions = buffer(new float[]{-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f});
             texCoords = buffer(new float[]{0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f});
             android.opengl.Matrix.setIdentityM(matrix, 0);
@@ -624,22 +634,38 @@ final class DirectCameraSourceHub
             int width = 0, height = 0;
             for (Target target : targets) {
                 if (!target.active) continue;
-                if (isFusedTarget(target)) {
-                    width = 1920;
-                    height = index == 0 ? 990 : 1300;
-                    break;
-                }
                 width = Math.max(width, target.width);
                 height = Math.max(height, target.height);
             }
             pump.setOutputSize(width, height);
         }
 
+        private void resetOutputStats() {
+            stats.restart();
+            droppedAtReport = pump.mailbox.dropped();
+            outputAgeMaxNs = 0;
+        }
+
+        private void updateTargetSize(Target target) {
+            if (target.mapping != null) {
+                // Managed buffers keep their quality size across view resize; a new input rebinds it.
+                target.width = target.mapping.width;
+                target.height = target.mapping.height;
+                return;
+            }
+            require(EGL14.eglQuerySurface(display, target.eglSurface, EGL14.EGL_WIDTH, queriedSize, 0),
+                    "downstream width query failed");
+            target.width = queriedSize[0];
+            require(EGL14.eglQuerySurface(display, target.eglSurface, EGL14.EGL_HEIGHT, queriedSize, 0),
+                    "downstream height query failed");
+            target.height = queriedSize[0];
+        }
+
         // Only the acquisition thread touches this window; downstream swap stalls cannot lower it.
         private void recordAcquisition(long started, long timestamp, long update, long copy, int signals) {
             long generation = fpsStatsWindowId;
             if (acquisitionWindowGeneration != generation) {
-                acquisitionStats.reset(started);
+                acquisitionStats.restart();
                 acquisitionWindowGeneration = generation;
                 acquisitionWindowFinished = false;
             }
@@ -652,7 +678,7 @@ final class DirectCameraSourceHub
                 publishStats(tail, true, generation);
             }
             if (!DiagnosticLogPolicy.extended() && !window) {
-                acquisitionStats.reset(started);
+                acquisitionStats.restart();
                 return;
             }
             Stats report = acquisitionStats.record(started, timestamp, update,
@@ -701,6 +727,12 @@ final class DirectCameraSourceHub
         }
 
         private void renderSnapshot(int slot, long callbackStartedNs, int frameSignals, long queueDelayNs) {
+            long windowGeneration = fpsStatsWindowId;
+            if (windowGeneration != statsWindowGeneration) {
+                resetOutputStats();
+                statsWindowGeneration = windowGeneration;
+                statsWindowFinished = false;
+            }
             CameraFramePump.Frame frame = pump.frames[slot];
             long updateNs = 0;
             long producerTimestampNs = frame.producerNs;
@@ -750,6 +782,7 @@ final class DirectCameraSourceHub
                     try { destroyTarget(target); }
                     catch (Throwable cleanup) { error.addSuppressed(cleanup); }
                     targets.remove(i);
+                    resetOutputStats();
                     forgetTargetFromWorker(target);
                     Surface failedSurface = target.surface;
                     int failedIndex = target.index;
@@ -764,14 +797,6 @@ final class DirectCameraSourceHub
                 reportSourceFailure(error);
                 return;
             }
-            long windowGeneration = fpsStatsWindowId;
-            if (windowGeneration != statsWindowGeneration) {
-                stats.reset(callbackStartedNs);
-                statsWindowGeneration = windowGeneration;
-                statsWindowFinished = false;
-                droppedAtReport = pump.mailbox.dropped();
-                outputAgeMaxNs = 0;
-            }
             boolean fpsWindowActive = isFpsStatsWindowActive(
                     callbackStartedNs, windowGeneration, fpsStatsWindowId,
                     fpsStatsWindowStartedNs, fpsStatsWindowUntilNs);
@@ -784,10 +809,8 @@ final class DirectCameraSourceHub
                         1920, index == 0 ? 990 : 1300, workerThreadName(index));
                 publishOutputStats(tail, true, windowGeneration);
             }
-            if (!DiagnosticLogPolicy.extended() && !fpsWindowActive) {
-                stats.reset(callbackStartedNs);
-                droppedAtReport = pump.mailbox.dropped();
-                outputAgeMaxNs = 0;
+            if (targetCount == 0 || (!DiagnosticLogPolicy.extended() && !fpsWindowActive)) {
+                resetOutputStats();
                 return;
             }
             Stats report = stats.record(
@@ -854,16 +877,8 @@ final class DirectCameraSourceHub
         private DrawTiming draw(Target target, long acquiredFrameTimestampNanos) throws Exception {
             long startedNs = SystemClock.elapsedRealtimeNanos();
             makeCurrent(target.eglSurface);
-            int[] width = new int[1];
-            int[] height = new int[1];
-            require(EGL14.eglQuerySurface(display, target.eglSurface, EGL14.EGL_WIDTH, width, 0)
-                    && EGL14.eglQuerySurface(display, target.eglSurface,
-                    EGL14.EGL_HEIGHT, height, 0), "downstream size query failed");
-            target.width = width[0];
-            target.height = height[0];
-            GLES20.glViewport(0, 0, width[0], height[0]);
-            GLES20.glClearColor(0, 0, 0, 1);
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            if (target.mapping == null) updateTargetSize(target);
+            GLES20.glViewport(0, 0, target.width, target.height);
             GLES20.glUseProgram(program);
             positions.position(0);
             texCoords.position(0);
@@ -872,6 +887,13 @@ final class DirectCameraSourceHub
             CameraDewarpRenderer.MappingRequest rendered = target.mapping == null
                     || target.mapping.lifecycleOnly ? null
                     : target.mesh.prepare(target.mapping.request, target.mapping.width, target.mapping.height);
+            boolean corrected = rendered != null && rendered.config.enabled && !target.mesh.rawFallback;
+            GLES20.glUniform1i(checkBoundsLocation, corrected ? 1 : 0);
+            // Only correction can leave holes or sample outside the snapshot's full [0,1] quad.
+            if (corrected) {
+                GLES20.glClearColor(0, 0, 0, 1);
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            }
             if (rendered == null) {
                 GLES20.glVertexAttribPointer(positionLocation, 2, GLES20.GL_FLOAT, false, 0, positions);
                 GLES20.glVertexAttribPointer(texCoordLocation, 2, GLES20.GL_FLOAT, false, 0, texCoords);
@@ -923,11 +945,11 @@ final class DirectCameraSourceHub
                     Log.w(LOG_TAG, "target stall listener failed", error);
                 }
             }
-            DrawTiming timing = new DrawTiming();
+            DrawTiming timing = target.timing;
             timing.preSwapNs = swapStartedNs - startedNs;
             timing.swapWaitNs = swapWaitNs;
-            timing.width = width[0];
-            timing.height = height[0];
+            timing.width = target.width;
+            timing.height = target.height;
             return timing;
         }
 
@@ -1291,6 +1313,10 @@ final class DirectCameraSourceHub
         private int targetHeightMax;
         private String targetDimensions = "";
 
+        void restart() {
+            reset(-1L);
+        }
+
         Stats record(
                 long callbackNs,
                 long producerTimestampNs,
@@ -1431,6 +1457,7 @@ final class DirectCameraSourceHub
         private void reset(long callbackNs) {
             startedNs = callbackNs;
             previousCallbackNs = -1L;
+            previousProducerTimestamp = -1L;
             callbacks = 0;
             frameSignals = 0;
             renderedFrames = 0;
@@ -1482,6 +1509,7 @@ final class DirectCameraSourceHub
         boolean retiring;
         CameraGpuOutput.Binding mapping;
         final MappingMesh mesh = new MappingMesh();
+        final DrawTiming timing = new DrawTiming();
         long acknowledgedToken = -1;
 
         Target(SourceWorker worker, Surface surface, int index, EGLSurface eglSurface,

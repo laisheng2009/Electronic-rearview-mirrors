@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.hardware.display.DisplayManager;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.Display;
 
@@ -14,14 +15,16 @@ import java.util.concurrent.Executors;
 import java.util.function.BiConsumer;
 
 final class ClusterFullscreenController {
-    private static final String PREF_ATTEMPTED_SESSION =
-            "cluster_fullscreen_attempted_session";
-    private static final String PREF_ATTEMPTED_BOOT = "cluster_fullscreen_attempted_boot";
-    private static final String PREF_ATTEMPTED_DISPLAY = "cluster_fullscreen_attempted_display";
+    // Old attempt markers cannot distinguish a successful command from a failed bind.
+    private static final String PREF_SUCCEEDED_SESSION = "cluster_fullscreen_succeeded_session";
+    private static final String PREF_SUCCEEDED_BOOT = "cluster_fullscreen_succeeded_boot";
+    private static final String PREF_SUCCEEDED_DISPLAY = "cluster_fullscreen_succeeded_display";
+    private static final long[] RETRY_DELAYS_MS = {1_000, 3_000, 10_000};
 
     private final Context context;
     private final SharedPreferences settings;
     private final BiConsumer<String, Object[]> eventSink;
+    private final Handler handler;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final DisplayManager displays;
     private final long bootId;
@@ -31,6 +34,10 @@ final class ClusterFullscreenController {
     private boolean displayWasReady;
     private String lastGate = "";
     private boolean stopped;
+    private long generation, trackedSession = -1;
+    private int trackedDisplay = -1, attempts;
+    private boolean eligibleNow, inFlight, terminal;
+    private Runnable pendingRetry;
     private final DisplayManager.DisplayListener displayListener =
             new DisplayManager.DisplayListener() {
                 @Override public void onDisplayAdded(int id) { displayChanged(); }
@@ -44,6 +51,7 @@ final class ClusterFullscreenController {
         this.context = context.getApplicationContext();
         this.settings = settings;
         this.eventSink = eventSink;
+        this.handler = handler;
         bootId = readBootId();
         displays = (DisplayManager) this.context.getSystemService(Context.DISPLAY_SERVICE);
         if (displays != null) displays.registerDisplayListener(displayListener, handler);
@@ -73,11 +81,14 @@ final class ClusterFullscreenController {
 
     synchronized void shutdown() {
         stopped = true;
+        generation++;
+        cancelRetry();
         if (displays != null) displays.unregisterDisplayListener(displayListener);
         worker.shutdownNow();
     }
 
     private void evaluate(String trigger) {
+        if (stopped) return;
         boolean rearEnabled = settings.getBoolean(
                 BlindSpotOverlayController.PREF_ENABLED, false);
         boolean frontEnabled = settings.getBoolean(
@@ -97,23 +108,37 @@ final class ClusterFullscreenController {
         boolean displayReady = displayUsable(display != null, displayState);
         if (!displayReady && (!displayObserved || displayWasReady)) {
             // Re-arm after destination sleep/removal, including across service restarts.
-            settings.edit().remove(PREF_ATTEMPTED_SESSION).apply();
+            settings.edit().remove(PREF_SUCCEEDED_SESSION).apply();
         }
         displayObserved = true;
         displayWasReady = displayReady;
-        long attempted = settings.getLong(PREF_ATTEMPTED_SESSION, -1);
-        long attemptedBoot = settings.getLong(PREF_ATTEMPTED_BOOT, Long.MIN_VALUE);
-        int attemptedDisplay = settings.getInt(PREF_ATTEMPTED_DISPLAY, -1);
+        long succeeded = settings.getLong(PREF_SUCCEEDED_SESSION, -1);
+        long succeededBoot = settings.getLong(PREF_SUCCEEDED_BOOT, Long.MIN_VALUE);
+        int succeededDisplay = settings.getInt(PREF_SUCCEEDED_DISPLAY, -1);
         boolean eligible = hasEnabledClusterTarget(
                         rearEnabled, rearLeftTarget, rearRightTarget,
                         frontEnabled, frontLeftTarget, frontRightTarget,
                         mirror.enabled, mirror.target);
-        boolean request = shouldAttempt(eligible, displayReady, awakeSessionId, attempted,
-                bootId, attemptedBoot, displayId, attemptedDisplay);
+        boolean ready = eligible && displayReady && interactive && awakeSessionId >= 0;
+        if (trackedSession != awakeSessionId || trackedDisplay != displayId || eligibleNow != ready) {
+            generation++;
+            cancelRetry();
+            attempts = 0;
+            terminal = false;
+            trackedSession = awakeSessionId;
+            trackedDisplay = displayId;
+            eligibleNow = ready;
+        }
+        boolean needsCommand = shouldAttempt(ready, displayReady, awakeSessionId, succeeded,
+                bootId, succeededBoot, displayId, succeededDisplay);
         String gate = !eligible ? "no_enabled_cluster_target"
                 : !displayReady ? "waiting_for_cluster_display"
                 : awakeSessionId < 0 ? "waiting_for_power_state"
-                : request ? "request" : "already_attempted";
+                : !interactive ? "waiting_for_wake"
+                : !needsCommand ? "already_succeeded"
+                : inFlight ? "in_flight"
+                : pendingRetry != null ? "waiting_for_retry"
+                : terminal ? "attempts_finished" : "request";
         if (!gate.equals(lastGate)) {
             lastGate = gate;
             emit("cluster_fullscreen_gate", "reason", gate, "trigger", trigger,
@@ -121,14 +146,15 @@ final class ClusterFullscreenController {
                     "shell_interactive", interactive, "display_id", displayId,
                     "display_state", displayState, "mirror_hidden", mirror.manualHidden);
         }
-        if (!request) {
+        if (!needsCommand || inFlight || pendingRetry != null || terminal) {
             return;
         }
         long session = awakeSessionId;
-        settings.edit().putLong(PREF_ATTEMPTED_SESSION, session)
-                .putLong(PREF_ATTEMPTED_BOOT, bootId)
-                .putInt(PREF_ATTEMPTED_DISPLAY, displayId).commit();
+        long attemptGeneration = generation;
+        inFlight = true;
+        int attempt = ++attempts;
         emit("cluster_fullscreen", "state", "requested",
+                "attempt", attempt,
                 "awake_session_id", session, "trigger", trigger,
                 "boot_id", bootId, "display_id", displayId,
                 "display_state", displayState, "shell_interactive", interactive,
@@ -136,13 +162,51 @@ final class ClusterFullscreenController {
                 "protocol", ClusterFullscreenProtocol.protocolForTest(),
                 "operation", ClusterFullscreenProtocol.operationForTest());
         worker.execute(() -> {
-            String error = ClusterFullscreenProtocol.dispatch(context);
-            emit("cluster_fullscreen", "state", outcome(error),
-                    "awake_session_id", session,
-                    "boot_id", bootId, "display_id", displayId,
-                    "error", error,
-                    "retry_in_session", false);
+            ClusterFullscreenProtocol.Result result = ClusterFullscreenProtocol.dispatch(
+                    context, () -> isCurrentAttempt(attemptGeneration));
+            long completedAt = SystemClock.uptimeMillis();
+            handler.post(() -> finishAttempt(attemptGeneration, session, displayId, attempt, completedAt, result));
         });
+    }
+
+    private synchronized boolean isCurrentAttempt(long expectedGeneration) {
+        return !stopped && eligibleNow && generation == expectedGeneration;
+    }
+
+    private synchronized void finishAttempt(long expectedGeneration, long session, int displayId,
+            int attempt, long completedAt, ClusterFullscreenProtocol.Result result) {
+        inFlight = false;
+        boolean current = isCurrentAttempt(expectedGeneration);
+        long retryDelay = current && result.retryable && attempt <= RETRY_DELAYS_MS.length
+                ? RETRY_DELAYS_MS[attempt - 1] : -1;
+        emit("cluster_fullscreen", "state", result.state(), "awake_session_id", session,
+                "boot_id", bootId, "display_id", displayId, "attempt", attempt,
+                "error", result.error, "stale", !current,
+                "retry_in_session", retryDelay >= 0, "retry_delay_ms", retryDelay);
+        if (!current) {
+            evaluate("stale_attempt_finished");
+            return;
+        }
+        if (result.succeeded()) {
+            settings.edit().putLong(PREF_SUCCEEDED_SESSION, session)
+                    .putLong(PREF_SUCCEEDED_BOOT, bootId)
+                    .putInt(PREF_SUCCEEDED_DISPLAY, displayId).apply();
+        } else if (retryDelay >= 0) {
+            pendingRetry = () -> {
+                synchronized (ClusterFullscreenController.this) {
+                    if (!isCurrentAttempt(expectedGeneration)) return;
+                    pendingRetry = null;
+                    evaluate("bind_retry");
+                }
+            };
+            handler.postDelayed(pendingRetry, Math.max(0, completedAt + retryDelay - SystemClock.uptimeMillis()));
+        } else terminal = true;
+        evaluate("attempt_finished");
+    }
+
+    private void cancelRetry() {
+        if (pendingRetry != null) handler.removeCallbacks(pendingRetry);
+        pendingRetry = null;
     }
 
     static boolean shouldAttempt(
@@ -193,13 +257,6 @@ final class ClusterFullscreenController {
         }
         // If an OEM omits BOOT_COUNT, deduplicate within this controller lifetime only.
         return -System.currentTimeMillis();
-    }
-
-    static String outcome(String error) {
-        if (error == null || error.isEmpty()) return "success";
-        String normalized = error.toLowerCase(java.util.Locale.US);
-        return normalized.contains("timeout") || normalized.contains("indeterminate")
-                ? "indeterminate" : "failed";
     }
 
     private void emit(String kind, Object... fields) {
