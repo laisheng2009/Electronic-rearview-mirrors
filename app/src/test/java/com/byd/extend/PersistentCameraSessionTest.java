@@ -16,6 +16,56 @@ import java.util.List;
 import java.util.Map;
 
 public final class PersistentCameraSessionTest {
+    @Test public void slowCameraOutputReceivesLatestSnapshotWithoutOverwritingGpuOwnedBuffers() {
+        CameraFrameMailbox queue = new CameraFrameMailbox();
+        int[] pixels = new int[CameraFrameMailbox.SLOT_COUNT];
+        boolean[] gpuReady = {true, true};
+        int first = queue.reserve(slot -> gpuReady[slot]);
+        pixels[first] = 1;
+        queue.publish(first);
+        int held = queue.acquire();
+        assertEquals(1, pixels[held]);
+
+        // The output is stuck in swap; acquisition keeps publishing and only the newest survives.
+        for (int frame = 2; frame <= 100; frame++) {
+            int slot = queue.reserve(id -> gpuReady[id]);
+            assertTrue(slot >= 0 && slot != held);
+            pixels[slot] = frame;
+            queue.publish(slot);
+            assertEquals(1, pixels[held]);
+        }
+        gpuReady[held] = false;
+        queue.release(held);
+        int latest = queue.acquire();
+        assertEquals(100, pixels[latest]);
+        // A CPU-released slot is still unavailable until the output GPU has finished with it.
+        assertEquals(-1, queue.reserve(id -> gpuReady[id]));
+        gpuReady[held] = true;
+        assertEquals(held, queue.reserve(id -> gpuReady[id]));
+        queue.publish(held);
+        assertEquals(99, queue.dropped());
+        queue.close();
+        queue.release(latest);
+        assertEquals(-1, queue.acquire());
+        assertEquals(-1, queue.reserve(id -> true));
+    }
+
+    @Test public void pendingCameraUploadCanBeSkippedWithoutWaitingOrLosingNewerFrame() {
+        CameraFrameMailbox queue = new CameraFrameMailbox();
+        boolean[] ready = {true, true};
+        int old = queue.reserve(id -> ready[id]);
+        queue.publish(old);
+        ready[old] = false;
+        int fresh = queue.reserve(id -> ready[id]);
+        assertTrue(fresh >= 0 && fresh != old);
+        queue.publish(fresh);
+        assertEquals(fresh, queue.acquire());
+        assertEquals(1, queue.dropped());
+        assertEquals(-1, queue.reserve(id -> ready[id]));
+        ready[old] = true;
+        assertEquals(old, queue.reserve(id -> ready[id]));
+    }
+
     @Test public void nativeOpenRejectsUnsafeIdsBeforeOemCallsAndPreservesSafeLegacyOpen()
             throws Exception {
         CameraOpenProbe.staticOpens = CameraOpenProbe.constructors = 0;

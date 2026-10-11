@@ -1,13 +1,11 @@
 package com.byd.extend;
 
-import android.graphics.SurfaceTexture;
 import android.opengl.EGL14;
 import android.opengl.EGLConfig;
 import android.opengl.EGLContext;
 import android.opengl.EGLDisplay;
 import android.opengl.EGLExt;
 import android.opengl.EGLSurface;
-import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -26,6 +24,7 @@ import java.util.IdentityHashMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Stable GPU fan-out boundary between full-size AVMCamera sources and logical consumers. */
 final class DirectCameraSourceHub
@@ -52,7 +51,7 @@ final class DirectCameraSourceHub
     private static final long SWAP_FAILURE_LOG_INTERVAL_NS = TimeUnit.SECONDS.toNanos(5);
     private static final int MAX_INDEX = 4;
     private static final String LOG_TAG = "BydCameraProbe";
-    private static final String VERTEX_SHADER =
+    static final String VERTEX_SHADER =
             "attribute vec2 aPosition;\n"
                     + "attribute vec2 aTexCoord;\n"
                     + "uniform mat4 uTextureMatrix;\n"
@@ -63,7 +62,7 @@ final class DirectCameraSourceHub
                     + " vRawTexCoord=aTexCoord;\n"
                     + " vTexCoord=(uTextureMatrix*vec4(aTexCoord,0.0,1.0)).xy;\n"
                     + "}\n";
-    private static final String FRAGMENT_SHADER =
+    static final String FRAGMENT_SHADER =
             "#extension GL_OES_EGL_image_external : require\n"
                     + "precision mediump float;\n"
                     + "uniform samplerExternalOES uTexture;\n"
@@ -401,6 +400,7 @@ final class DirectCameraSourceHub
         final HandlerThread thread;
         final ArrayList<Target> targets = new ArrayList<>();
         final StatsWindow stats = new StatsWindow();
+        final StatsWindow acquisitionStats = new StatsWindow();
         final Object frameState = new Object();
         Handler handler;
         EGLContext context = EGL14.EGL_NO_CONTEXT;
@@ -413,18 +413,22 @@ final class DirectCameraSourceHub
         FloatBuffer positions;
         FloatBuffer texCoords;
         int textureName;
-        SurfaceTexture texture;
         Surface surface;
+        CameraFramePump pump;
+        int glVersion = 3;
         final float[] matrix = new float[16];
         final int[] targetWidths = new int[8];
         final int[] targetHeights = new int[8];
-        boolean matrixReported;
-        boolean sourceFailureReported;
+        final AtomicBoolean sourceFailureReported = new AtomicBoolean();
         boolean renderQueued;
         int pendingFrameSignals;
         long firstPendingSignalNs = -1L;
         long statsWindowGeneration;
         boolean statsWindowFinished;
+        long acquisitionWindowGeneration;
+        boolean acquisitionWindowFinished;
+        long droppedAtReport;
+        long outputAgeMaxNs;
         SerializedCall<Void> closeCall;
         volatile boolean released;
 
@@ -444,7 +448,7 @@ final class DirectCameraSourceHub
 
         Surface sourceSurface() throws Exception {
             return call(() -> {
-                if (surface == null) createSource();
+                require(surface != null, "camera source unavailable");
                 return surface;
             });
         }
@@ -475,7 +479,20 @@ final class DirectCameraSourceHub
                         this, value, targetIndex, eglSurface, requestId, producerEpoch);
                 target.mapping = mapping;
                 target.timestampFrames = mapping != null && mapping.lifecycleOnly;
+                int[] size = new int[1];
+                target.width = EGL14.eglQuerySurface(display, eglSurface, EGL14.EGL_WIDTH, size, 0)
+                        ? size[0] : 1920;
+                target.height = EGL14.eglQuerySurface(display, eglSurface, EGL14.EGL_HEIGHT, size, 0)
+                        ? size[0] : (index == 0 ? 990 : 1300);
                 targets.add(target);
+                try {
+                    refreshCaptureSize();
+                } catch (Throwable error) {
+                    targets.remove(target);
+                    try { destroyTarget(target); }
+                    catch (Throwable cleanup) { error.addSuppressed(cleanup); }
+                    throw error;
+                }
                 Log.i(LOG_TAG, "{\"kind\":\"camera_gpu_output_attached\",\"source_index\":"
                         + targetIndex + ",\"request_id\":" + requestId
                         + ",\"producer_epoch\":" + producerEpoch
@@ -491,6 +508,7 @@ final class DirectCameraSourceHub
                 target.retiring = true;
                 destroyTarget(target);
                 targets.remove(target);
+                refreshCaptureSize();
                 return null;
             });
         }
@@ -509,6 +527,7 @@ final class DirectCameraSourceHub
                 }
                 target.active = active;
                 if (active) target.timestampFrames = true;
+                refreshCaptureSize();
                 return null;
             });
         }
@@ -556,43 +575,91 @@ final class DirectCameraSourceHub
 
         private void initialize() {
             context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
-                    new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE}, 0);
+                    new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, glVersion, EGL14.EGL_NONE}, 0);
+            if (context == EGL14.EGL_NO_CONTEXT) {
+                EGL14.eglGetError();
+                glVersion = 2;
+                context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
+                        new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, glVersion, EGL14.EGL_NONE}, 0);
+            }
             require(context != EGL14.EGL_NO_CONTEXT, "EGL context failed");
             idleSurface = EGL14.eglCreatePbufferSurface(display, config,
                     new int[]{EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE}, 0);
             require(idleSurface != EGL14.EGL_NO_SURFACE, "EGL idle surface failed");
             makeCurrent(idleSurface);
-            program = linkProgram(VERTEX_SHADER, FRAGMENT_SHADER);
+            program = linkProgram(VERTEX_SHADER, FRAGMENT_SHADER
+                    .replace("#extension GL_OES_EGL_image_external : require\n", "")
+                    .replace("samplerExternalOES", "sampler2D"));
             positionLocation = GLES20.glGetAttribLocation(program, "aPosition");
             texCoordLocation = GLES20.glGetAttribLocation(program, "aTexCoord");
             matrixLocation = GLES20.glGetUniformLocation(program, "uTextureMatrix");
             textureLocation = GLES20.glGetUniformLocation(program, "uTexture");
             positions = buffer(new float[]{-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f});
             texCoords = buffer(new float[]{0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f});
+            android.opengl.Matrix.setIdentityM(matrix, 0);
             createSource();
         }
 
         private void createSource() {
-            int[] names = new int[1];
-            GLES20.glGenTextures(1, names, 0);
-            require(names[0] != 0, "camera source texture unavailable");
-            textureName = names[0];
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureName);
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                    GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                    GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                    GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                    GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-            texture = new SurfaceTexture(textureName);
-            texture.setDefaultBufferSize(1920, index == 0 ? 990 : 1300);
-            surface = new Surface(texture);
-            texture.setOnFrameAvailableListener(ignored -> signalFrame(), handler);
+            pump = new CameraFramePump(display, config, context, glVersion, index,
+                    new CameraFramePump.Listener() {
+                        @Override public void available() { signalFrame(); }
+                        @Override public void failed(Throwable error) {
+                            reportSourceFailure(error);
+                        }
+                        @Override public void acquired(long started, long timestamp, long update,
+                                                       long copy, int signals) {
+                            recordAcquisition(started, timestamp, update, copy, signals);
+                        }
+                    });
+            try { pump.start(); }
+            catch (Exception error) { throw new IllegalStateException("camera acquisition failed", error); }
+            surface = pump.surface;
             Log.i(LOG_TAG, "{\"kind\":\"camera_source_worker_started\","
                     + "\"source_index\":" + index + ",\"worker\":\""
-                    + workerThreadName(index) + "\"}");
+                    + workerThreadName(index) + "\",\"gl_version\":" + glVersion + "}");
+        }
+
+        private void refreshCaptureSize() {
+            int width = 0, height = 0;
+            for (Target target : targets) {
+                if (!target.active) continue;
+                if (isFusedTarget(target)) {
+                    width = 1920;
+                    height = index == 0 ? 990 : 1300;
+                    break;
+                }
+                width = Math.max(width, target.width);
+                height = Math.max(height, target.height);
+            }
+            pump.setOutputSize(width, height);
+        }
+
+        // Only the acquisition thread touches this window; downstream swap stalls cannot lower it.
+        private void recordAcquisition(long started, long timestamp, long update, long copy, int signals) {
+            long generation = fpsStatsWindowId;
+            if (acquisitionWindowGeneration != generation) {
+                acquisitionStats.reset(started);
+                acquisitionWindowGeneration = generation;
+                acquisitionWindowFinished = false;
+            }
+            boolean window = isFpsStatsWindowActive(started, generation, fpsStatsWindowId,
+                    fpsStatsWindowStartedNs, fpsStatsWindowUntilNs);
+            if (!acquisitionWindowFinished && generation > 0 && started >= fpsStatsWindowUntilNs) {
+                acquisitionWindowFinished = true;
+                Stats tail = acquisitionStats.finish(fpsStatsWindowUntilNs, 0, 0,
+                        null, null, 0, 1920, index == 0 ? 990 : 1300, "camera-acquire-" + index);
+                publishStats(tail, true, generation);
+            }
+            if (!DiagnosticLogPolicy.extended() && !window) {
+                acquisitionStats.reset(started);
+                return;
+            }
+            Stats report = acquisitionStats.record(started, timestamp, update,
+                    0, 0, 0, 0, 0, 0, update + copy, signals, Math.max(0, signals - 1),
+                    0, 0, 0, 0, 0, null, null, 0, 1920, index == 0 ? 990 : 1300,
+                    "camera-acquire-" + index);
+            publishStats(report, window, generation);
         }
 
         private void signalFrame() {
@@ -620,30 +687,28 @@ final class DirectCameraSourceHub
                 firstPendingSignalNs = -1L;
                 renderQueued = false;
             }
-            if (closed || released || sourceFailureReported || texture == null) return;
-            long updatedNs;
-            long updateNs;
-            long producerTimestampNs;
-            long acquiredFrameTimestampNanos;
+            if (closed || released || sourceFailureReported.get() || pump == null) return;
+            int slot = pump.mailbox.acquire();
+            if (slot < 0) return;
+            try {
+                renderSnapshot(slot, callbackStartedNs, frameSignals, queueDelayNs);
+            } catch (Throwable error) {
+                reportSourceFailure(error);
+            } finally {
+                try { pump.releaseRead(slot); }
+                catch (Throwable error) { reportSourceFailure(error); }
+            }
+        }
+
+        private void renderSnapshot(int slot, long callbackStartedNs, int frameSignals, long queueDelayNs) {
+            CameraFramePump.Frame frame = pump.frames[slot];
+            long updateNs = 0;
+            long producerTimestampNs = frame.producerNs;
+            long acquiredFrameTimestampNanos = frame.acquiredNs;
             try {
                 makeCurrent(idleSurface);
-                acquiredFrameTimestampNanos = System.nanoTime();
-                long updateStartedNs = SystemClock.elapsedRealtimeNanos();
-                texture.updateTexImage();
-                updatedNs = SystemClock.elapsedRealtimeNanos();
-                updateNs = updatedNs - updateStartedNs;
-                texture.getTransformMatrix(matrix);
-                producerTimestampNs = texture.getTimestamp();
-                if (!matrixReported) {
-                    matrixReported = true;
-                    Log.i(LOG_TAG, "{\"kind\":\"camera_texture_matrix\","
-                            + "\"source\":\"direct_camera_source_hub\","
-                            + "\"stage\":\"avm_source\",\"preview_index\":"
-                            + index + ",\"surface_texture_id\":"
-                            + System.identityHashCode(texture) + ",\"matrix\":"
-                            + Arrays.toString(matrix) + ",\"worker\":\""
-                            + workerThreadName(index) + "\"}");
-                }
+                pump.awaitRead(slot);
+                textureName = frame.texture;
             } catch (Throwable error) {
                 reportSourceFailure(error);
                 return;
@@ -679,6 +744,8 @@ final class DirectCameraSourceHub
                         targetDimensionCount++;
                     }
                     swapCount++;
+                    outputAgeMaxNs = Math.max(outputAgeMaxNs,
+                            Math.max(0, System.nanoTime() - acquiredFrameTimestampNanos));
                 } catch (Throwable error) {
                     try { destroyTarget(target); }
                     catch (Throwable cleanup) { error.addSuppressed(cleanup); }
@@ -692,6 +759,7 @@ final class DirectCameraSourceHub
             }
             try {
                 makeCurrent(idleSurface);
+                refreshCaptureSize();
             } catch (Throwable error) {
                 reportSourceFailure(error);
                 return;
@@ -701,6 +769,8 @@ final class DirectCameraSourceHub
                 stats.reset(callbackStartedNs);
                 statsWindowGeneration = windowGeneration;
                 statsWindowFinished = false;
+                droppedAtReport = pump.mailbox.dropped();
+                outputAgeMaxNs = 0;
             }
             boolean fpsWindowActive = isFpsStatsWindowActive(
                     callbackStartedNs, windowGeneration, fpsStatsWindowId,
@@ -712,10 +782,12 @@ final class DirectCameraSourceHub
                 Stats tail = stats.finish(fpsStatsWindowUntilNs, targetCount,
                         targetPixelsCurrent, targetWidths, targetHeights, targetDimensionCount,
                         1920, index == 0 ? 990 : 1300, workerThreadName(index));
-                publishStats(tail, true, windowGeneration);
+                publishOutputStats(tail, true, windowGeneration);
             }
             if (!DiagnosticLogPolicy.extended() && !fpsWindowActive) {
                 stats.reset(callbackStartedNs);
+                droppedAtReport = pump.mailbox.dropped();
+                outputAgeMaxNs = 0;
                 return;
             }
             Stats report = stats.record(
@@ -742,7 +814,18 @@ final class DirectCameraSourceHub
                     1920,
                     index == 0 ? 990 : 1300,
                     workerThreadName(index));
-            publishStats(report, fpsWindowActive, windowGeneration);
+            publishOutputStats(report, fpsWindowActive, windowGeneration);
+        }
+
+        private void publishOutputStats(Stats report, boolean window, long generation) {
+            if (report == null) return;
+            report.outputStage = true;
+            long dropped = pump.mailbox.dropped();
+            report.droppedSnapshots = dropped - droppedAtReport;
+            droppedAtReport = dropped;
+            report.outputAgeMaxNs = outputAgeMaxNs;
+            outputAgeMaxNs = 0;
+            publishStats(report, window, generation);
         }
 
         private void publishStats(Stats report, boolean fpsWindowActive, long windowGeneration) {
@@ -764,8 +847,7 @@ final class DirectCameraSourceHub
         }
 
         private void reportSourceFailure(Throwable error) {
-            if (sourceFailureReported || released) return;
-            sourceFailureReported = true;
+            if (released || !sourceFailureReported.compareAndSet(false, true)) return;
             postCoordinator(() -> listener.onSourceFailure(index, error));
         }
 
@@ -777,6 +859,8 @@ final class DirectCameraSourceHub
             require(EGL14.eglQuerySurface(display, target.eglSurface, EGL14.EGL_WIDTH, width, 0)
                     && EGL14.eglQuerySurface(display, target.eglSurface,
                     EGL14.EGL_HEIGHT, height, 0), "downstream size query failed");
+            target.width = width[0];
+            target.height = height[0];
             GLES20.glViewport(0, 0, width[0], height[0]);
             GLES20.glClearColor(0, 0, 0, 1);
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
@@ -799,7 +883,7 @@ final class DirectCameraSourceHub
             }
             GLES20.glUniformMatrix4fv(matrixLocation, 1, false, matrix, 0);
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureName);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureName);
             GLES20.glUniform1i(textureLocation, 0);
             if (rendered == null) GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
             else {
@@ -866,31 +950,10 @@ final class DirectCameraSourceHub
                 }
             }
             targets.clear();
-            if (surface != null) {
-                try {
-                    surface.release();
-                } catch (Throwable error) {
-                    if (first == null) first = error;
-                }
-                surface = null;
-            }
-            if (texture != null) {
-                try {
-                    texture.setOnFrameAvailableListener(null);
-                    texture.release();
-                } catch (Throwable error) {
-                    if (first == null) first = error;
-                }
-                texture = null;
-            }
-            if (textureName != 0) {
-                try {
-                    GLES20.glDeleteTextures(1, new int[]{textureName}, 0);
-                } catch (Throwable error) {
-                    if (first == null) first = error;
-                }
-                textureName = 0;
-            }
+            try { if (pump != null) pump.close(); }
+            catch (Throwable error) { if (first == null) first = error; }
+            pump = null;
+            surface = null;
             if (program != 0) {
                 try {
                     GLES20.glDeleteProgram(program);
@@ -1044,14 +1107,14 @@ final class DirectCameraSourceHub
         }
     }
 
-    private static FloatBuffer buffer(float[] values) {
+    static FloatBuffer buffer(float[] values) {
         FloatBuffer result = ByteBuffer.allocateDirect(values.length * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer();
         result.put(values).position(0);
         return result;
     }
 
-    private static int linkProgram(String vertexSource, String fragmentSource) {
+    static int linkProgram(String vertexSource, String fragmentSource) {
         int vertex = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
         int fragment = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
         int result = GLES20.glCreateProgram();
@@ -1123,6 +1186,9 @@ final class DirectCameraSourceHub
         boolean fpsWindow;
         long fpsWindowId;
         int requestedFps;
+        boolean outputStage;
+        long droppedSnapshots;
+        long outputAgeMaxNs;
 
         Stats(
                 long intervalNs,
@@ -1409,6 +1475,8 @@ final class DirectCameraSourceHub
         final int requestId;
         final int producerEpoch;
         long lastStallReportNs;
+        int width;
+        int height;
         boolean active = true;
         boolean timestampFrames;
         boolean retiring;

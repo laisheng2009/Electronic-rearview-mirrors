@@ -86,6 +86,7 @@ final class CameraDewarpStatsEvent {
                 "projection", CameraDewarpConfig.projectionLabel(config.projection),
                 "interval_ms", stats.intervalMs,
                 "callbacks", stats.callbacks,
+                "coalesced_callbacks", stats.coalescedCallbacks,
                 "update_samples", stats.updateSamples,
                 "callback_fps", stats.callbackFps,
                 "completed_swaps", stats.completedSwaps,

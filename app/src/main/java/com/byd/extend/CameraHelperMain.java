@@ -2065,7 +2065,7 @@ final class CameraHelperMain {
                             double measuredNewBufferFps = ratePerSecond(stats.callbacks
                                     - stats.producerTimestampRepeated
                                     - stats.producerTimestampInvalid, stats.intervalNs);
-                            if (stats.fpsWindow) {
+                            if (stats.fpsWindow && !stats.outputStage) {
                                 emit("camera_fps_window_stats",
                                         "requested_fps", stats.requestedFps,
                                         "measured_new_buffer_fps", measuredNewBufferFps,
@@ -2083,7 +2083,10 @@ final class CameraHelperMain {
                                                 stats.callbacks, stats.intervalNs));
                             }
                             if (extended) {
-                                emit("camera_source_hub_stats",
+                                emit(stats.outputStage ? "camera_source_output_stats" : "camera_source_hub_stats",
+                                    "stage", stats.outputStage ? "output" : "acquisition",
+                                    "dropped_snapshots", stats.droppedSnapshots,
+                                    "output_age_max_ms", milliseconds(stats.outputAgeMaxNs),
                                     "requested_fps", requestedFrameRate,
                                     "fps_api_accepted", frameRateRequestAccepted,
                                     "fps_request_elapsed_ms", frameRateRequestElapsedMs,

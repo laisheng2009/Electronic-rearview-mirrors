@@ -117,6 +117,9 @@ final class CameraDewarpRenderer {
     private long metricsStartedNs;
     private long lastCallbackNs;
     private long callbackCount;
+    private boolean frameQueued;
+    private long coalescedCallbacks;
+    private final Runnable pendingFrame = this::renderPendingFrame;
     private long completedSwapCount;
     private long totalRenderNs;
     private long maxRenderNs;
@@ -239,6 +242,7 @@ final class CameraDewarpRenderer {
         final long intervalMs;
         final long callbacks;
         final long updateSamples;
+        long coalescedCallbacks;
         final long completedSwaps;
         final double callbackFps;
         final double completedSwapFps;
@@ -628,22 +632,11 @@ final class CameraDewarpRenderer {
             if (texture != cameraTexture) return;
             long callbackNs = SystemClock.elapsedRealtimeNanos();
             recordCallback(callbackNs);
-            try {
-                renderFrame();
-            } catch (Throwable error) {
-                Log.e(TAG, "Dewarp frame failed", error);
-                texture.setOnFrameAvailableListener(null);
-                metricsActive = false;
-                handler.removeCallbacks(metricsTick);
-                if (activeRendererCounted) {
-                    ACTIVE_RENDERERS.decrementAndGet();
-                    activeRendererCounted = false;
-                }
-                if (runtimeFailureReported.compareAndSet(false, true)) {
-                    emitEvent(new Event("dewarp_frame_failed",
-                            appliedRequest == null ? request : appliedRequest,
-                            vertices == null ? 0 : vertices.capacity() / 4, -1, error));
-                }
+            if (frameQueued) {
+                coalescedCallbacks++;
+            } else {
+                frameQueued = true;
+                handler.post(pendingFrame);
             }
         }, handler);
         cameraTexture = input;
@@ -653,9 +646,34 @@ final class CameraDewarpRenderer {
         CameraGpuOutput.register(cameraSurface, inputLease);
     }
 
+    private void renderPendingFrame() {
+        frameQueued = false;
+        if (cameraTexture == null || cleanupStarted.get()) return;
+        try {
+            // Still drain while lease release is pending; input teardown remains owner-ordered.
+            renderFrame();
+        } catch (Throwable error) {
+            Log.e(TAG, "Dewarp frame failed", error);
+            cameraTexture.setOnFrameAvailableListener(null);
+            metricsActive = false;
+            handler.removeCallbacks(metricsTick);
+            if (activeRendererCounted) {
+                ACTIVE_RENDERERS.decrementAndGet();
+                activeRendererCounted = false;
+            }
+            if (runtimeFailureReported.compareAndSet(false, true)) {
+                emitEvent(new Event("dewarp_frame_failed",
+                        appliedRequest == null ? request : appliedRequest,
+                        vertices == null ? 0 : vertices.capacity() / 4, -1, error));
+            }
+        }
+    }
+
     private void releaseCameraInput() {
         SurfaceTexture input = cameraTexture;
         cameraTexture = null;
+        frameQueued = false;
+        if (handler != null) handler.removeCallbacks(pendingFrame);
         if (input != null) input.setOnFrameAvailableListener(null);
         Surface surface = cameraSurface;
         cameraSurface = null;
@@ -999,6 +1017,8 @@ final class CameraDewarpRenderer {
                 inputGeneration, completedWindowContext.generation,
                 width, height, completedWindowContext.viewWidth,
                 completedWindowContext.viewHeight, completedWindowMapping);
+        if (stats != null) stats.coalescedCallbacks = coalescedCallbacks;
+        coalescedCallbacks = 0;
         metricsStartedNs = nowNs;
         metricsWindowMapping = appliedRequest;
         metricsWindowContext = statsContext;
