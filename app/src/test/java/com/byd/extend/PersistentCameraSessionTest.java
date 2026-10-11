@@ -2,6 +2,7 @@ package com.byd.extend;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -15,6 +16,26 @@ import java.util.List;
 import java.util.Map;
 
 public final class PersistentCameraSessionTest {
+    @Test public void nativeOpenRejectsUnsafeIdsBeforeOemCallsAndPreservesSafeLegacyOpen()
+            throws Exception {
+        CameraOpenProbe.staticOpens = CameraOpenProbe.constructors = 0;
+        for (int id : new int[]{1000, 5000, 10000}) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                    () -> CameraHelperMain.openAvmCamera(CameraOpenProbe.class, id));
+            assertTrue(error.getMessage().contains(String.valueOf(id)));
+            assertEquals(0, CameraOpenProbe.staticOpens);
+            assertEquals(0, CameraOpenProbe.constructors);
+        }
+        int opens = 0;
+        for (int id : new int[]{0, 999, 10001}) {
+            CameraOpenProbe camera = (CameraOpenProbe)
+                    CameraHelperMain.openAvmCamera(CameraOpenProbe.class, id);
+            assertEquals(id, camera.id);
+            assertEquals(++opens, CameraOpenProbe.staticOpens);
+            assertEquals(opens, CameraOpenProbe.constructors);
+        }
+    }
+
     @Test public void wakeTeardownReleasesAllConsumersAndReopensFreshProducerWithStandbyDemand()
             throws Exception {
         assertRecovery(CameraHelperMain.VEHICLE_WAKE_RECOVERY);
@@ -133,6 +154,14 @@ public final class PersistentCameraSessionTest {
         int count = 0;
         for (String value : values) if (expected.equals(value)) count++;
         return count;
+    }
+
+    public static final class CameraOpenProbe {
+        static int staticOpens, constructors;
+        final int id;
+        public static Object open(int id) { staticOpens++; return null; }
+        public CameraOpenProbe(int id) { this.id = id; constructors++; }
+        public boolean open() { return true; }
     }
 
     private static final class Trace {
