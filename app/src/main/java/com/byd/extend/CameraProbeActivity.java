@@ -1874,7 +1874,8 @@ public final class CameraProbeActivity extends ComponentActivity
         boolean cancellingExport = !confirm && (runtimeDialogOwner == RuntimeDialogOwner.COMPATIBILITY
                 || runtimeDialogOwner == RuntimeDialogOwner.LOGS)
                 && dialog.getKind() == DialogKind.Progress;
-        if (!cancellingExport) clearRuntimeDialog();
+        boolean updateAction = confirm && runtimeDialogOwner == RuntimeDialogOwner.UPDATE;
+        if (!cancellingExport && !updateAction) clearRuntimeDialog();
         if (action != null) action.run();
         advanceStartupAuthorizationFlow();
         return true;
@@ -2383,7 +2384,8 @@ public final class CameraProbeActivity extends ComponentActivity
         updateDownloadInFlight = snapshot != null
                 && (snapshot.phase == UpdateHintRuntime.DownloadPhase.DOWNLOADING
                 || snapshot.phase == UpdateHintRuntime.DownloadPhase.INSTALLING);
-        if (snapshot == null || snapshot.phase == UpdateHintRuntime.DownloadPhase.FAILED) {
+        if (snapshot == null || snapshot.phase == UpdateHintRuntime.DownloadPhase.FAILED
+                || snapshot.phase == UpdateHintRuntime.DownloadPhase.CANCELLED) {
             updateInstallRequested = false;
         } else updateInstallRequested = true;
         if (activityDestroyed) return;
@@ -2396,7 +2398,8 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private boolean showUpdateOperation(UpdateHintRuntime.DownloadSnapshot snapshot) {
         if (snapshot == null || !snapshot.dialogVisible) return false;
-        updateInstallRequested = snapshot.phase != UpdateHintRuntime.DownloadPhase.FAILED;
+        updateInstallRequested = snapshot.phase != UpdateHintRuntime.DownloadPhase.FAILED
+                && snapshot.phase != UpdateHintRuntime.DownloadPhase.CANCELLED;
         boolean activeUpdateDialog = runtimeDialogOwner == RuntimeDialogOwner.UPDATE
                 && productionUi != null && productionUi.getState().getDialog() != null;
         if (!canPresentUpdateResult(activeUpdateDialog)) return false;
@@ -2404,6 +2407,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 || snapshot.phase == UpdateHintRuntime.DownloadPhase.INSTALLING;
         DialogKind kind = downloading ? DialogKind.Progress
                 : snapshot.phase == UpdateHintRuntime.DownloadPhase.READY
+                        || snapshot.phase == UpdateHintRuntime.DownloadPhase.CANCELLED
                         ? DialogKind.Update : DialogKind.Message;
         String status = null;
         if (snapshot.phase == UpdateHintRuntime.DownloadPhase.DOWNLOADING
@@ -2420,10 +2424,21 @@ public final class CameraProbeActivity extends ComponentActivity
         boolean shown = showUpdateRuntimeDialog(kind,
                 runtimeText(R.string.update_dialog_current_version, BuildConfig.VERSION_NAME),
                 updateNotes(snapshot.info), progress,
-                snapshot.phase == UpdateHintRuntime.DownloadPhase.READY,
+                snapshot.phase == UpdateHintRuntime.DownloadPhase.READY
+                        || snapshot.phase == UpdateHintRuntime.DownloadPhase.DOWNLOADING
+                        || snapshot.phase == UpdateHintRuntime.DownloadPhase.CANCELLED,
                 () -> {
                     UpdateHintRuntime runtime = UpdateHintRuntime.get(this);
                     UpdateHintRuntime.DownloadSnapshot current = runtime.downloadOperation();
+                    if (current == null || current != snapshot) return;
+                    if (current.phase == UpdateHintRuntime.DownloadPhase.DOWNLOADING) {
+                        runtime.cancelDownload();
+                        return;
+                    }
+                    if (current.phase == UpdateHintRuntime.DownloadPhase.CANCELLED) {
+                        startUpdateDownload(current.info);
+                        return;
+                    }
                     if (snapshot.phase == UpdateHintRuntime.DownloadPhase.READY
                             && current != null
                             && current.phase == UpdateHintRuntime.DownloadPhase.READY
@@ -2439,7 +2454,10 @@ public final class CameraProbeActivity extends ComponentActivity
                         || snapshot.installerError,
                 runtimeText(R.string.update_dialog_available_version, snapshot.info.version),
                 snapshot.info.historyComplete ? null
-                        : runtimeText(R.string.update_dialog_history_incomplete));
+                        : runtimeText(R.string.update_dialog_history_incomplete),
+                snapshot.phase == UpdateHintRuntime.DownloadPhase.DOWNLOADING
+                        ? runtimeText(R.string.runtime_cancel)
+                        : runtimeText(R.string.update_dialog_action));
         if (shown && snapshot.phase == UpdateHintRuntime.DownloadPhase.READY) {
             maybeStartInitialInstallerHandoff(snapshot);
         }
@@ -2471,6 +2489,15 @@ public final class CameraProbeActivity extends ComponentActivity
             Float progress, boolean confirmEnabled, Runnable confirm, Runnable dismiss,
             String updateStatus, boolean updateStatusIsError, String availableVersion,
             String historyWarning) {
+        return showUpdateRuntimeDialog(kind, message, markdown, progress, confirmEnabled,
+                confirm, dismiss, updateStatus, updateStatusIsError, availableVersion,
+                historyWarning, runtimeText(R.string.update_dialog_action));
+    }
+
+    private boolean showUpdateRuntimeDialog(DialogKind kind, String message, String markdown,
+            Float progress, boolean confirmEnabled, Runnable confirm, Runnable dismiss,
+            String updateStatus, boolean updateStatusIsError, String availableVersion,
+            String historyWarning, String actionLabel) {
         boolean replacing = runtimeDialogOwner == RuntimeDialogOwner.UPDATE
                 && productionUi != null && productionUi.getState().getDialog() != null;
         if (!canPresentUpdateResult(replacing)) return false;
@@ -2485,7 +2512,7 @@ public final class CameraProbeActivity extends ComponentActivity
         productionUi.showDialog(new DialogUiState(kind,
                 runtimeText(R.string.update_dialog_title), message, progress,
                 true, confirmEnabled, true,
-                runtimeText(R.string.update_dialog_action),
+                actionLabel,
                 runtimeText(R.string.update_dialog_close), true, markdown, true,
                 null, null, null, updateStatus, updateStatusIsError,
                 availableVersion, historyWarning));

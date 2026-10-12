@@ -820,12 +820,17 @@ final class CameraHelperMain {
 
         String openReverseCamera(
                 Surface[] requestedSurfaces, int[] requestedIndexes, int requestId) {
+            return openReverseCamera(requestedSurfaces, requestedIndexes, requestId, null);
+        }
+
+        String openReverseCamera(Surface[] requestedSurfaces, int[] requestedIndexes,
+                int requestId, boolean[] initialActive) {
             if (requestId <= 0) {
                 releaseSurfaces(requestedSurfaces);
                 throw new IllegalArgumentException("reverse request id required");
             }
             return openReverseCamera(
-                    requestedSurfaces, requestedIndexes, CAMERA_OWNER_REVERSE, requestId);
+                    requestedSurfaces, requestedIndexes, CAMERA_OWNER_REVERSE, requestId, initialActive);
         }
 
         private synchronized String openReversePreview(Surface[] requestedSurfaces, int requestId) {
@@ -1002,7 +1007,7 @@ final class CameraHelperMain {
 
         private synchronized String openReverseCamera(
                 Surface[] requestedSurfaces, int[] requestedIndexes,
-                String requestedOwner, int requestId) {
+                String requestedOwner, int requestId, boolean[] initialActive) {
             if (requestedSurfaces == null || requestedIndexes == null
                     || requestedSurfaces.length == 0
                     || requestedSurfaces.length != requestedIndexes.length) {
@@ -1020,7 +1025,7 @@ final class CameraHelperMain {
                     reverseGroup, requestedSurfaces, requestedIndexes, requestId,
                     CAMERA_OWNER_REVERSE.equals(requestedOwner)
                             ? "reverse_overlay" : "reverse_preview",
-                    true, false, null, "reverse_open");
+                    true, false, null, "reverse_open", false, initialActive);
         }
 
         private synchronized String openMultiCamera(
@@ -1856,7 +1861,21 @@ final class CameraHelperMain {
                 int[] profileIds,
                 String errorStage,
                 boolean firstSurfaceDirect) {
+            return attachPersistentGroup(target, requestedSurfaces, requestedIndexes, requestId,
+                    requestedView, exclusive, shellOwned, profileIds, errorStage,
+                    firstSurfaceDirect, null);
+        }
+
+        private synchronized String attachPersistentGroup(
+                ConsumerGroup target, Surface[] requestedSurfaces, int[] requestedIndexes,
+                int requestId, String requestedView, boolean exclusive, boolean shellOwned,
+                int[] profileIds, String errorStage, boolean firstSurfaceDirect,
+                boolean[] initialActive) {
             String validation = validateBatch(requestedSurfaces, requestedIndexes);
+            if (initialActive != null && (requestedSurfaces == null
+                    || initialActive.length != requestedSurfaces.length)) {
+                validation = "initial activity/Surface batch length mismatch";
+            }
             if (validation != null) {
                 releaseSurfaces(requestedSurfaces);
                 throw new IllegalArgumentException(validation);
@@ -1915,7 +1934,7 @@ final class CameraHelperMain {
                         target, requestedSurfaces, requestedIndexes, requestId,
                         requestedView, exclusive, shellOwned, profileIds,
                         errorStage, requestedCameraId, firstSurfaceDirect,
-                        sourceDemandMask);
+                        sourceDemandMask, initialActive);
             }
 
             try {
@@ -1929,7 +1948,7 @@ final class CameraHelperMain {
                         requestedView, exclusive, shellOwned,
                         this::emit, this::cancelPendingStock,
                         requestedCameraId, producerEpoch, firstSurfaceDirect,
-                        sourceDemandMask);
+                        sourceDemandMask, initialActive);
             } catch (PersistentSessionFailure error) {
                 if (!error.requestedOwnedBySession) releaseSurfaces(requestedSurfaces);
                 if (error.fatal) {
@@ -2029,7 +2048,7 @@ final class CameraHelperMain {
                 String errorStage,
                 int requestedCameraId,
                 boolean firstSurfaceDirect,
-                int sourceDemandMask) {
+                int sourceDemandMask, boolean[] initialActive) {
             Object opened = null;
             PersistentCameraPort openedPort = null;
             DirectCameraSourceHub openedHub = null;
@@ -2175,7 +2194,7 @@ final class CameraHelperMain {
                 persistentSession.startProducer(
                         port, openedHub, target, requestedSurfaces, requestedIndexes,
                         requestId, requestedView, exclusive, shellOwned,
-                        firstSurfaceDirect, sourceDemandMask, producerEpoch + 1);
+                        firstSurfaceDirect, sourceDemandMask, producerEpoch + 1, initialActive);
                 openedHub.collectStatsForWindow(requestedFrameRate);
                 if (isReverseGroup(target, requestedView)) cancelReverseWarmExpiry();
 
@@ -3063,6 +3082,8 @@ final class CameraHelperMain {
             Surface source(int index) throws Exception;
             void attach(Surface[] surfaces, int[] indexes,
                     int requestId, int producerEpoch) throws Exception;
+            void attach(Surface[] surfaces, int[] indexes, int requestId,
+                    int producerEpoch, boolean[] initialActive) throws Exception;
             void detach(Surface[] surfaces) throws Exception;
             void setActive(Surface surface, boolean active) throws Exception;
             void releaseSource(int index) throws Exception;
@@ -3132,6 +3153,17 @@ final class CameraHelperMain {
                     String view, boolean exclusive, boolean shellOwned,
                     boolean firstSurfaceDirect, int sourceDemandMask, int producerEpoch)
                     throws Exception {
+                startProducer(port, requestedFanout, target, surfaces, indexes, requestId,
+                        view, exclusive, shellOwned, firstSurfaceDirect, sourceDemandMask,
+                        producerEpoch, null);
+            }
+
+            void startProducer(
+                    PersistentCameraPort port, PersistentSurfaceFanout requestedFanout,
+                    ConsumerGroup target, Surface[] surfaces, int[] indexes, int requestId,
+                    String view, boolean exclusive, boolean shellOwned,
+                    boolean firstSurfaceDirect, int sourceDemandMask, int producerEpoch,
+                    boolean[] initialActive) throws Exception {
                 clearDetachedConsumerIdentities();
                 fanout = requestedFanout;
                 boolean[] directAttempted = {false};
@@ -3146,11 +3178,12 @@ final class CameraHelperMain {
                     }
                     boolean[] attachedTargets = attachGroup(
                             port, surfaces, indexes, firstSurfaceDirect, sourceDemandMask,
-                            requestId, producerEpoch, true, directAttempted);
+                            requestId, producerEpoch, true, directAttempted, initialActive);
                     target.set(surfaces, indexes, requestId,
                             view, exclusive, shellOwned, true, firstSurfaceDirect,
                             sourceDemandMask);
                     target.fanoutAttached = attachedTargets;
+                    if (initialActive != null) target.restoreActive(initialActive);
                     producerOpen = true;
                     restoreFailure = null;
                     if (isReverseOwner(target)) reverseWarmLease.clear();
@@ -3228,6 +3261,16 @@ final class CameraHelperMain {
                     int cameraId, int epoch,
                     boolean firstSurfaceDirect, int sourceDemandMask)
                     throws PersistentSessionFailure {
+                attach(port, target, surfaces, indexes, requestId, view, exclusive, shellOwned,
+                        events, shellClose, cameraId, epoch, firstSurfaceDirect, sourceDemandMask, null);
+            }
+
+            void attach(PersistentCameraPort port, ConsumerGroup target,
+                    Surface[] surfaces, int[] indexes, int requestId, String view,
+                    boolean exclusive, boolean shellOwned, PersistentEventSink events,
+                    PersistentShellCloseSink shellClose, int cameraId, int epoch,
+                    boolean firstSurfaceDirect, int sourceDemandMask, boolean[] initialActive)
+                    throws PersistentSessionFailure {
                 activeProducerEpoch = epoch;
                 try {
                     ensureSources(port, indexesFromMask(
@@ -3256,11 +3299,12 @@ final class CameraHelperMain {
                 try {
                     boolean[] attachedTargets = attachGroup(
                             port, surfaces, indexes, firstSurfaceDirect, sourceDemandMask,
-                            requestId, epoch, false, null);
+                            requestId, epoch, false, null, initialActive);
                     target.set(surfaces, indexes, requestId,
                             view, exclusive, shellOwned, true, firstSurfaceDirect,
                             sourceDemandMask);
                     target.fanoutAttached = attachedTargets;
+                    if (initialActive != null) target.restoreActive(initialActive);
                 } catch (Throwable error) {
                     restoreFailure = null;
                     boolean rollbackFailed = error instanceof BatchAttachException
@@ -4054,8 +4098,17 @@ final class CameraHelperMain {
                     boolean firstSurfaceDirect, int sourceDemandMask,
                     int requestId, int producerEpoch, boolean deferRollbackOnFailure,
                     boolean[] directAttemptedOnCall) throws Exception {
+                return attachGroup(port, surfaces, indexes, firstSurfaceDirect, sourceDemandMask,
+                        requestId, producerEpoch, deferRollbackOnFailure, directAttemptedOnCall, null);
+            }
+
+            private boolean[] attachGroup(PersistentCameraPort port, Surface[] surfaces, int[] indexes,
+                    boolean firstSurfaceDirect, int sourceDemandMask, int requestId,
+                    int producerEpoch, boolean deferRollbackOnFailure,
+                    boolean[] directAttemptedOnCall, boolean[] initialActive) throws Exception {
                 ArrayList<Surface> targetSurfaces = new ArrayList<>();
                 ArrayList<Integer> targetIndexValues = new ArrayList<>();
+                ArrayList<Boolean> targetActivity = new ArrayList<>();
                 boolean[] attachedTargets = new boolean[surfaces.length];
                 for (int i = firstSurfaceDirect ? 1 : 0; i < surfaces.length; i++) {
                     int index = indexes[i];
@@ -4065,18 +4118,21 @@ final class CameraHelperMain {
                     }
                     targetSurfaces.add(surfaces[i]);
                     targetIndexValues.add(index);
+                    if (initialActive != null) targetActivity.add(initialActive[i]);
                     attachedTargets[i] = true;
                 }
                 Surface[] targets = targetSurfaces.toArray(new Surface[0]);
                 int[] targetIndexes = new int[targetIndexValues.size()];
+                boolean[] activeTargets = initialActive == null ? null : new boolean[targetIndexes.length];
                 for (int i = 0; i < targetIndexes.length; i++) {
                     targetIndexes[i] = targetIndexValues.get(i);
+                    if (activeTargets != null) activeTargets[i] = targetActivity.get(i);
                 }
                 boolean fanoutAttached = false;
                 boolean directAttempted = false;
                 try {
                     if (targets.length > 0) {
-                        fanout.attach(targets, targetIndexes, requestId, producerEpoch);
+                        fanout.attach(targets, targetIndexes, requestId, producerEpoch, activeTargets);
                         fanoutAttached = true;
                     }
                     if (firstSurfaceDirect) {

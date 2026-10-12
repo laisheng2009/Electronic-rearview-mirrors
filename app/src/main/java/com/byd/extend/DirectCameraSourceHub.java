@@ -156,7 +156,14 @@ final class DirectCameraSourceHub
     @Override
     public void attach(Surface[] surfaces, int[] indexes,
             int requestId, int producerEpoch) throws Exception {
-        if (surfaces == null || indexes == null || surfaces.length != indexes.length) {
+        attach(surfaces, indexes, requestId, producerEpoch, null);
+    }
+
+    @Override
+    public void attach(Surface[] surfaces, int[] indexes,
+            int requestId, int producerEpoch, boolean[] initialActive) throws Exception {
+        if (surfaces == null || indexes == null || surfaces.length != indexes.length
+                || initialActive != null && initialActive.length != surfaces.length) {
             throw new IllegalArgumentException("surface/index batch length mismatch");
         }
         call(() -> {
@@ -172,7 +179,8 @@ final class DirectCameraSourceHub
                     }
                     SourceWorker sourceWorker = worker(indexes[i]);
                     Target target = sourceWorker.attachTarget(
-                            surfaces[i], indexes[i], requestId, producerEpoch);
+                            surfaces[i], indexes[i], requestId, producerEpoch,
+                            initialActive == null || initialActive[i], initialActive != null);
                     synchronized (targets) {
                         targets.put(surfaces[i], target);
                     }
@@ -466,7 +474,8 @@ final class DirectCameraSourceHub
         }
 
         Target attachTarget(
-                Surface value, int targetIndex, int requestId, int producerEpoch)
+                Surface value, int targetIndex, int requestId, int producerEpoch,
+                boolean initialActive, boolean activitySpecified)
                 throws Exception {
             return call(() -> {
                 require(value != null && value.isValid(), "downstream Surface is invalid");
@@ -490,7 +499,10 @@ final class DirectCameraSourceHub
                 Target target = new Target(
                         this, value, targetIndex, eglSurface, requestId, producerEpoch);
                 target.mapping = mapping;
-                target.timestampFrames = mapping != null && mapping.lifecycleOnly;
+                target.active = initialActive;
+                // Preserve the timestamps previously enabled by the post-attach activation call.
+                target.timestampFrames = activitySpecified && initialActive
+                        || mapping != null && mapping.lifecycleOnly;
                 try {
                     updateTargetSize(target);
                     targets.add(target);

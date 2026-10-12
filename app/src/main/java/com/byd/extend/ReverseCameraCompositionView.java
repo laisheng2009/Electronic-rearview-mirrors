@@ -316,15 +316,40 @@ final class ReverseCameraCompositionView extends FrameLayout {
         }
     }
 
+    private boolean applyingOverlayConfiguration;
+
+    /** Configure a retained overlay without publishing intermediate geometry or source sets. */
+    void applyOverlayConfiguration(CameraShellProtocol.ReverseOverlaySpec spec,
+            boolean centralFrontEnabled) {
+        int[] previousSources = outputSourceIndexes();
+        applyingOverlayConfiguration = true;
+        try {
+            setCornerRadiusDp(spec.cornerRadiusDp);
+            setBorders(spec.borderDp, spec.borderArgb);
+            applyDewarpConfigs(spec.rearDewarp, spec.leftDewarp, spec.rightDewarp,
+                    spec.centralFrontDewarp);
+            applyRawFallbackLayout(spec.rawFallbackLayout);
+            applyLayout(spec.layout);
+            configureIntegratedFront(spec.frontLayout, spec.frontRawFallbackLayout,
+                    spec.frontLeftDewarp, spec.frontRightDewarp, spec.centralFrontDewarp,
+                    spec.frontLeftIntegrated, spec.frontRightIntegrated,
+                    spec.centralFrontIntegrated, centralFrontEnabled, spec.widgetVisible);
+            setCentralFrontSourceEnabled(centralFrontEnabled);
+            applyVisibility(spec.visibilityMask);
+            setSideMode(ReverseSideSelectorView.MODE_REAR);
+        } finally {
+            applyingOverlayConfiguration = false;
+        }
+        applyActiveDewarpConfigs();
+        applyModel();
+        finishOutputSetUpdate(previousSources);
+    }
+
     void applyDewarpConfigs(
             CameraDewarpConfig rear,
             CameraDewarpConfig left,
             CameraDewarpConfig right) {
-        rearDewarp = rear;
-        leftDewarp = left;
-        rightDewarp = right;
-        applyActiveDewarpConfigs();
-        applyModel();
+        applyDewarpConfigs(rear, left, right, null);
     }
 
     void applyDewarpConfigs(
@@ -332,11 +357,13 @@ final class ReverseCameraCompositionView extends FrameLayout {
             CameraDewarpConfig left,
             CameraDewarpConfig right,
             CameraDewarpConfig nextCentralFrontDewarp) {
-        applyDewarpConfigs(rear, left, right);
+        rearDewarp = rear;
+        leftDewarp = left;
+        rightDewarp = right;
         if (nextCentralFrontDewarp != null) {
             centralFrontDewarp = nextCentralFrontDewarp;
-            if (centralFrontPane != null) applyPaneDewarpConfig(centralFrontPane, centralFrontDewarp);
         }
+        applyActiveDewarpConfigs();
         applyModel();
     }
 
@@ -384,7 +411,6 @@ final class ReverseCameraCompositionView extends FrameLayout {
         centralFrontIntegrated = nextCentralFrontIntegrated;
         centralFrontSourceEnabled = nextCentralFrontSourceEnabled;
         if (centralFrontSourceEnabled) ensureCentralFrontPane();
-        if (centralFrontPane != null) applyPaneDewarpConfig(centralFrontPane, centralFrontDewarp);
         widgetVisible = nextWidgetVisible;
         widgetAvailable = true;
         sideMode = ReverseSideSelectorView.MODE_REAR;
@@ -1037,6 +1063,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     private void notifySurfacesReady() {
+        if (applyingOverlayConfiguration) return;
         boolean ready = previewBase == null ? surfacesReady() : previewSurfacesReady();
         if (callback != null && ready) {
             callback.onReverseSurfacesReady(currentGenerations());
@@ -1160,6 +1187,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     private void finishOutputSetUpdate(int[] previousSources) {
+        if (applyingOverlayConfiguration) return;
         int[] currentSources = outputSourceIndexes();
         if (Arrays.equals(previousSources, currentSources)) return;
         clearFrames();
@@ -1498,6 +1526,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     private void applyModel(int width, int height) {
+        if (applyingOverlayConfiguration) return;
         applyEffectiveVisibility();
         applyBorders();
         for (PaneView pane : panes) {
@@ -1635,6 +1664,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     private void applyActiveDewarpConfigs() {
+        if (applyingOverlayConfiguration) return;
         applyPaneDewarpConfig(panes[0], rearDewarp);
         applyPaneDewarpConfig(panes[1], sideMode == ReverseSideSelectorView.MODE_FRONT
                 && frontLeftIntegrated
@@ -1648,6 +1678,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     private void applyBorders() {
+        if (applyingOverlayConfiguration) return;
         applyBorder(backgroundPane, CameraShellProtocol.ReverseOverlaySpec.BORDER_BACKGROUND, 0);
         applyBorder(sideSelector, CameraShellProtocol.ReverseOverlaySpec.BORDER_WIDGET,
                 cornerRadiusDp);
@@ -1719,6 +1750,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     private void applyEffectiveVisibility() {
+        if (applyingOverlayConfiguration) return;
         boolean tablet = displayTarget == CameraDisplayTarget.TABLET;
         if (previewBase != null) {
             previewBase.setVisibility(tablet ? View.VISIBLE : View.INVISIBLE);

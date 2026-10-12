@@ -138,25 +138,9 @@ final class ShellReverseCameraOverlay implements ReverseCameraCompositionView.Ca
         if (root == null) createWindow(display, size, spec);
         else {
             root.setCallback(this);
-            root.setCornerRadiusDp(spec.cornerRadiusDp);
-            root.setBorders(spec.borderDp, spec.borderArgb);
-            root.applyDewarpConfigs(spec.rearDewarp, spec.leftDewarp, spec.rightDewarp,
-                    spec.centralFrontDewarp);
-            root.applyRawFallbackLayout(spec.rawFallbackLayout);
-            root.applyLayout(spec.layout);
-            root.configureIntegratedFront(
-                    spec.frontLayout, spec.frontRawFallbackLayout,
-                    spec.frontLeftDewarp, spec.frontRightDewarp,
-                    spec.centralFrontDewarp,
-                    spec.frontLeftIntegrated, spec.frontRightIntegrated,
-                    spec.centralFrontIntegrated,
-                    centralFrontSourceEnabled,
-                    spec.widgetVisible);
-            root.setCentralFrontSourceEnabled(centralFrontSourceEnabled);
-            root.applyVisibility(spec.visibilityMask);
             // A new automatic session starts from the safe Rear baseline.  The controller may
             // immediately select Front for D/N/P when gear switching is enabled.
-            root.setSideMode(ReverseSideSelectorView.MODE_REAR);
+            root.applyOverlayConfiguration(spec, centralFrontSourceEnabled);
             configureControls(display, size,
                     spec.widgetVisible && spec.layout.targetFor(
                             ReverseCameraLayout.WIDGET_PANE_ID) == displayTarget);
@@ -544,8 +528,6 @@ final class ShellReverseCameraOverlay implements ReverseCameraCompositionView.Ca
         ReverseCameraCompositionView nextRoot = new ReverseCameraCompositionView(windowContext);
         nextRoot.setDisplayTarget(displayTarget);
         nextRoot.setCallback(this);
-        nextRoot.setCornerRadiusDp(spec.cornerRadiusDp);
-        nextRoot.setBorders(spec.borderDp, spec.borderArgb);
         nextRoot.setDewarpPipelineRequirements(
                 spec.rearDewarp, spec.leftDewarp, spec.rightDewarp,
                 spec.frontLeftDewarp, spec.frontRightDewarp,
@@ -553,20 +535,7 @@ final class ShellReverseCameraOverlay implements ReverseCameraCompositionView.Ca
                 spec.frontLeftIntegrated && (spec.widgetVisible || spec.switchByGear),
                 spec.frontRightIntegrated && (spec.widgetVisible || spec.switchByGear),
                 centralFrontSourceEnabled);
-        nextRoot.applyDewarpConfigs(spec.rearDewarp, spec.leftDewarp, spec.rightDewarp,
-                spec.centralFrontDewarp);
-        nextRoot.applyRawFallbackLayout(spec.rawFallbackLayout);
-        nextRoot.applyLayout(spec.layout);
-        nextRoot.configureIntegratedFront(
-                spec.frontLayout, spec.frontRawFallbackLayout,
-                spec.frontLeftDewarp, spec.frontRightDewarp,
-                spec.centralFrontDewarp,
-                spec.frontLeftIntegrated, spec.frontRightIntegrated,
-                spec.centralFrontIntegrated,
-                centralFrontSourceEnabled,
-                spec.widgetVisible);
-        nextRoot.setCentralFrontSourceEnabled(centralFrontSourceEnabled);
-        nextRoot.applyVisibility(spec.visibilityMask);
+        nextRoot.applyOverlayConfiguration(spec, centralFrontSourceEnabled);
         nextRoot.setPaneBoundedBuffers(size.x, size.y, spec.bufferQuality);
         root = nextRoot;
         WindowlessOverlayHost nextHost = new WindowlessOverlayHost(

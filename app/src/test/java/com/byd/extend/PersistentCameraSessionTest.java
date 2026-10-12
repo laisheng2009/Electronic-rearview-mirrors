@@ -19,6 +19,29 @@ import java.util.List;
 import java.util.Map;
 
 public final class PersistentCameraSessionTest {
+    @Test public void reverseInitialActivityIsAttachedOnceForNewAndRetainedProducer() throws Exception {
+        Trace trace = new Trace();
+        FakeCameraPort camera = new FakeCameraPort(trace);
+        FakeFanout fanout = new FakeFanout(trace);
+        CameraHelperMain.HelperBinder.PersistentSession session = session();
+        boolean[] activity = {true, true, false};
+        int[] indexes = {1, 2, 4};
+        int demand = (1 << 1) | (1 << 2) | (1 << 4);
+        session.startProducer(camera, fanout, session.reverseGroup, surfaces(3), indexes,
+                201, "reverse_overlay", true, false, false, demand, 1, activity);
+        assertArrayEquals(activity, fanout.initialActive);
+        assertArrayEquals(activity, session.reverseGroup.active);
+        assertEquals(0, fanout.activityCalls);
+        session.attach(camera, session.reverseGroup, surfaces(3), indexes, 202,
+                "reverse_overlay", true, false, new FakeEventSink(trace),
+                new FakeShellClose(trace), 7, 1, false, demand, activity);
+        assertArrayEquals(activity, fanout.initialActive);
+        assertArrayEquals(activity, session.reverseGroup.active);
+        assertEquals(0, fanout.activityCalls);
+        assertEquals(1, count(trace.values, "start"));
+        assertEquals(0, count(trace.values, "stop"));
+    }
+
     @Test public void outputStatisticsExcludeHiddenTimeAndStartAtFirstLoggedFrame() {
         DirectCameraSourceHub.StatsWindow stats = new DirectCameraSourceHub.StatsWindow();
         assertNull(outputFrame(stats, 1_000));
@@ -298,6 +321,8 @@ public final class PersistentCameraSessionTest {
     private static final class FakeFanout implements CameraHelperMain.HelperBinder.PersistentSurfaceFanout {
         final Trace trace;
         int attachCalls, failAttachCall;
+        int activityCalls;
+        boolean[] initialActive;
         FakeFanout(Trace trace) { this.trace = trace; }
         @Override public Surface source(int index) { return null; }
         @Override public void attach(Surface[] values, int[] indexes, int requestId, int producerEpoch) {
@@ -305,7 +330,12 @@ public final class PersistentCameraSessionTest {
             for (int index : indexes) trace.values.add("target-add:" + index);
         }
         @Override public void detach(Surface[] values) { trace.values.add("target-remove:" + values.length); }
-        @Override public void setActive(Surface value, boolean active) { }
+        @Override public void attach(Surface[] values, int[] indexes, int requestId,
+                int producerEpoch, boolean[] active) {
+            attach(values, indexes, requestId, producerEpoch);
+            initialActive = active == null ? null : active.clone();
+        }
+        @Override public void setActive(Surface value, boolean active) { activityCalls++; }
         @Override public void releaseSource(int index) { trace.values.add("source-release:" + index); }
         @Override public void close() { trace.values.add("fanout-close"); }
     }

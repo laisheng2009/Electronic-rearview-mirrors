@@ -127,6 +127,12 @@ final class AppUpdateManager {
 
     File downloadAndVerify(Context context, UpdateInfo info, ProgressListener listener)
             throws Exception {
+        return downloadAndVerify(context, info, listener, new android.os.CancellationSignal());
+    }
+
+    File downloadAndVerify(Context context, UpdateInfo info, ProgressListener listener,
+            android.os.CancellationSignal cancellation) throws Exception {
+        cancellation.throwIfCanceled();
         requireTrustedApkDownloadUrl(info.downloadUrl);
         File downloadDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
         if (downloadDir == null) throw new IOException("Update download directory is unavailable");
@@ -154,14 +160,37 @@ final class AppUpdateManager {
                 .setDestinationInExternalFilesDir(
                         context, Environment.DIRECTORY_DOWNLOADS, fileName);
         long downloadId = manager.enqueue(request);
+        File staged = new File(new File(context.getFilesDir(), "updates"), fileName);
+        boolean completed = false;
         try {
-            pollDownload(manager, downloadId, listener);
-            File staged = stageDownloadedApk(context, downloaded, fileName);
+            cancellation.setOnCancelListener(() -> {
+                try {
+                    manager.remove(downloadId);
+                } catch (RuntimeException error) {
+                    android.util.Log.w("AppUpdateManager", "cancel download removal failed", error);
+                } finally {
+                    downloaded.delete();
+                    staged.delete();
+                }
+            });
+            pollDownload(manager, downloadId, listener, cancellation);
+            stageDownloadedApk(context, downloaded, fileName, cancellation);
+            cancellation.throwIfCanceled();
             validateDownloadedApk(context, staged);
+            cancellation.throwIfCanceled();
+            completed = true;
             return staged;
-        } catch (Exception error) {
-            manager.remove(downloadId);
-            throw error;
+        } finally {
+            // Keep cancellation live until the runtime accepts completion on the main thread.
+            if (!completed) cancellation.setOnCancelListener(null);
+            if (!completed || cancellation.isCanceled()) {
+                try {
+                    manager.remove(downloadId);
+                } finally {
+                    downloaded.delete();
+                    staged.delete();
+                }
+            }
         }
     }
 
@@ -388,10 +417,12 @@ final class AppUpdateManager {
     }
 
     private static void pollDownload(
-            DownloadManager manager, long downloadId, ProgressListener listener) throws Exception {
+            DownloadManager manager, long downloadId, ProgressListener listener,
+            android.os.CancellationSignal cancellation) throws Exception {
         long startedAt = System.currentTimeMillis();
         int lastProgress = -1;
         while (System.currentTimeMillis() - startedAt <= DOWNLOAD_TIMEOUT_MS) {
+            cancellation.throwIfCanceled();
             try (Cursor cursor = manager.query(
                     new DownloadManager.Query().setFilterById(downloadId))) {
                 if (cursor == null || !cursor.moveToFirst()) {
@@ -426,7 +457,8 @@ final class AppUpdateManager {
         throw new IOException("Update download timed out");
     }
 
-    private static File stageDownloadedApk(Context context, File source, String fileName)
+    private static File stageDownloadedApk(Context context, File source, String fileName,
+            android.os.CancellationSignal cancellation)
             throws IOException {
         if (!source.isFile()) throw new IOException("Downloaded APK is missing");
         File directory = new File(context.getFilesDir(), "updates");
@@ -439,7 +471,10 @@ final class AppUpdateManager {
              FileOutputStream output = new FileOutputStream(target, false)) {
             byte[] buffer = new byte[8192];
             int read;
-            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
+            while ((read = input.read(buffer)) >= 0) {
+                cancellation.throwIfCanceled();
+                output.write(buffer, 0, read);
+            }
         }
         source.delete();
         return target;

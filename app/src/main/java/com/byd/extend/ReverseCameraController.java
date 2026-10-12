@@ -688,8 +688,8 @@ final class ReverseCameraController {
         try {
             if (value.surfaces.length > 0) {
                 activeHelper.openReverseCamera(
-                        value.surfaces, value.sourceIndexes, activeRequestId);
-                applyInitialTargetActivity(activeHelper, value);
+                        value.surfaces, value.sourceIndexes, activeRequestId,
+                        initialTargetActivity(value));
             }
             activeHelper.updateReverseSteering(activeRequestId, steeringSample);
             applyPendingAutomaticMode(activeHelper);
@@ -710,10 +710,8 @@ final class ReverseCameraController {
                 "generations", Arrays.toString(generations));
     }
 
-    private void applyInitialTargetActivity(
-            CameraHelperMain.HelperBinder activeHelper,
-            TurnSignalController.ReverseSurfaces surfaces) {
-        if (surfaces == null) return;
+    private boolean[] initialTargetActivity(TurnSignalController.ReverseSurfaces surfaces) {
+        boolean[] activity = new boolean[surfaces.surfaces.length];
         int visibilityMask = loadVisibilityMask(settings);
         for (int i = 0; i < surfaces.surfaces.length; i++) {
             Surface surface = surfaces.surfaces[i];
@@ -726,16 +724,9 @@ final class ReverseCameraController {
             boolean active = sourceIndex < 4
                     && ReverseCameraLayout.isVisible(visibilityMask, sourceIndex)
                     && CameraDisplayTarget.isValid(displayTarget);
-            try {
-                activeHelper.setReverseTargetActive(surface, active);
-            } catch (Throwable error) {
-                emit("reverse_camera_error", "stage", "set_initial_target_active",
-                        "request_id", activeRequestId,
-                        "camera_index", sourceIndex,
-                        "display_target", displayTarget, "active", active,
-                        "error", summary(error));
-            }
+            activity[i] = active;
         }
+        return activity;
     }
 
     private void updateSurfaceTargetActivity(

@@ -9,6 +9,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.hardware.display.DisplayManager;
 import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -42,6 +43,7 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
     private final Object downloadLock = new Object();
     private WeakReference<DownloadListener> downloadListener = new WeakReference<>(null);
     private DownloadSnapshot downloadOperation;
+    private CancellationSignal downloadCancellation;
     private AppUpdateManager.UpdateInfo available;
     private volatile boolean manualCheckDialogRequested;
     private boolean shutdown;
@@ -77,7 +79,7 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
         void onDownloadChanged(DownloadSnapshot snapshot);
     }
 
-    enum DownloadPhase { DOWNLOADING, INSTALLING, READY, FAILED }
+    enum DownloadPhase { DOWNLOADING, INSTALLING, READY, FAILED, CANCELLED }
 
     static final class DownloadSnapshot {
         final AppUpdateManager.UpdateInfo info;
@@ -216,7 +218,8 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
         DownloadSnapshot current;
         synchronized (downloadLock) {
             if (downloadOperation == null) return;
-            if (downloadOperation.phase == DownloadPhase.FAILED) downloadOperation = null;
+            if (downloadOperation.phase == DownloadPhase.FAILED
+                    || downloadOperation.phase == DownloadPhase.CANCELLED) downloadOperation = null;
             else downloadOperation = downloadOperation.withDialogVisible(false);
             current = downloadOperation;
         }
@@ -224,6 +227,7 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
     }
     boolean startDownload(AppUpdateManager.UpdateInfo info) {
         DownloadSnapshot started;
+        CancellationSignal attempt;
         boolean reused;
         synchronized (downloadLock) {
             if (shouldReuseDownload(downloadOperation, info)) {
@@ -234,8 +238,10 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
                 started = new DownloadSnapshot(info, DownloadPhase.DOWNLOADING,
                         0, null, null, false, true);
                 downloadOperation = started;
+                downloadCancellation = new CancellationSignal();
                 reused = false;
             }
+            attempt = downloadCancellation;
         }
         if (reused) {
             notifyDownloadListener(started);
@@ -248,14 +254,35 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
             Exception failure = null;
             try {
                 file = manager.downloadAndVerify(context, info,
-                        value -> main.post(() -> updateDownloadProgress(info.resultId, value)));
+                        value -> main.post(() -> updateDownloadProgress(attempt, value)), attempt);
             } catch (Exception error) {
                 failure = error;
             }
             File downloaded = file;
             Exception error = failure;
-            main.post(() -> finishDownload(info.resultId, downloaded, error));
+            // Finish worker-side cleanup before a retry can reuse the APK path.
+            if (attempt.isCanceled() && downloaded != null) downloaded.delete();
+            main.post(() -> finishDownload(attempt, downloaded, error));
         });
+        return true;
+    }
+
+    boolean cancelDownload() {
+        DownloadSnapshot cancelled;
+        CancellationSignal attempt;
+        synchronized (downloadLock) {
+            if (downloadOperation == null
+                    || downloadOperation.phase != DownloadPhase.DOWNLOADING) return false;
+            attempt = downloadCancellation;
+            cancelled = new DownloadSnapshot(downloadOperation.info, DownloadPhase.CANCELLED,
+                    0, null, null, false, downloadOperation.dialogVisible);
+            downloadOperation = cancelled;
+        }
+        // Mark the attempt first: any queued completion must lose the installer handoff.
+        attempt.cancel();
+        autoCheck.setDownloading(false);
+        Log.i("UpdateHintRuntime", "update_download_cancelled version=" + cancelled.info.version);
+        notifyDownloadListener(cancelled);
         return true;
     }
     boolean installReady(Activity activity) {
@@ -368,10 +395,10 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
         });
     }
 
-    private void updateDownloadProgress(String resultId, int progress) {
+    private void updateDownloadProgress(CancellationSignal attempt, int progress) {
         DownloadSnapshot current;
         synchronized (downloadLock) {
-            if (downloadOperation == null || !downloadOperation.info.resultId.equals(resultId)
+            if (downloadOperation == null || downloadCancellation != attempt || attempt.isCanceled()
                     || downloadOperation.phase != DownloadPhase.DOWNLOADING) return;
             downloadOperation = downloadOperation.withProgress(progress);
             current = downloadOperation;
@@ -379,10 +406,10 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
         notifyDownloadListener(current);
     }
 
-    private void finishDownload(String resultId, File file, Exception error) {
+    private void finishDownload(CancellationSignal attempt, File file, Exception error) {
         DownloadSnapshot current;
         synchronized (downloadLock) {
-            if (downloadOperation == null || !downloadOperation.info.resultId.equals(resultId)
+            if (downloadOperation == null || downloadCancellation != attempt || attempt.isCanceled()
                     || downloadOperation.phase != DownloadPhase.DOWNLOADING) return;
             downloadOperation = error == null
                     ? new DownloadSnapshot(downloadOperation.info, DownloadPhase.READY,
@@ -394,6 +421,7 @@ public final class UpdateHintRuntime implements Application.ActivityLifecycleCal
                                     : error.getMessage(), false, downloadOperation.dialogVisible);
             current = downloadOperation;
         }
+        attempt.setOnCancelListener(null);
         autoCheck.setDownloading(false);
         notifyDownloadListener(current);
     }
