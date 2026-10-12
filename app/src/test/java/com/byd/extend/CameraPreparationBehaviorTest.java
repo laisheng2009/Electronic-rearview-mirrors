@@ -31,6 +31,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 import static org.junit.Assert.*;
 import static org.robolectric.Shadows.shadowOf;
@@ -41,6 +42,77 @@ import static org.robolectric.Shadows.shadowOf;
 public class CameraPreparationBehaviorTest {
     private Context context;
     private SharedPreferences settings;
+
+    @Test @Config(shadows = ReverseShowBoundary.class)
+    public void reverseShowsOncePerDisplayAndGenerationWithFailureRetryAndStaleAckRejection() {
+        ReverseShowBoundary.completions.clear();
+        List<String> events = new ArrayList<>();
+        ReverseCameraController controller = new ReverseCameraController(
+                context, new Handler(Looper.getMainLooper()), (kind, fields) -> events.add(kind), v -> {});
+        AndroidBehaviorHarness.field(controller, "helper",
+                new CameraHelperMain.HelperBinder(context, line -> {}));
+        AndroidBehaviorHarness.field(controller, "activeRequestId", 1);
+        AndroidBehaviorHarness.field(controller, "preparedDisplayTargets",
+                new int[]{CameraDisplayTarget.TABLET, CameraDisplayTarget.CLUSTER});
+        AndroidBehaviorHarness.field(controller, "generations", new int[]{1, 2, 3});
+        AndroidBehaviorHarness.field(controller, "clusterGenerations", new int[]{4, 5, 6});
+        ready(controller, CameraDisplayTarget.TABLET);
+        ready(controller, CameraDisplayTarget.TABLET); // Duplicate while Binder is queued.
+        assertEquals(1, ReverseShowBoundary.completions.size());
+        assertFalse(events.contains("reverse_camera_visible"));
+        ReverseShowBoundary.completions.get(0).accept(false);
+        ready(controller, CameraDisplayTarget.TABLET);
+        assertEquals(2, ReverseShowBoundary.completions.size());
+        ReverseShowBoundary.completions.get(1).accept(true);
+        assertEquals(List.of("reverse_camera_visible"), events);
+        ready(controller, CameraDisplayTarget.TABLET); // Includes subsequent side-mode frame gates.
+        assertEquals(2, ReverseShowBoundary.completions.size());
+        ready(controller, CameraDisplayTarget.CLUSTER); // Independent destination.
+        assertEquals(3, ReverseShowBoundary.completions.size());
+
+        AndroidBehaviorHarness.field(controller, "generations", new int[]{7, 8, 9});
+        ready(controller, CameraDisplayTarget.TABLET);
+        assertEquals(4, ReverseShowBoundary.completions.size());
+        Consumer<Boolean> retiredShow = ReverseShowBoundary.completions.get(3);
+        AndroidBehaviorHarness.call(controller, "clearOutputState");
+        AndroidBehaviorHarness.field(controller, "activeRequestId", 2);
+        AndroidBehaviorHarness.field(controller, "visible", false);
+        retiredShow.accept(true);
+        assertFalse((Boolean) AndroidBehaviorHarness.field(controller, "visible"));
+        AndroidBehaviorHarness.field(controller, "preparedDisplayTargets", new int[]{CameraDisplayTarget.TABLET});
+        AndroidBehaviorHarness.field(controller, "generations", new int[]{7, 8, 9});
+        ready(controller, CameraDisplayTarget.TABLET);
+        ReverseShowBoundary.completions.get(4).accept(true);
+        ready(controller, CameraDisplayTarget.TABLET);
+        assertEquals(5, ReverseShowBoundary.completions.size());
+        assertTrue((Boolean) AndroidBehaviorHarness.field(controller, "visible"));
+        controller.acceptEvent("{\"kind\":\"camera_opened\",\"camera_owner\":\"reverse\",\"request_id\":2}");
+        shadowOf(Looper.getMainLooper()).idle();
+        ready(controller, CameraDisplayTarget.TABLET); // Re-armed frame gate, same visible window.
+        advance(3001);
+        assertEquals("confirmed frames must cancel the re-armed timeout", 2,
+                AndroidBehaviorHarness.field(controller, "activeRequestId"));
+        assertEquals(5, ReverseShowBoundary.completions.size());
+    }
+
+    private static void ready(ReverseCameraController controller, int target) {
+        int request = (int) AndroidBehaviorHarness.field(controller, "activeRequestId");
+        controller.acceptEvent("{\"kind\":\"reverse_overlay_first_frames\",\"request_id\":"
+                + request + ",\"display_target\":" + target + "}");
+        shadowOf(Looper.getMainLooper()).idle();
+    }
+
+    @Implements(CameraHelperMain.HelperBinder.class)
+    public static class ReverseShowBoundary {
+        static final List<Consumer<Boolean>> completions = new ArrayList<>();
+        @Implementation protected void __constructor__(Context context, Consumer<String> sink) { }
+        @Implementation protected void armReverseOverlayFrames(int requestId, int displayTarget,
+                int[] generations) { }
+        @Implementation protected void setReverseOverlayVisible(int requestId, int displayTarget,
+                int[] generations, boolean visible, Consumer<Boolean> completion) {
+            if (visible) completions.add(completion);
+        }
+    }
 
     @Before public void setUp() {
         context = RuntimeEnvironment.getApplication();

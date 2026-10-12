@@ -1919,6 +1919,10 @@ final class CameraHelperMain {
             }
 
             try {
+                if (target == reverseGroup && rawSourceHub != null) {
+                    // Reused producers also need a bounded post-open measurement window.
+                    rawSourceHub.collectStatsForWindow(requestedFrameRate);
+                }
                 persistentSession.attach(
                         new ReflectivePersistentCameraPort(camera), target,
                         requestedSurfaces, requestedIndexes, requestId,
@@ -2082,9 +2086,11 @@ final class CameraHelperMain {
                                         "processed_fps", ratePerSecond(
                                                 stats.callbacks, stats.intervalNs));
                             }
-                            if (extended) {
+                            if (extended || (stats.outputStage && stats.fpsWindow)) {
                                 emit(stats.outputStage ? "camera_source_output_stats" : "camera_source_hub_stats",
                                     "stage", stats.outputStage ? "output" : "acquisition",
+                                    "fps_window", stats.fpsWindow,
+                                    "fps_window_id", stats.fpsWindowId,
                                     "dropped_snapshots", stats.droppedSnapshots,
                                     "output_age_max_ms", milliseconds(stats.outputAgeMaxNs),
                                     "requested_fps", requestedFrameRate,

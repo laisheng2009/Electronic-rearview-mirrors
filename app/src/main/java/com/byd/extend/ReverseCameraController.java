@@ -3,6 +3,8 @@ package com.byd.extend;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Handler;
+import android.os.SystemClock;
+import android.util.SparseArray;
 import android.view.Surface;
 
 import org.json.JSONObject;
@@ -71,6 +73,8 @@ final class ReverseCameraController {
     private int[] outputGenerations = new int[0];
     private Surface[] outputSurfaces = new Surface[0];
     private boolean clusterVisible;
+    // Pending or acknowledged shows. Failed commands are removed so they can be retried.
+    private final SparseArray<int[]> shownGenerations = new SparseArray<>();
     private long cameraShellEpoch;
     private CleanupCloseCoordinator activeCleanup;
     private Runnable cleanupRetryTask;
@@ -677,6 +681,10 @@ final class ReverseCameraController {
             fail("helper_unavailable");
             return;
         }
+        long attachStarted = SystemClock.elapsedRealtime();
+        emit("reverse_camera_timing", "stage", "attach", "state", "start",
+                "request_id", activeRequestId, "started_ms", attachStarted);
+        boolean attachCallCompleted = false;
         try {
             if (value.surfaces.length > 0) {
                 activeHelper.openReverseCamera(
@@ -685,11 +693,17 @@ final class ReverseCameraController {
             }
             activeHelper.updateReverseSteering(activeRequestId, steeringSample);
             applyPendingAutomaticMode(activeHelper);
+            attachCallCompleted = true;
         } catch (Throwable error) {
             emit("reverse_camera_error", "stage", "open_surfaces",
                     "error", summary(error));
             fail("open_surfaces");
             return;
+        } finally {
+            emit("reverse_camera_timing", "stage", "attach", "state", "end",
+                    "request_id", value.requestId, "started_ms", attachStarted,
+                    "duration_ms", SystemClock.elapsedRealtime() - attachStarted,
+                    "call_completed", attachCallCompleted);
         }
         if (value.surfaces.length == 0) cameraOpened(activeRequestId);
         emit("reverse_camera_surfaces", "request_id", activeRequestId,
@@ -833,17 +847,38 @@ final class ReverseCameraController {
                 || !hasPreparedDisplayTarget(displayTarget, preparedDisplayTargets)
                 || !isValidGenerationSet(targetGenerations)
                 || stopping || helper == null) return;
-        helper.setReverseOverlayVisible(
-                requestId, displayTarget, targetGenerations, true, null);
-        if (displayTarget == CameraDisplayTarget.TABLET) {
-            handler.removeCallbacks(firstFrameTimeout);
-            visible = true;
-        } else if (displayTarget == CameraDisplayTarget.CLUSTER) {
-            clusterVisible = true;
+        if (Arrays.equals(shownGenerations.get(displayTarget), targetGenerations)) {
+            if (displayTarget == CameraDisplayTarget.TABLET && visible) {
+                handler.removeCallbacks(firstFrameTimeout);
+            }
+            return;
         }
-        emit("reverse_camera_visible", "request_id", requestId,
-                "display_target", displayTarget,
-                "generations", Arrays.toString(targetGenerations));
+        int[] showing = targetGenerations.clone();
+        shownGenerations.put(displayTarget, showing);
+        try {
+            helper.setReverseOverlayVisible(requestId, displayTarget, showing, true, success -> {
+                if (activeRequestId != requestId || stopping
+                        || shownGenerations.get(displayTarget) != showing
+                        || !Arrays.equals(generationsForTarget(displayTarget), showing)) return;
+                if (!success) {
+                    shownGenerations.remove(displayTarget);
+                    return;
+                }
+                if (displayTarget == CameraDisplayTarget.TABLET) {
+                    handler.removeCallbacks(firstFrameTimeout);
+                    visible = true;
+                } else {
+                    clusterVisible = true;
+                }
+                emit("reverse_camera_visible", "request_id", requestId,
+                        "display_target", displayTarget,
+                        "generations", Arrays.toString(showing));
+            });
+        } catch (Throwable error) {
+            shownGenerations.remove(displayTarget);
+            emit("reverse_camera_error", "stage", "queue_show", "request_id", requestId,
+                    "display_target", displayTarget, "error", summary(error));
+        }
     }
 
     private void fail(String reason) {
@@ -863,8 +898,11 @@ final class ReverseCameraController {
         int[] closingGenerations = generations;
         int[] closingClusterGenerations = clusterGenerations;
         int[] closingDisplayTargets = preparedDisplayTargets;
-        boolean wasVisible = visible;
-        boolean wasClusterVisible = clusterVisible;
+        // A show may still be queued: queue its hide before detaching camera surfaces.
+        boolean wasVisible = visible || shownGenerations.get(CameraDisplayTarget.TABLET) != null;
+        boolean wasClusterVisible = clusterVisible
+                || shownGenerations.get(CameraDisplayTarget.CLUSTER) != null;
+        shownGenerations.clear();
         if (preserveDirection) direction.rememberForRetry();
         else direction.reset();
         activeRequestId = 0;
@@ -1980,6 +2018,7 @@ final class ReverseCameraController {
     }
 
     private void clearOutputState() {
+        shownGenerations.clear();
         generations = new int[0];
         clusterGenerations = new int[0];
         preparedDisplayTargets = new int[0];

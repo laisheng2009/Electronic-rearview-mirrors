@@ -27,6 +27,97 @@ import static org.junit.Assert.*;
         AvasRuntimeBehaviorTest.NavBoundary.class, AvasRuntimeBehaviorTest.TrackBoundary.class,
         AvasRuntimeBehaviorTest.AutoServiceBoundary.class, AvasRuntimeBehaviorTest.AudioBoundary.class})
 public class AvasRuntimeBehaviorTest {
+    @Test public void navReadinessReconcilesMissingCallbacksOnlyDuringItsBoundedWait() throws Exception {
+        for (boolean registrationFails : new boolean[]{false, true}) {
+            NavSourceTransport transport = new NavSourceTransport();
+            transport.registrationFails = registrationFails;
+            try (AvasNavSourceGate gate = new AvasNavSourceGate(transport, transport)) {
+                gate.start();
+                gate.refresh();
+                transport.time = 1000;
+                gate.awaitChangeOrPoll(4000, () -> false);
+                assertEquals("no reconciliation before readiness wait", 1, transport.reads);
+                gate.beginWait();
+                transport.time = 1249;
+                transport.value = 0; // No callback: this was the production gap.
+                assertFalse(gate.awaitChangeOrPoll(4000, () -> false));
+                assertEquals(1, transport.reads);
+                transport.time = 1250;
+                assertTrue(gate.awaitChangeOrPoll(4000, () -> false));
+                assertEquals(2, transport.reads);
+                transport.listener.changed(1);
+                transport.time = 1500;
+                gate.awaitChangeOrPoll(4000, () -> true);
+                assertEquals("cancelled playback must not poll", 2, transport.reads);
+            }
+            assertEquals(registrationFails ? 0 : 1, transport.unsubscribed);
+        }
+    }
+
+    @Test public void navReadinessUsesNewestStateAndDoesNotExtendTheThreeSecondTimeout() throws Exception {
+        NavSourceTransport transport = new NavSourceTransport();
+        try (AvasNavSourceGate gate = new AvasNavSourceGate(transport, transport)) {
+            gate.start();
+            transport.duringRead = () -> transport.listener.changed(1);
+            transport.value = 0;
+            gate.refresh();
+            assertFalse("newer nonzero callback wins over in-flight zero GET", gate.ready());
+            assertTrue(gate.diagnostics().getStale);
+            transport.duringRead = null;
+            transport.listener.changed(0);
+            transport.listener.changed(1);
+            assertFalse("historical zero is not permission to play", gate.ready());
+            transport.status = -1;
+            gate.refresh();
+            assertFalse("invalid zero GET is not ready", gate.ready());
+            transport.status = 0;
+            transport.value = 1;
+            AvasNavSourcePlayback.Trace trace = new AvasNavSourcePlayback.Trace();
+            try {
+                AvasNavSourcePlayback.await(gate, 10, 10, () -> false,
+                        new AvasNavSourcePlayback.ZeroWriter() {
+                            public long prefill(long frames) { return frames; }
+                            public long write(long frames) {
+                                transport.time += 50;
+                                // Repeated subscription errors must not postpone reconciliation.
+                                transport.listener.error("listener unavailable");
+                                return frames;
+                            }
+                        }, () -> transport.time, () -> transport.time, trace);
+                fail("nonzero NAV_SOURCE must time out without admitting WAV data");
+            } catch (IllegalStateException expected) {
+                assertEquals("NAV_SOURCE did not become valid 0", expected.getMessage());
+                assertEquals("timeout", trace.outcome);
+                assertEquals(3000, transport.time);
+                assertTrue("wait must reconcile even with repeated callback errors", transport.reads >= 14);
+                assertEquals(-1, trace.gateOpenedMs);
+            }
+            transport.listener.changed(0);
+            assertTrue("callbacks still publish readiness immediately", gate.ready());
+        }
+    }
+
+    private static final class NavSourceTransport implements AvasNavSourceGate.Transport, AvasNavSourceGate.Clock {
+        long time;
+        int status, reads, unsubscribed;
+        int value = 1;
+        boolean registrationFails;
+        Runnable duringRead;
+        AvasNavSourceGate.Listener listener;
+        public AvasNavSourceGate.Subscription subscribe(AvasNavSourceGate.Listener listener) {
+            this.listener = listener;
+            if (registrationFails) throw new IllegalStateException("subscribe failed");
+            return () -> unsubscribed++;
+        }
+        public AvasNavSourceGate.Snapshot read() {
+            reads++;
+            if (duringRead != null) duringRead.run();
+            return new AvasNavSourceGate.Snapshot(status, value);
+        }
+        public long now() { return time; }
+        public void sleep(long millis) { /* Time is advanced by the playback/test driver. */ }
+    }
+
     @org.junit.Before public void resetAudioBoundaryCounters() {
         assertEquals("previous test leaked an audio owner", 0, TrackBoundary.live.get());
         TrackBoundary.opened.set(0);

@@ -1040,8 +1040,12 @@ final class TurnSignalController {
             throw new IllegalArgumentException("reverse spec/sinks required");
         }
         long shellGeneration = cameraHelperInvalidationGeneration;
+        long queuedMs = SystemClock.elapsedRealtime();
+        reverseTiming("prepare", "queued", spec.requestId, -1, queuedMs, -1, false);
         worker.execute(() -> {
             if (!isCurrentCameraShellGeneration(shellGeneration)) return;
+            long startedMs = SystemClock.elapsedRealtime();
+            reverseTiming("prepare", "start", spec.requestId, -1, queuedMs, startedMs, false);
             clearPendingBlindOverlays();
             pendingReverseRequestId = spec.requestId;
             pendingReverseSurfaceSink = surfaceSink;
@@ -1055,6 +1059,8 @@ final class TurnSignalController {
             try {
                 value = ensureCameraHelper();
                 epoch = cameraHelperEpoch(value);
+                reverseTiming("prepare_binder", "start", spec.requestId, -1,
+                        queuedMs, startedMs, false);
                 int prepareResult = transactReversePrepare(value, spec);
                 if (prepareResult == CameraShellProtocol.PREPARE_RESTART_REQUIRED) {
                     if (!isCurrentPendingReverse(spec.requestId)) return;
@@ -1086,23 +1092,35 @@ final class TurnSignalController {
                 clearPendingReverseSurfaces(spec.requestId);
                 emit("reverse_overlay_error", "stage", "prepare",
                         "request_id", spec.requestId, "error", summary(error));
+            } finally {
+                reverseTiming("prepare", "end", spec.requestId, -1,
+                        queuedMs, startedMs, transactionComplete);
             }
         });
     }
 
     void acquireReverseSurfacesForFallback(int requestId) {
         if (requestId <= 0) return;
-        worker.execute(() -> acquireReverseSurfaces(requestId, true));
+        queueReverseSurfaceAcquire(requestId, true);
     }
 
     void armReverseOverlayFrames(int requestId, int displayTarget, int[] generations) {
+        long queuedMs = SystemClock.elapsedRealtime();
+        reverseTiming("arm_frames", "queued", requestId, displayTarget, queuedMs, -1, false);
         worker.execute(() -> {
+            long startedMs = SystemClock.elapsedRealtime();
+            boolean success = false;
+            reverseTiming("arm_frames", "start", requestId, displayTarget, queuedMs, startedMs, false);
             try {
                 IBinder value = ensureCameraHelper();
                 transactReverseFrames(value, requestId, displayTarget, generations);
+                success = true;
             } catch (Throwable error) {
                 emit("reverse_overlay_error", "stage", "arm_first_frames",
                         "request_id", requestId, "error", summary(error));
+            } finally {
+                reverseTiming("arm_frames", "end", requestId, displayTarget,
+                        queuedMs, startedMs, success);
             }
         });
     }
@@ -1110,7 +1128,12 @@ final class TurnSignalController {
     void setReverseOverlayVisible(
             int requestId, int displayTarget, int[] generations, boolean visible,
             Consumer<Boolean> completion) {
+        long queuedMs = SystemClock.elapsedRealtime();
+        String stage = visible ? "show" : "hide";
+        reverseTiming(stage, "queued", requestId, displayTarget, queuedMs, -1, false);
         worker.execute(() -> {
+            long startedMs = SystemClock.elapsedRealtime();
+            reverseTiming(stage, "start", requestId, displayTarget, queuedMs, startedMs, false);
             boolean success = false;
             try {
                 IBinder value = ensureCameraHelper();
@@ -1120,6 +1143,7 @@ final class TurnSignalController {
                 emit("reverse_overlay_error", "stage", visible ? "show" : "hide",
                         "request_id", requestId, "error", summary(error));
             } finally {
+                reverseTiming(stage, "end", requestId, displayTarget, queuedMs, startedMs, success);
                 postCompletion(completion, success, "reverse_visibility", requestId);
             }
         });
@@ -3140,14 +3164,19 @@ final class TurnSignalController {
         return CameraOverlayProfile.BLIND_COUNT;
     }
 
-    private void acquireReverseSurfaces(int requestId) {
-        acquireReverseSurfaces(requestId, false);
+    private void queueReverseSurfaceAcquire(int requestId, boolean forceTabletFallback) {
+        long queuedMs = SystemClock.elapsedRealtime();
+        reverseTiming("acquire", "queued", requestId, -1, queuedMs, -1, false);
+        worker.execute(() -> acquireReverseSurfaces(requestId, forceTabletFallback, queuedMs));
     }
 
-    private void acquireReverseSurfaces(int requestId, boolean forceTabletFallback) {
+    private void acquireReverseSurfaces(int requestId, boolean forceTabletFallback, long queuedMs) {
         Consumer<ReverseSurfaces> sink = pendingReverseSurfaceSink;
         if (sink == null || requestId != pendingReverseRequestId) return;
+        long startedMs = SystemClock.elapsedRealtime();
+        reverseTiming("acquire", "start", requestId, -1, queuedMs, startedMs, false);
         boolean pendingCleared = false;
+        boolean delivered = false;
         try {
             IBinder value = cameraHelper;
             long currentEpoch = cameraHelperEpoch(value);
@@ -3161,14 +3190,22 @@ final class TurnSignalController {
                 throw new IllegalStateException(
                         "camera shell unavailable before reverse Surface acquisition");
             }
+            reverseTiming("acquire_binder", "start", requestId, -1, queuedMs, startedMs, false);
             ReverseSurfaces result = transactReverseAcquire(
                     value, requestId, pendingReverseClusterExpected, forceTabletFallback);
             clearPendingReverseSurfaces(requestId);
             pendingCleared = true;
-            if (!handler.post(() -> sink.accept(result))) {
+            long acquiredMs = SystemClock.elapsedRealtime();
+            if (!handler.post(() -> {
+                emit("reverse_camera_timing", "stage", "surface_delivery", "state", "start",
+                        "request_id", requestId, "queued_ms", acquiredMs,
+                        "queue_ms", SystemClock.elapsedRealtime() - acquiredMs);
+                sink.accept(result);
+            })) {
                 releaseSurfaces(result.surfaces);
                 throw new IllegalStateException("main handler rejected reverse Surfaces");
             }
+            delivered = true;
         } catch (Throwable error) {
             if ((pendingReverseSurfaceSink != sink
                     || !isCurrentPendingReverse(requestId))
@@ -3176,7 +3213,19 @@ final class TurnSignalController {
             clearPendingReverseSurfaces(requestId);
             emit("reverse_overlay_error", "stage", "acquire_surfaces",
                     "request_id", requestId, "error", summary(error));
+        } finally {
+            reverseTiming("acquire", "end", requestId, -1, queuedMs, startedMs, delivered);
         }
+    }
+
+    private void reverseTiming(String stage, String state, int requestId, int displayTarget,
+            long queuedMs, long startedMs, boolean success) {
+        emit("reverse_camera_timing", "stage", stage, "state", state,
+                "request_id", requestId, "display_target", displayTarget,
+                "queued_ms", queuedMs, "started_ms", startedMs,
+                "queue_ms", startedMs < 0 ? -1 : startedMs - queuedMs,
+                "duration_ms", startedMs < 0 ? -1 : SystemClock.elapsedRealtime() - startedMs,
+                "success", success);
     }
 
     private void clearPendingReverseSurfaces(int requestId) {
@@ -3371,7 +3420,7 @@ final class TurnSignalController {
             } else if ("reverse_overlay_surface".equals(kind)
                     && "ready".equals(event.optString("state"))) {
                 int requestId = event.optInt("request_id", -1);
-                worker.execute(() -> acquireReverseSurfaces(requestId));
+                queueReverseSurfaceAcquire(requestId, false);
             }
         } catch (Throwable error) {
             emit("shell_event_parse_error", "error", summary(error));

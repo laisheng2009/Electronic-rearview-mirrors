@@ -7,7 +7,7 @@ final class AvasNavSourceGate implements AutoCloseable {
     static final int DEVICE = 1002;
     static final int FID = 0x4C60001D;
     static final long TIMEOUT_MILLIS = 3000;
-    static final long FALLBACK_POLL_MILLIS = 50;
+    static final long RECONCILE_POLL_MILLIS = 250;
     private static final long CALLBACK_WAIT_MILLIS = 10;
 
     interface Listener {
@@ -83,7 +83,7 @@ final class AvasNavSourceGate implements AutoCloseable {
     private int value = Integer.MIN_VALUE;
     private boolean valid;
     private boolean fallbackPolling;
-    private long nextFallbackPoll;
+    private long nextPoll;
     private boolean waitActive;
     private boolean closed;
     private boolean registrationFailed;
@@ -135,7 +135,6 @@ final class AvasNavSourceGate implements AutoCloseable {
                         lastCallbackMs = clock.now();
                         lastError = detail == null ? "" : detail;
                         fallbackPolling = true;
-                        if (waitActive) nextFallbackPoll = clock.now() + FALLBACK_POLL_MILLIS;
                         AvasNavSourceGate.this.notifyAll();
                     }
                 }
@@ -166,6 +165,7 @@ final class AvasNavSourceGate implements AutoCloseable {
         }
         synchronized (this) {
             getFinishedMs = clock.now();
+            if (waitActive) nextPoll = getFinishedMs + RECONCILE_POLL_MILLIS;
             getStale = revision != startedRevision;
             if (!closed && revision == startedRevision) {
                 revision++;
@@ -176,7 +176,7 @@ final class AvasNavSourceGate implements AutoCloseable {
         }
     }
 
-    synchronized boolean ready() { return valid && value == 0; }
+    synchronized boolean ready() { return !closed && valid && value == 0; }
 
     synchronized int value() { return valid ? value : Integer.MIN_VALUE; }
 
@@ -184,7 +184,7 @@ final class AvasNavSourceGate implements AutoCloseable {
 
     synchronized void beginWait() {
         waitActive = true;
-        if (fallbackPolling) nextFallbackPoll = clock.now() + FALLBACK_POLL_MILLIS;
+        nextPoll = clock.now() + RECONCILE_POLL_MILLIS;
     }
 
     synchronized Diagnostics diagnostics() {
@@ -202,19 +202,23 @@ final class AvasNavSourceGate implements AutoCloseable {
             if (remaining <= 0 || ready()) return ready();
             if (fallbackPolling()) {
                 clock.sleep(Math.min(CALLBACK_WAIT_MILLIS, remaining));
-                boolean poll;
+            } else {
                 synchronized (this) {
-                    poll = clock.now() >= nextFallbackPoll;
-                    if (poll) nextFallbackPoll = clock.now() + FALLBACK_POLL_MILLIS;
+                    if (closed) return false;
+                    if (revision != observed) return ready();
+                    wait(Math.min(CALLBACK_WAIT_MILLIS, remaining));
                 }
-                if (poll) refresh();
-                return ready();
             }
+            // A successful subscription does not guarantee every transition is delivered.
+            // Reconcile only on this playback worker, within the active readiness wait.
+            boolean poll;
             synchronized (this) {
-                if (revision != observed || closed) return ready();
-                wait(Math.min(CALLBACK_WAIT_MILLIS, remaining));
-                return ready();
+                if (closed || cancelled.getAsBoolean()) return false;
+                poll = waitActive && !ready() && clock.now() < deadline
+                        && clock.now() >= nextPoll;
             }
+            if (poll) refresh();
+            return ready();
         }
         return false;
     }
