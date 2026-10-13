@@ -62,11 +62,9 @@ final class LocalAdbClient {
     private static long cancellationGeneration;
     private static long nextAccessOperationGeneration;
     private static long latestAccessUpdateGeneration;
-    private static final AccessCache ACCESS_CACHE = new AccessCache(LocalAdbClient::elapsedRealtime);
+    private static final AccessCache ACCESS_CACHE = new AccessCache();
     private static volatile AccessState currentAccessState = AccessState.unknown();
     private static volatile long accessStateVersion;
-    private static volatile SocketFactory socketFactory = Socket::new;
-    private static volatile TestStorage testStorage;
     private static volatile AccessStateListener accessStateListener;
     private static final CopyOnWriteArraySet<AccessStateListener> ACCESS_STATE_LISTENERS =
             new CopyOnWriteArraySet<>();
@@ -121,12 +119,8 @@ final class LocalAdbClient {
         if (listener != null) ACCESS_STATE_LISTENERS.remove(listener);
     }
 
-    static boolean hasAccessStateListenerForTest(AccessStateListener listener) {
-        return accessStateListener == listener;
-    }
-
     static AccessState readAccessState(Context context) {
-        if (context == null && testStorage == null) return AccessState.unknown();
+        if (context == null) return AccessState.unknown();
         synchronized (ACCESS_STATE_LOCK) {
             SharedPreferences preferences = prefs(applicationContext(context));
             AccessState state = decodeAccessState(
@@ -373,23 +367,6 @@ final class LocalAdbClient {
                 : Result.failed(result.error, text, result.exitCode, result.fingerprint);
     }
 
-    static Result parseStreamingResponseForTest(
-            byte[] response, String marker, OutputStream output, long maxBytes) {
-        try {
-            StreamShellResult shell = Connection.finishStream(
-                    output, maxBytes, 0L, response,
-                    marker.getBytes(StandardCharsets.US_ASCII));
-            return shell.exitCode == 0
-                    ? Result.ok("", shell.exitCode, "test", false)
-                    : Result.failed("shell_exit_" + shell.exitCode, "",
-                            shell.exitCode, "test");
-        } catch (TooLargeException tooLarge) {
-            return Result.failed("too_large", "", -1, "test");
-        } catch (IOException error) {
-            return Result.failed(summary(error), "", -1, "test");
-        }
-    }
-
     private static Result connectOnly(
             Context context,
             PromptMode mode,
@@ -456,19 +433,6 @@ final class LocalAdbClient {
         return value;
     }
 
-    interface SocketFactory {
-        Socket create() throws IOException;
-    }
-
-    static void setSocketFactoryForTest(SocketFactory factory) {
-        socketFactory = factory == null ? Socket::new : factory;
-    }
-
-    static void setStorageForTest(File filesDir, SharedPreferences preferences) {
-        testStorage = filesDir == null || preferences == null
-                ? null : new TestStorage(filesDir, preferences);
-    }
-
     static boolean shouldSendPublicKey(
             PromptMode mode, boolean alreadyPrompted) {
         return mode == PromptMode.FORCE
@@ -494,10 +458,6 @@ final class LocalAdbClient {
         };
     }
 
-    static AccessState decodeAccessStateForTest(String status, String fingerprint) {
-        return decodeAccessState(status, fingerprint);
-    }
-
     static boolean shouldInvalidateAccess(Throwable error, boolean cancelledOrSuperseded) {
         return !cancelledOrSuperseded
                 && !(error instanceof OutputSinkException)
@@ -507,21 +467,8 @@ final class LocalAdbClient {
     }
 
     static final class AccessCache {
-        interface Clock {
-            long elapsedRealtime();
-        }
-
-        private final Clock clock;
         private String fingerprint = "";
         private long successAt = Long.MIN_VALUE;
-
-        AccessCache() {
-            this(SystemClock::elapsedRealtime);
-        }
-
-        AccessCache(Clock clock) {
-            this.clock = clock;
-        }
 
         synchronized boolean isValid(String identity, PromptMode mode) {
             if (mode == PromptMode.FORCE || mode == null || identity == null
@@ -529,7 +476,7 @@ final class LocalAdbClient {
                 if (!identityEquals(identity)) clear();
                 return false;
             }
-            long age = clock.elapsedRealtime() - successAt;
+            long age = SystemClock.elapsedRealtime() - successAt;
             if (successAt == Long.MIN_VALUE || age < 0L || age >= AUTHORIZED_CACHE_TTL_MS) {
                 clear();
                 return false;
@@ -543,7 +490,7 @@ final class LocalAdbClient {
                 return;
             }
             fingerprint = identity;
-            successAt = clock.elapsedRealtime();
+            successAt = SystemClock.elapsedRealtime();
         }
 
         synchronized void invalidate() {
@@ -554,14 +501,6 @@ final class LocalAdbClient {
             if (fingerprint.isEmpty() || Objects.equals(fingerprint, identity)) return false;
             clear();
             return true;
-        }
-
-        synchronized long successAtForTest() {
-            return successAt;
-        }
-
-        synchronized String fingerprintForTest() {
-            return fingerprint;
         }
 
         private boolean identityEquals(String identity) {
@@ -609,7 +548,7 @@ final class LocalAdbClient {
             }
             Socket socket = null;
             try {
-                socket = socketFactory.create();
+                socket = new Socket();
                 if (background != null) background.register(socket);
                 if (cancellation != null) cancellation.registerActiveSocket(socket);
                 if (mode != PromptMode.NEVER && !trackPending(socket, authGeneration)) {
@@ -1076,9 +1015,7 @@ final class LocalAdbClient {
     }
 
     static KeyPair loadOrCreateKeys(Context context) throws Exception {
-        TestStorage storage = testStorage;
-        File filesDir = storage == null ? context.getFilesDir() : storage.filesDir;
-        return loadOrCreateKeys(new File(filesDir, "adb_keys"));
+        return loadOrCreateKeys(new File(context.getFilesDir(), "adb_keys"));
     }
 
     static KeyPair loadOrCreateKeys(File dir) throws Exception {
@@ -1291,10 +1228,7 @@ final class LocalAdbClient {
     }
 
     private static SharedPreferences prefs(Context context) {
-        TestStorage storage = testStorage;
-        return storage == null
-                ? context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                : storage.preferences;
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
     private static Context applicationContext(Context context) {
@@ -1302,17 +1236,7 @@ final class LocalAdbClient {
     }
 
     private static long elapsedRealtime() {
-        return testStorage == null ? SystemClock.elapsedRealtime() : System.nanoTime() / 1_000_000L;
-    }
-
-    private static final class TestStorage {
-        final File filesDir;
-        final SharedPreferences preferences;
-
-        TestStorage(File filesDir, SharedPreferences preferences) {
-            this.filesDir = filesDir;
-            this.preferences = preferences;
-        }
+        return SystemClock.elapsedRealtime();
     }
 
     private static byte[] nul(String value) {

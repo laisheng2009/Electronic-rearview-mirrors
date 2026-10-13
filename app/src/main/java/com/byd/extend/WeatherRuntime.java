@@ -220,10 +220,6 @@ public final class WeatherRuntime {
         deliver(cancelledCallback, false, "weather shutdown");
     }
 
-    public boolean isStarted() {
-        return started;
-    }
-
     public boolean isEnabled() {
         return enabled;
     }

@@ -18,10 +18,10 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.BugReport
-import androidx.compose.material.icons.outlined.Security
+import com.byd.extend.ui.icons.BugReport
+import com.byd.extend.ui.icons.Security
 import androidx.compose.material.icons.outlined.Share
-import androidx.compose.material.icons.outlined.Videocam
+import com.byd.extend.ui.icons.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable

@@ -363,7 +363,15 @@ final class RearviewMirrorController {
     void acceptEvent(String line) {
         if (shutdown || line == null) return;
         try {
-            JSONObject event = new JSONObject(line);
+            acceptEvent(new JSONObject(line));
+        } catch (Exception error) {
+            emit("mirror_error", "stage", "event", "error", error.toString());
+        }
+    }
+
+    void acceptEvent(JSONObject event) {
+        if (shutdown || event == null) return;
+        try {
             String kind = event.optString("kind");
             if ("camera_shell_died".equals(kind)) {
                 long epoch = event.optLong("camera_shell_epoch", 0);

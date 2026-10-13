@@ -44,20 +44,6 @@ public final class RearviewMirrorSettings {
     public static final String PREF_BORDER_WIDTH = PREF_BORDER_DP;
     public static final String PREF_BORDER_COLOR = PREF_BORDER_ARGB;
     public static final String PREF_PRESET_AVAILABLE = PREF_PRESET_PRESENT;
-    public static final String PREF_ORIGINAL_X = "mirror_original_x";
-    public static final String PREF_ORIGINAL_Y = "mirror_original_y";
-    public static final String PREF_ORIGINAL_WIDTH = "mirror_original_width";
-    public static final String PREF_ORIGINAL_HEIGHT = "mirror_original_height";
-    public static final String PREF_CORRECTION = "mirror_correction";
-    public static final String PREF_FOV = "mirror_fov";
-    public static final String PREF_PROJECTION = "mirror_projection";
-    public static final String PREF_CORRECTED_X = "mirror_corrected_x";
-    public static final String PREF_CORRECTED_Y = "mirror_corrected_y";
-    public static final String PREF_CORRECTED_WIDTH = "mirror_corrected_width";
-    public static final String PREF_CORRECTED_HEIGHT = "mirror_corrected_height";
-    public static final String PREF_MIRRORED = "mirror_mirrored";
-    public static final String PREF_OUTPUT_MODE = "mirror_output_mode";
-    public static final String PREF_ROTATION = "mirror_rotation";
     private static final String ORIGINAL_PREFIX = "mirror_original_";
     private static final String CORRECTED_PREFIX = "mirror_corrected_";
     private static final String PRESET_PREFIX = "mirror_preset_";
@@ -352,15 +338,6 @@ public final class RearviewMirrorSettings {
         editor.apply();
     }
 
-    public static void copyCalibration(
-            SharedPreferences preferences, boolean fromFront, boolean toFront) {
-        writeCalibration(preferences, toFront, calibration(preferences, fromFront));
-    }
-
-    public static void resetCalibration(SharedPreferences preferences, boolean front) {
-        writeCalibration(preferences, front, defaultCalibration(front));
-    }
-
     public static void writeSourceState(
             SharedPreferences preferences, boolean frontIntegrated, boolean showFront) {
         if (preferences == null) throw new IllegalArgumentException("preferences is null");
@@ -491,11 +468,6 @@ public final class RearviewMirrorSettings {
         catch (RuntimeException invalid) { return fallback; }
     }
 
-    private int readInt(String key, int fallback) {
-        try { return preferences.getInt(key, fallback); }
-        catch (RuntimeException invalid) { return fallback; }
-    }
-
     private static int clamp(int value, int minimum, int maximum) {
         return Math.max(minimum, Math.min(maximum, value));
     }
@@ -592,18 +564,6 @@ public final class RearviewMirrorSettings {
                     frontCalibration, frontPreset, sourceFieldsSpecified);
         }
 
-        public Settings withPlacement(CameraPlacement value) {
-            return new Settings(enabled, target, value, calibration, preset,
-                    borderDp, borderArgb, manualHidden, frontIntegrated, showFront,
-                    frontCalibration, frontPreset, sourceFieldsSpecified);
-        }
-
-        public Settings withManualHidden(boolean value) {
-            return new Settings(enabled, target, placement, calibration, preset,
-                    borderDp, borderArgb, value, frontIntegrated, showFront,
-                    frontCalibration, frontPreset, sourceFieldsSpecified);
-        }
-
         public boolean activeFront() { return frontIntegrated && showFront; }
 
         public Calibration calibration(boolean front) {
@@ -628,17 +588,6 @@ public final class RearviewMirrorSettings {
                     true);
         }
 
-        public Settings withFrontIntegrated(boolean value) {
-            return new Settings(enabled, target, placement, calibration, preset,
-                    borderDp, borderArgb, manualHidden, value, showFront,
-                    frontCalibration, frontPreset, true);
-        }
-
-        public Settings withSource(boolean front) {
-            return new Settings(enabled, target, placement, calibration, preset,
-                    borderDp, borderArgb, manualHidden, frontIntegrated, front,
-                    frontCalibration, frontPreset, true);
-        }
     }
 
     public static final class Calibration {

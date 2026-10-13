@@ -120,13 +120,6 @@ final class AppPermissionProvisioner {
         }
     }
 
-    static String appendAccessibility(String current) {
-        if (WeatherAccessibilitySettings.hasOwnService(current)) return current;
-        String value = current == null || "null".equals(current.trim()) ? "" : current;
-        return value.isEmpty() ? WeatherAccessibilitySettings.SERVICE_COMPONENT
-                : value + ":" + WeatherAccessibilitySettings.SERVICE_COMPONENT;
-    }
-
     private static String quote(String value) { return "'" + value.replace("'", "'\\''") + "'"; }
 
     private static boolean run(Context app, String command, String permission, String reason,

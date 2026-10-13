@@ -66,19 +66,12 @@
     <string name="runtime_logs_cleared">Логи очищены: %1$d</string>
     <string name="runtime_logs_clear_failed">Не удалось очистить логи.</string>
     <string name="runtime_logs_clear_partial">Очищено: %1$d; не удалось удалить: %2$d</string>
-    <string name="runtime_update_available">Доступно обновление</string>
-    <string name="runtime_update">Обновить</string>
     <string name="runtime_update_checking">Проверка обновлений…</string>
     <string name="runtime_update_check_button">Проверка…</string>
     <string name="runtime_up_to_date">Установлена последняя версия</string>
     <string name="runtime_update_available_version">Доступна версия %1$s</string>
-    <string name="runtime_update_download_title">Обновление %1$s</string>
-    <string name="runtime_update_download">Загрузка: %1$d%%</string>
-    <string name="runtime_update_failed">Не удалось обновить приложение</string>
     <string name="runtime_update_check_error">Ошибка проверки обновлений</string>
     <string name="runtime_update_later">Закрыть</string>
-    <string name="runtime_installed_version">Установленная версия: %1$s</string>
-    <string name="runtime_available_version">Доступная версия: %1$s</string>
     <string name="runtime_car_compat_title">Пакет совместимости автомобиля</string>
     <string name="runtime_car_compat_message">Пакет может содержать большие проприетарные файлы BYD/DiLink, системные метаданные и частную техническую информацию. Недоступные файлы отмечаются, но не прерывают создание архива. Отправляйте его только через доверенный канал.</string>
     <string name="runtime_car_compat_prepare">Подготовка…</string>
@@ -164,7 +157,6 @@
     <string name="runtime_status_waiting_helper">Ожидание внутренней службы…</string>
     <string name="runtime_status_telemetry_ready">Телеметрия готова</string>
     <string name="runtime_status_telemetry_error">Ошибка телеметрии: %1$s</string>
-    <string name="runtime_status_helper_error">Ошибка хелпера: %1$s</string>
     <string name="runtime_status_helper_restarting">Перезапуск хелпера: %1$s</string>
     <string name="runtime_status_guard_active">Защита активна</string>
     <string name="runtime_status_guard_paused">Защита приостановлена: %1$s</string>

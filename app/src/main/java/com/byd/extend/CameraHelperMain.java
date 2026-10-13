@@ -31,6 +31,8 @@ import java.util.Locale;
 import java.util.function.Consumer;
 
 final class CameraHelperMain {
+    enum DiscoveryResult { READY, RETRYABLE_FAILURE, TERMINAL_UNSUPPORTED_ID }
+
     static final String PACKAGE_NAME = "com.byd.extend";
     static final String DESCRIPTOR = PACKAGE_NAME + ".ICameraProbeHelper";
     static final String CALLBACK_DESCRIPTOR = PACKAGE_NAME + ".ICameraProbeCallback";
@@ -90,6 +92,7 @@ final class CameraHelperMain {
         private int cameraId = -1;
         private String cameraTag = "none";
         private String discoveryError;
+        private boolean terminalUnsupportedDiscovery;
         private Object camera;
         private Object eventCallback;
         private boolean persistentPanoProducer;
@@ -173,11 +176,6 @@ final class CameraHelperMain {
 
         void configureLogging() {
             turnController.configureLogging();
-        }
-
-        void configureGuard(
-                boolean enabled, float outward, float center, int delayMs, int maxSpeedKph) {
-            turnController.configure(enabled, outward, center, delayMs, maxSpeedKph);
         }
 
         @Override
@@ -539,7 +537,24 @@ final class CameraHelperMain {
         }
 
         synchronized boolean discoverCamera() {
-            if (cameraRuntime != null) return cameraRuntime.connect();
+            return discoverCameraWithResult() == DiscoveryResult.READY;
+        }
+
+        synchronized DiscoveryResult discoverCameraWithResult() {
+            terminalUnsupportedDiscovery = false;
+            return discoverCameraInternal();
+        }
+
+        synchronized DiscoveryResult retryCameraDiscovery() {
+            return terminalUnsupportedDiscovery
+                    ? DiscoveryResult.TERMINAL_UNSUPPORTED_ID : discoverCameraInternal();
+        }
+
+        private DiscoveryResult discoverCameraInternal() {
+            if (cameraRuntime != null) {
+                return cameraRuntime.connect()
+                        ? DiscoveryResult.READY : DiscoveryResult.RETRYABLE_FAILURE;
+            }
             cameraId = -1;
             cameraTag = "none";
             discoveryError = null;
@@ -572,9 +587,14 @@ final class CameraHelperMain {
                     String rejectedTag = cameraTag;
                     cameraId = -1;
                     cameraTag = "none";
-                    throw new IllegalStateException("Unsupported AVM camera " + rejectedTag
+                    IllegalStateException error = new IllegalStateException(
+                            "Unsupported AVM camera " + rejectedTag
                             + " id " + rejectedId + " (MDC/IP-camera platform; opening it"
                             + " crashes bmmcameraserver)");
+                    terminalUnsupportedDiscovery = true;
+                    discoveryError = summary(error);
+                    emit("camera_discovery", "ok", false, "error", discoveryError);
+                    return DiscoveryResult.TERMINAL_UNSUPPORTED_ID;
                 }
                 int width = optionalInt(info, "getDefaultPreviewWidth", cameraId);
                 int height = optionalInt(info, "getDefaultPreviewHeight", cameraId);
@@ -587,11 +607,11 @@ final class CameraHelperMain {
                         "cam_info_avm", systemProperty("vehicle.config.camInfo.avm"),
                         "vendor_cam_info_avm", systemProperty("vendor.vehicle.config.camInfo.avm"),
                         "autostudy_avm", systemProperty("persist.vendor.camera.autostudy.avm"));
-                return true;
+                return DiscoveryResult.READY;
             } catch (Throwable error) {
                 discoveryError = summary(error);
                 emit("camera_discovery", "ok", false, "error", discoveryError);
-                return false;
+                return DiscoveryResult.RETRYABLE_FAILURE;
             }
         }
 
@@ -775,13 +795,6 @@ final class CameraHelperMain {
             return openDirectCamera(
                     requestedSurface, requestedTag, requestedIndex,
                     CAMERA_OWNER_ACTIVITY, requestId, exclusive);
-        }
-
-        String openOverlayDirectCamera(
-                Surface requestedSurface, String requestedTag, int requestedIndex) {
-            return openDirectCamera(
-                    requestedSurface, requestedTag, requestedIndex,
-                    CAMERA_OWNER_OVERLAY, 0, false);
         }
 
         String openOverlayDirectCameras(
@@ -1427,10 +1440,6 @@ final class CameraHelperMain {
 
         synchronized String closeMirrorCamera(String reason, int expectedRequestId) {
             return closeCameraForOwner(CAMERA_OWNER_MIRROR, reason, expectedRequestId);
-        }
-
-        synchronized void setMirrorTargetActive(Surface target, boolean active) throws Exception {
-            persistentSession.setActive(mirrorGroup, target, active);
         }
 
         void prepareReverseOverlayWindow(
@@ -2836,50 +2845,6 @@ final class CameraHelperMain {
                     && error != null && error.isEmpty();
         }
 
-        private synchronized String attachActivityPreview(
-                Surface requestedSurface, int requestedIndex, int requestId) {
-            if (requestedIndex < 0 || requestedIndex > 4) {
-                requestedSurface.release();
-                throw new IllegalArgumentException("Preview index must be 0..4");
-            }
-            if (!requestedSurface.isValid()) {
-                requestedSurface.release();
-                throw new IllegalArgumentException("Surface is invalid");
-            }
-            if (activityPreview.has()) {
-                detachActivityPreview("replace_activity_preview");
-            }
-            try {
-                boolean added = invokeBoolean(camera.getClass(), camera, "addPreviewSurface",
-                        new Class<?>[]{Surface.class, int.class},
-                        requestedSurface, requestedIndex);
-                if (!added) {
-                    throw new IllegalStateException(
-                            "addPreviewSurface returned false for Activity preview");
-                }
-                activityPreview.set(requestedSurface, requestedIndex, true);
-                emit("camera_preview_attached", "camera_owner", CAMERA_OWNER_ACTIVITY,
-                        "producer_owner", activeCameraOwner,
-                        "request_id", requestId,
-                        "camera_tag", activeCameraTag,
-                        "preview_index", requestedIndex,
-                        "path", "hot_multi_surface");
-                return result("camera_preview_attached", null,
-                        activeCameraId, activeCameraTag);
-            } catch (Throwable error) {
-                requestedSurface.release();
-                String message = summary(error);
-                emit("camera_error", "stage", "attach_activity_preview",
-                        "camera_owner", CAMERA_OWNER_ACTIVITY,
-                        "producer_owner", activeCameraOwner,
-                        "request_id", requestId,
-                        "camera_tag", activeCameraTag,
-                        "preview_index", requestedIndex,
-                        "error", message);
-                return result("camera_error", message, activeCameraId, activeCameraTag);
-            }
-        }
-
         private synchronized String detachActivityPreview(String reason) {
             ActivityPreviewState.Snapshot<Surface> active = activityPreview.close(false);
             Surface activeSurface = active.value;
@@ -3011,15 +2976,6 @@ final class CameraHelperMain {
 
         static boolean matchesPendingCameraRequest(int pendingRequestId, int callbackRequestId) {
             return callbackRequestId > 0 && callbackRequestId == pendingRequestId;
-        }
-
-        static boolean matchesCurrentStockRequest(
-                boolean stockRequested, int pendingRequestId,
-                int activeRequestId, int eventRequestId) {
-            int currentRequestId = pendingRequestId > 0
-                    ? pendingRequestId : activeRequestId;
-            return stockRequested && eventRequestId > 0
-                    && eventRequestId == currentRequestId;
         }
 
         private static void requireActivityRequestId(int requestId) {
@@ -4247,28 +4203,6 @@ final class CameraHelperMain {
                     }
                 }
                 return first;
-            }
-
-            private static Surface[] fanoutSurfaces(
-                    Surface[] surfaces, boolean firstSurfaceDirect) {
-                if (!firstSurfaceDirect) return surfaces;
-                if (surfaces.length == 1) return new Surface[0];
-                if (surfaces.length == 0) {
-                    throw new IllegalArgumentException(
-                            "direct input plus at least one fanout Surface required");
-                }
-                return Arrays.copyOfRange(surfaces, 1, surfaces.length);
-            }
-
-            private static int[] fanoutIndexes(
-                    int[] indexes, boolean firstSurfaceDirect) {
-                if (!firstSurfaceDirect) return indexes;
-                if (indexes.length == 1) return new int[0];
-                if (indexes.length == 0) {
-                    throw new IllegalArgumentException(
-                            "direct input plus at least one fanout index required");
-                }
-                return Arrays.copyOfRange(indexes, 1, indexes.length);
             }
 
             void setBlindStandbyDemand(PersistentCameraPort port, int mask)

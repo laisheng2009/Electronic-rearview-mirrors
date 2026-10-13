@@ -66,19 +66,12 @@
     <string name="runtime_logs_cleared">Логи очищено: %1$d</string>
     <string name="runtime_logs_clear_failed">Не вдалося очистити логи.</string>
     <string name="runtime_logs_clear_partial">Очищено %1$d; не видалено %2$d</string>
-    <string name="runtime_update_available">Доступне оновлення</string>
-    <string name="runtime_update">Оновити</string>
     <string name="runtime_update_checking">Перевірка оновлень…</string>
     <string name="runtime_update_check_button">Перевірка…</string>
     <string name="runtime_up_to_date">Встановлено актуальну версію</string>
     <string name="runtime_update_available_version">Доступна версія %1$s</string>
-    <string name="runtime_update_download_title">Оновлення %1$s</string>
-    <string name="runtime_update_download">Завантаження: %1$d%%</string>
-    <string name="runtime_update_failed">Не вдалося оновити застосунок</string>
     <string name="runtime_update_check_error">Помилка перевірки оновлень</string>
     <string name="runtime_update_later">Закрити</string>
-    <string name="runtime_installed_version">Встановлена версія: %1$s</string>
-    <string name="runtime_available_version">Доступна версія: %1$s</string>
     <string name="runtime_car_compat_title">Пакет сумісності авто</string>
     <string name="runtime_car_compat_message">Пакет може містити великі пропрієтарні файли BYD/DiLink, системні метадані та приватні технічні дані. Створення є найкращою спробою: недоступні файли буде позначено, але вони не зупинять архів. Передавайте пакет лише довіреним каналом.</string>
     <string name="runtime_car_compat_prepare">Підготовка…</string>
@@ -164,7 +157,6 @@
     <string name="runtime_status_waiting_helper">Очікування внутрішньої служби…</string>
     <string name="runtime_status_telemetry_ready">Телеметрія готова</string>
     <string name="runtime_status_telemetry_error">Помилка телеметрії: %1$s</string>
-    <string name="runtime_status_helper_error">Помилка helper: %1$s</string>
     <string name="runtime_status_helper_restarting">Helper відновлюється: %1$s</string>
     <string name="runtime_status_guard_active">Guard активний</string>
     <string name="runtime_status_guard_paused">Guard призупинено: %1$s</string>

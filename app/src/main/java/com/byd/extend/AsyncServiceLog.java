@@ -238,6 +238,4 @@ final class AsyncServiceLog {
         try { writer.close(); } catch (Throwable ignored) { }
         writer = null;
     }
-    synchronized int bufferedBytesForTest() { return bufferedBytes; }
-    synchronized int bufferedRecordsForTest() { return bufferedRecords; }
 }

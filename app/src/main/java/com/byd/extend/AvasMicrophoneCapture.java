@@ -100,6 +100,7 @@ final class AvasMicrophoneCapture {
 
     private void capture(Session current) {
         AudioRecord recorder = null;
+        AudioManager.AudioRecordingCallback recordingCallback = null;
         ParcelFileDescriptor readEnd = null;
         AvasMicrophoneEffects effects = null;
         try {
@@ -123,8 +124,7 @@ final class AvasMicrophoneCapture {
             effects.apply(current.noiseSuppression, current.echoCancellation);
             if (current.cancelled) return;
             if (Build.VERSION.SDK_INT >= 29) {
-                recorder.registerAudioRecordingCallback(main::post,
-                        new AudioManager.AudioRecordingCallback() {
+                recordingCallback = new AudioManager.AudioRecordingCallback() {
                             @Override public void onRecordingConfigChanged(
                                     List<AudioRecordingConfiguration> configurations) {
                                 if (current.cancelled || session != current) return;
@@ -136,7 +136,8 @@ final class AvasMicrophoneCapture {
                                         fail(current, new IOException("capture_silenced_by_system"));
                                 } catch (RuntimeException unavailable) { fail(current, unavailable); }
                             }
-                        });
+                        };
+                recorder.registerAudioRecordingCallback(main::post, recordingCallback);
             }
             recorder.startRecording();
             if (recorder.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING)
@@ -170,6 +171,10 @@ final class AvasMicrophoneCapture {
             current.output = null;
             if (effects != null) effects.close();
             if (recorder != null) {
+                if (Build.VERSION.SDK_INT >= 29 && recordingCallback != null) {
+                    try { recorder.unregisterAudioRecordingCallback(recordingCallback); }
+                    catch (RuntimeException ignored) {}
+                }
                 try { recorder.stop(); } catch (RuntimeException ignored) {}
                 try { recorder.release(); } catch (RuntimeException ignored) {}
                 current.recorder = null;

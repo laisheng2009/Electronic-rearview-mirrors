@@ -17,6 +17,7 @@ final class AvasEngineMotorMapping {
         private final double[] ratios = new double[WINDOW];
         private int count;
         private int next;
+        private float rawPerKph = NOMINAL_AUDIO_SCALE;
         private long lastSpeedRevision = Long.MIN_VALUE;
         private long lastMotorRevision = Long.MIN_VALUE;
 
@@ -34,6 +35,7 @@ final class AvasEngineMotorMapping {
             ratios[next] = ratio;
             next = (next + 1) % WINDOW;
             count = Math.min(WINDOW, count + 1);
+            rawPerKph = median();
         }
 
         boolean usable() { return count >= MIN_SAMPLES; }
@@ -43,11 +45,16 @@ final class AvasEngineMotorMapping {
             Arrays.fill(ratios, 0.0);
             count = 0;
             next = 0;
+            rawPerKph = NOMINAL_AUDIO_SCALE;
             lastSpeedRevision = Long.MIN_VALUE;
             lastMotorRevision = Long.MIN_VALUE;
         }
 
         float rawPerKph() {
+            return rawPerKph;
+        }
+
+        private float median() {
             if (!usable()) return NOMINAL_AUDIO_SCALE;
             double[] sorted = Arrays.copyOf(ratios, count);
             Arrays.sort(sorted);

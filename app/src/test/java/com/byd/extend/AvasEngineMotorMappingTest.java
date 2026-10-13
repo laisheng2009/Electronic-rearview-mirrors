@@ -7,6 +7,36 @@ import org.junit.Test;
 
 public final class AvasEngineMotorMappingTest {
 
+    @Test public void calibrationMedianTracksNewRevisionsAndResets() {
+        AvasEngineMotorMapping.Scale scale = new AvasEngineMotorMapping.Scale();
+        scale.observe(20, true, 100, 1, 1_000, true, 100, 1);
+        scale.observe(20, true, 200, 2, 1_800, true, 200, 2);
+        scale.observe(20, true, 300, 3, 2_000, true, 300, 3);
+        assertEquals(3, scale.sampleCount());
+        assertEquals(90, scale.rawPerKph(), 0.001f);
+
+        scale.observe(20, true, 400, 4, 1_600, true, 300, 3);
+        assertEquals(85, scale.rawPerKph(), 0.001f);
+        scale.observe(20, true, 400, 4, 4_000, true, 300, 3);
+        assertEquals(4, scale.sampleCount());
+        assertEquals(85, scale.rawPerKph(), 0.001f);
+        scale.observe(20, true, 500, 5, 1_400, true, 400, 4);
+        assertEquals(5, scale.sampleCount());
+        assertEquals(80, scale.rawPerKph(), 0.001f);
+        scale.observe(20, true, 600, 6, 2_400, true, 500, 5);
+        assertEquals(5, scale.sampleCount());
+        assertEquals(90, scale.rawPerKph(), 0.001f);
+
+        scale.reset();
+        assertEquals(0, scale.sampleCount());
+        assertEquals(AvasEngineMotorMapping.NOMINAL_AUDIO_SCALE, scale.rawPerKph(), 0f);
+        scale.observe(20, true, 500, 4, 1_200, true, 300, 3);
+        scale.observe(20, true, 600, 5, 1_600, true, 400, 4);
+        scale.observe(20, true, 700, 6, 2_000, true, 500, 5);
+        assertEquals(3, scale.sampleCount());
+        assertEquals(80, scale.rawPerKph(), 0.001f);
+    }
+
     @Test public void invalidRoadSpeedCannotFreezeMovingOrCoastingEngineAtIdle() {
         AvasEngineMotorMapping.Scale front = new AvasEngineMotorMapping.Scale();
         AvasEngineMotorMapping.Scale rear = new AvasEngineMotorMapping.Scale();

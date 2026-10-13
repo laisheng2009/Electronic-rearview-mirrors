@@ -60,10 +60,6 @@ final class CameraCropOverlayView extends View {
         invalidate();
     }
 
-    DirectCameraCrop getCrop() {
-        return crop;
-    }
-
     void setGridVisible(boolean visible) {
         gridVisible = visible;
         invalidate();

@@ -31,6 +31,11 @@ public final class CameraSettingsTransfer {
     private static final int LEGACY_GEOMETRY_VERSION = 3;
     private static final int PREVIOUS_VERSION = 2;
     private static final int LEGACY_VERSION = 1;
+    private static final String[] MIRROR_CALIBRATION_SUFFIXES = {
+            "original_x", "original_y", "original_width", "original_height",
+            "correction", "fov", "projection", "corrected_x", "corrected_y",
+            "corrected_width", "corrected_height", "mirrored", "output_mode", "rotation"
+    };
     private static final String SETTINGS = "settings";
 
     interface GeometryResolver {
@@ -1096,15 +1101,11 @@ public final class CameraSettingsTransfer {
                 RearviewMirrorSettings.PREF_X, RearviewMirrorSettings.PREF_Y,
                 RearviewMirrorSettings.PREF_WIDTH, RearviewMirrorSettings.PREF_HEIGHT,
                 RearviewMirrorSettings.PREF_BORDER_DP,
-                RearviewMirrorSettings.PREF_BORDER_ARGB,
-                "mirror_original_x", "mirror_original_y", "mirror_original_width",
-                "mirror_original_height", "mirror_correction", "mirror_fov",
-                "mirror_projection", "mirror_corrected_x", "mirror_corrected_y",
-                "mirror_corrected_width", "mirror_corrected_height", "mirror_mirrored",
-                "mirror_output_mode", "mirror_rotation"};
+                RearviewMirrorSettings.PREF_BORDER_ARGB};
         for (String key : required) {
             if (!values.containsKey(key)) throw new IllegalArgumentException("incomplete mirror group");
         }
+        requireMirrorCalibrationKeys(values, "mirror_", "incomplete mirror group");
         if (values.containsKey(RearviewMirrorSettings.PREF_TARGET)) {
             String target = (String) values.get(RearviewMirrorSettings.PREF_TARGET);
             if (!"Tablet".equalsIgnoreCase(target) && !"Cluster".equalsIgnoreCase(target)) {
@@ -1145,23 +1146,26 @@ public final class CameraSettingsTransfer {
     }
 
     private static void requireOptionalFrontMirrorCalibration(Map<String, Object> values) {
-        String[] required = {
-                "mirror_front_original_x", "mirror_front_original_y",
-                "mirror_front_original_width", "mirror_front_original_height",
-                "mirror_front_correction", "mirror_front_fov", "mirror_front_projection",
-                "mirror_front_corrected_x", "mirror_front_corrected_y",
-                "mirror_front_corrected_width", "mirror_front_corrected_height",
-                "mirror_front_mirrored", "mirror_front_output_mode", "mirror_front_rotation"};
         boolean present = false;
-        for (String key : required) present |= values.containsKey(key);
-        if (!present) return;
-        for (String key : required) {
-            if (!values.containsKey(key)) {
-                throw new IllegalArgumentException("incomplete front mirror calibration");
-            }
+        for (String suffix : MIRROR_CALIBRATION_SUFFIXES) {
+            present |= values.containsKey("mirror_front_" + suffix);
         }
+        if (!present) return;
+        requireMirrorCalibrationKeys(
+                values, "mirror_front_", "incomplete front mirror calibration");
         requireMirrorCalibration(values, "mirror_front_original_",
                 "mirror_front_corrected_", "mirror_front_");
+    }
+
+    private static void requireMirrorCalibrationKeys(
+            Map<String, Object> values, String prefix, String error) {
+        for (String suffix : MIRROR_CALIBRATION_SUFFIXES) {
+            if (!values.containsKey(prefix + suffix)) throw new IllegalArgumentException(error);
+        }
+    }
+
+    private static void addMirrorCalibrationKeys(Set<String> keys, String prefix) {
+        for (String suffix : MIRROR_CALIBRATION_SUFFIXES) keys.add(prefix + suffix);
     }
 
     private static void requireMirrorCalibration(
@@ -1325,18 +1329,8 @@ public final class CameraSettingsTransfer {
         keys.add(RearviewMirrorSettings.PREF_SHOW_FRONT);
         addCorrectionKeys(keys, "mirror_");
         addCorrectionKeys(keys, "mirror_front_");
-        for (String key : new String[]{"mirror_original_x", "mirror_original_y",
-                "mirror_original_width", "mirror_original_height", "mirror_correction",
-                "mirror_fov", "mirror_projection", "mirror_corrected_x",
-                "mirror_corrected_y", "mirror_corrected_width", "mirror_corrected_height",
-                "mirror_mirrored", "mirror_output_mode", "mirror_rotation"}) keys.add(key);
-        for (String key : new String[]{"mirror_front_original_x", "mirror_front_original_y",
-                "mirror_front_original_width", "mirror_front_original_height",
-                "mirror_front_correction", "mirror_front_fov", "mirror_front_projection",
-                "mirror_front_corrected_x", "mirror_front_corrected_y",
-                "mirror_front_corrected_width", "mirror_front_corrected_height",
-                "mirror_front_mirrored", "mirror_front_output_mode",
-                "mirror_front_rotation"}) keys.add(key);
+        addMirrorCalibrationKeys(keys, "mirror_");
+        addMirrorCalibrationKeys(keys, "mirror_front_");
         for (CameraProfile profile : CameraProfile.values()) {
             for (int field = 0; field < 8; field++) keys.add(DirectCameraCrop.preferenceKey(profile, field));
             String corrected = "direct_crop_v3_corrected_" + profile.id + "_";
@@ -1420,14 +1414,6 @@ public final class CameraSettingsTransfer {
                 || key.equals(RearviewMirrorSettings.PREF_SUPPRESS_WHILE_PANORAMA)
                 || key.equals(RearviewMirrorSettings.PREF_FRONT_INTEGRATED)
                 || key.equals(RearviewMirrorSettings.PREF_SHOW_FRONT)
-                || key.startsWith("mirror_front_original_")
-                || key.startsWith("mirror_front_corrected_")
-                || key.equals("mirror_front_correction")
-                || key.equals("mirror_front_fov")
-                || key.equals("mirror_front_projection")
-                || key.equals("mirror_front_mirrored")
-                || key.equals("mirror_front_output_mode")
-                || key.equals("mirror_front_rotation")
                 || key.startsWith("mirror_") && !isBorderKey(key)
                 || key.matches("direct_crop_v3_corrected_[0-9]+_aspect")
                 || key.startsWith("parking_direct_crop_v1_") && key.endsWith("_corrected_aspect"));

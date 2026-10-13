@@ -102,11 +102,6 @@ final class ReverseCameraEditorView extends View {
         invalidate();
     }
 
-    void setVisibilityMask(int value) {
-        visibilityMask = ReverseCameraLayout.requireVisibilityMask(value);
-        invalidate();
-    }
-
     void setWidgetVisible(boolean value) {
         widgetVisible = value;
         invalidate();
@@ -131,16 +126,6 @@ final class ReverseCameraEditorView extends View {
         if (paneId == ReverseCameraLayout.BACKGROUND_PANE_ID
                 || paneId == ReverseCameraLayout.WIDGET_PANE_ID) return true;
         return paneId == selectedCamera || ReverseCameraLayout.isVisible(visibilityMask, paneId);
-    }
-
-    void selectCamera(int cameraIndex) {
-        if (cameraIndex != ReverseCameraLayout.BACKGROUND_PANE_ID
-                && cameraIndex != ReverseCameraLayout.WIDGET_PANE_ID) {
-            layout.pane(cameraIndex);
-        }
-        selectedCamera = cameraIndex;
-        invalidate();
-        notifyChanged(false);
     }
 
     int selectedCamera() {

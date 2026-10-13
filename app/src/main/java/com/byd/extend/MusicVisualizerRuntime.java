@@ -710,10 +710,6 @@ final class MusicVisualizerRuntime {
         return !pending && attempts < MAX_STOP_RETRIES;
     }
 
-    static boolean shouldAttemptStop(boolean outputActive, boolean retryExhausted) {
-        return outputActive && !retryExhausted;
-    }
-
     static boolean shouldCancelStopRetry(
             boolean mediaActive, boolean enabled, boolean awake, boolean mustComplete) {
         return !mustComplete && mediaActive && enabled && awake;

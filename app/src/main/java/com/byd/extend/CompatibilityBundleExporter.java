@@ -9,6 +9,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -563,10 +565,6 @@ final class CompatibilityBundleExporter {
         return "byd-extend-compatibility-" + format.format(new Date(createdAtMillis)) + ".zip";
     }
 
-    static String catCommandForTest(String path) {
-        return catCommand(path);
-    }
-
     static boolean isAllowedRemotePath(String path) {
         if (path == null || path.isEmpty() || path.indexOf('\0') >= 0
                 || path.contains("..") || !path.startsWith("/")) return false;
@@ -1035,7 +1033,7 @@ final class CompatibilityBundleExporter {
                 || lower.contains("denied") || lower.equals("shell_exit_13");
     }
 
-    private static File nextAvailableFile(File directory, String preferredName) {
+    static File nextAvailableFile(File directory, String preferredName) {
         File preferred = new File(directory, preferredName);
         if (!preferred.exists() && !new File(preferred.getPath() + ".part").exists()) return preferred;
         int extension = preferredName.lastIndexOf('.');
@@ -1059,18 +1057,7 @@ final class CompatibilityBundleExporter {
     }
 
     private static String quote(String value) {
-        if (value == null) return "null";
-        StringBuilder escaped = new StringBuilder(value.length() + 2).append('"');
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            if (c == '"') escaped.append("\\\"");
-            else if (c == '\\') escaped.append("\\\\");
-            else if (c == '\n') escaped.append("\\n");
-            else if (c == '\r') escaped.append("\\r");
-            else if (c == '\t') escaped.append("\\t");
-            else escaped.append(c);
-        }
-        return escaped.append('"').toString();
+        return value == null ? "null" : JSONObject.quote(value);
     }
 
     private static String summary(Throwable error) {

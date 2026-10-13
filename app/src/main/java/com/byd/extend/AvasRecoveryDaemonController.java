@@ -184,13 +184,12 @@ final class AvasRecoveryDaemonController implements AutoCloseable {
     private String readinessCancellationReason(long generation) {
         synchronized (this) {
             return readinessCancellationReason(
-                    closed, desiredRequired, desiredGeneration == generation, false);
+                    closed, desiredRequired, desiredGeneration == generation);
         }
     }
 
     static String readinessCancellationReason(
-            boolean stopped, boolean required, boolean currentGeneration, boolean interrupted) {
-        if (interrupted) return "interrupted";
+            boolean stopped, boolean required, boolean currentGeneration) {
         if (stopped) return "stopped";
         if (!required) return "not_required";
         return currentGeneration ? null : "superseded";

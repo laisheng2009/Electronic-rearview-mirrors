@@ -476,20 +476,6 @@ final class ReverseCameraLayout {
                 width, height);
     }
 
-    static float[] rotatedSourceCropTransform(
-            Rect crop, int destinationWidth, int destinationHeight,
-            int sourceWidth, int sourceHeight, int rotationDegrees, boolean fill) {
-        if (crop == null || destinationWidth <= 0 || destinationHeight <= 0
-                || sourceWidth <= 0 || sourceHeight <= 0) {
-            throw new IllegalArgumentException("positive crop and bounds are required");
-        }
-        return CameraRotation.sourceAwareProportionalTransformValues(
-                crop.left, crop.top, crop.width, crop.height,
-                0.0f, 0.0f, destinationWidth, destinationHeight,
-                rotationDegrees, fill ? CameraRotation.MODE_FILL : CameraRotation.MODE_FIT,
-                sourceWidth, sourceHeight, destinationWidth, destinationHeight, false);
-    }
-
     private static float rotatedAspect(float width, float height, int rotationDegrees) {
         double radians = Math.toRadians(CameraRotation.clamp(rotationDegrees));
         double cosine = Math.abs(Math.cos(radians));

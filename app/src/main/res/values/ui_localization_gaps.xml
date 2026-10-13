@@ -27,11 +27,8 @@
     <string name="ui_gap_024">"Drag the widget. Hold for 1 second to hide it."</string>
     <string name="ui_gap_025">"Show expanding Retry action (editor)"</string>
     <string name="ui_gap_026">"Reminder hidden"</string>
-    <string name="ui_gap_027">"Retry"</string>
-    <string name="ui_gap_028">"Waiting for Wi-Fi to restore ADB"</string>
     <string name="ui_gap_029">"Frame color"</string>
     <string name="ui_gap_030">"Stop"</string>
-    <string name="ui_gap_031">"Keep camera visible"</string>
     <string name="ui_gap_032">"Permissions"</string>
     <string name="ui_gap_033">"Skipping simultaneous lock/unlock sounds is configured separately for Power on and Power off."</string>
     <string name="ui_gap_034">"Skip simultaneous lock/unlock sound"</string>
@@ -55,7 +52,6 @@
     <string name="ui_gap_052">"Hold"</string>
     <string name="ui_gap_053">"Double"</string>
     <string name="ui_gap_054">"The assigned button and selected gesture will show or hide the mirror widget."</string>
-    <string name="ui_gap_055">"Element display"</string>
     <string name="ui_gap_056">"Save extended logs"</string>
     <string name="ui_gap_057">"May increase CPU load and storage use."</string>
     <string name="ui_gap_058">"Record logcat"</string>
@@ -68,11 +64,6 @@
     <string name="ui_gap_065">"Wheel press"</string>
     <string name="ui_gap_066" formatted="false">"0% visible, 100% invisible"</string>
     <string name="ui_gap_067">"Check after installing or updating; otherwise DiLink may stop BYD Extend in the background."</string>
-    <string name="ui_gap_068">"Rear Left"</string>
-    <string name="ui_gap_069">"Rear Right"</string>
-    <string name="ui_gap_070">"Front Left"</string>
-    <string name="ui_gap_071">"Front Right"</string>
-    <string name="ui_gap_072">"Enable rear cameras"</string>
     <string name="ui_gap_073">"Enable front cameras"</string>
     <string name="ui_gap_074">"Importing…"</string>
     <string name="ui_gap_075">"Add files…"</string>

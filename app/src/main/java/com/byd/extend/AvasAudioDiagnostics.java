@@ -62,7 +62,6 @@ final class AvasAudioDiagnostics {
         }
 
         void progress() { progress = true; }
-        boolean hasProgress() { return progress; }
     }
 
     /** Levels of accepted source samples, not measurements after the native effect or speaker. */

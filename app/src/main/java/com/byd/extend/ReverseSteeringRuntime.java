@@ -223,7 +223,7 @@ final class ReverseSteeringRuntime {
             updateCapability(callbackAvailable ? "" : "source_unavailable: "
                     + summary(failure));
             warnOnce(failure);
-            invalidate("read_unavailable", summary(failure));
+            if (!callbackAvailable) invalidate("read_unavailable", summary(failure));
         }
     }
 

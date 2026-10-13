@@ -41,6 +41,16 @@ final class AvasEngineTelemetry implements AutoCloseable {
     private final long[] receivedAt = new long[fids.length];
     private final AvasEngineMotorMapping.Scale frontScale = new AvasEngineMotorMapping.Scale();
     private final AvasEngineMotorMapping.Scale rearScale = new AvasEngineMotorMapping.Scale();
+    private AvasEngineModel.State latestState;
+    private float latestRoadSpeedKph;
+    private float latestMotionKph;
+    private String latestMotionSource = "unavailable";
+    private boolean latestSpeedValid;
+    private boolean latestSelectorValid;
+    private boolean latestPedalValid;
+    private boolean latestBrakeValid;
+    private boolean latestFrontValid;
+    private boolean latestRearValid;
     private volatile boolean closed;
     private volatile boolean enabled;
     private volatile long generation;
@@ -158,11 +168,21 @@ final class AvasEngineTelemetry implements AutoCloseable {
         }
     }
 
-    AvasEngineModel.State update(AvasEngineModel model, long now) {
-        return updateSnapshot(model, now).state;
+    synchronized AvasEngineModel.State update(AvasEngineModel model, long now) {
+        updateState(model, now);
+        return latestState;
     }
 
     synchronized Snapshot updateSnapshot(AvasEngineModel model, long now) {
+        updateState(model, now);
+        return new Snapshot(latestState, values, available, sources, latestSpeedValid,
+                latestSelectorValid, latestPedalValid, latestBrakeValid,
+                latestFrontValid, latestRearValid, latestRoadSpeedKph,
+                latestMotionKph, latestMotionSource, frontScale.rawPerKph(),
+                frontScale.sampleCount(), rearScale.rawPerKph(), rearScale.sampleCount());
+    }
+
+    private void updateState(AvasEngineModel model, long now) {
         float roadSpeed = available[0] ? Float.intBitsToFloat(values[0]) : Float.NaN;
         boolean speedValid = available[0] && available[1] && values[1] == 1
                 && Float.isFinite(roadSpeed) && roadSpeed >= 0 && roadSpeed <= 300;
@@ -183,13 +203,18 @@ final class AvasEngineTelemetry implements AutoCloseable {
         AvasEngineMotorMapping.Motion motion = AvasEngineMotorMapping.select(
                 roadSpeed, speedValid, values[7], frontValid, frontScale,
                 values[8], rearValid, rearScale);
-        AvasEngineModel.State state = model.update(now, motion.speedKph,
+        latestState = model.update(now, motion.speedKph,
                 Float.isFinite(motion.speedKph), values[2], pedalValid,
                 values[4], brakeValid, values[6], selectorValid);
-        return new Snapshot(state, values, available, sources, speedValid, selectorValid,
-                pedalValid, brakeValid, frontValid, rearValid, roadSpeed,
-                motion.speedKph, motion.source, frontScale.rawPerKph(),
-                frontScale.sampleCount(), rearScale.rawPerKph(), rearScale.sampleCount());
+        latestRoadSpeedKph = roadSpeed;
+        latestMotionKph = motion.speedKph;
+        latestMotionSource = motion.source;
+        latestSpeedValid = speedValid;
+        latestSelectorValid = selectorValid;
+        latestPedalValid = pedalValid;
+        latestBrakeValid = brakeValid;
+        latestFrontValid = frontValid;
+        latestRearValid = rearValid;
     }
 
     static boolean percentValid(int value, int valid) {

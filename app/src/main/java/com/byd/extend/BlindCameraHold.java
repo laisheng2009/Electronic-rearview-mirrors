@@ -4,7 +4,6 @@ import java.util.Arrays;
 
 /** Per-pane elapsed-realtime deadlines, separate from normal speed/angle/BSD eligibility. */
 final class BlindCameraHold {
-    static final long DURATION_MS = 3_000;
     static final int MIN_DURATION_SECONDS = 1;
     static final int MAX_DURATION_SECONDS = 5;
     private final long[] until = new long[CameraProfile.COUNT];

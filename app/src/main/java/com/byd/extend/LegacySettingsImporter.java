@@ -245,18 +245,6 @@ final class LegacySettingsImporter {
         emit(events, "legacy_handover_complete", "keys", values.size());
     }
 
-    static String legacyReadCommandForTest() {
-        return LEGACY_READ_COMMAND;
-    }
-
-    static String legacyForceStopCommand() {
-        return LEGACY_FORCE_STOP_COMMAND;
-    }
-
-    static String legacyEnableCommand() {
-        return LEGACY_ENABLE_COMMAND;
-    }
-
     /** Fixed old helper cleanup; do not derive these names from the renamed package. */
     static String legacyHelperCleanupCommand() {
         return "for pid in $(pidof " + LEGACY_TURN_HELPER
@@ -297,10 +285,6 @@ final class LegacySettingsImporter {
         LegacyPackageState state = legacyPackageState(manager);
         return state == LegacyPackageState.ENABLED_STOPPED
                 || state == LegacyPackageState.ENABLED_RUNNING;
-    }
-
-    static boolean isLegacyPackageStopped(PackageManager manager) {
-        return legacyPackageState(manager) == LegacyPackageState.ENABLED_STOPPED;
     }
 
     /** True when a completed import needs explicit access repair (including a retryable repair). */

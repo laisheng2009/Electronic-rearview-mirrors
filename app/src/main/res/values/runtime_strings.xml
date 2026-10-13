@@ -66,19 +66,12 @@
     <string name="runtime_logs_cleared">Logs cleared: %1$d</string>
     <string name="runtime_logs_clear_failed">Could not clear the logs.</string>
     <string name="runtime_logs_clear_partial">Cleared %1$d; could not delete %2$d</string>
-    <string name="runtime_update_available">Update available</string>
-    <string name="runtime_update">Update</string>
     <string name="runtime_update_checking">Checking for updates…</string>
     <string name="runtime_update_check_button">Checking…</string>
     <string name="runtime_up_to_date">The latest version is installed</string>
     <string name="runtime_update_available_version">Version %1$s is available</string>
-    <string name="runtime_update_download_title">Update %1$s</string>
-    <string name="runtime_update_download">Download: %1$d%%</string>
-    <string name="runtime_update_failed">Could not update the app</string>
     <string name="runtime_update_check_error">Update check failed</string>
     <string name="runtime_update_later">Close</string>
-    <string name="runtime_installed_version">Installed version: %1$s</string>
-    <string name="runtime_available_version">Available version: %1$s</string>
     <string name="runtime_car_compat_title">Vehicle compatibility package</string>
     <string name="runtime_car_compat_message">The package may contain large proprietary BYD/DiLink files, system metadata, and private technical data. Creation is best effort: unavailable files are marked but do not stop the archive. Share it only through a trusted channel.</string>
     <string name="runtime_car_compat_prepare">Preparing…</string>
@@ -164,7 +157,6 @@
     <string name="runtime_status_waiting_helper">Waiting for internal service…</string>
     <string name="runtime_status_telemetry_ready">Telemetry ready</string>
     <string name="runtime_status_telemetry_error">Telemetry error: %1$s</string>
-    <string name="runtime_status_helper_error">Helper error: %1$s</string>
     <string name="runtime_status_helper_restarting">Helper restarting: %1$s</string>
     <string name="runtime_status_guard_active">Guard active</string>
     <string name="runtime_status_guard_paused">Guard paused: %1$s</string>

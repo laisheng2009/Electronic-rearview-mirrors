@@ -538,10 +538,6 @@ final class ReverseCameraCompositionView extends FrameLayout {
         finishOutputSetUpdate(previousSources);
     }
 
-    static float alphaForVisibility(int mask, int paneId) {
-        return ReverseCameraLayout.isVisible(mask, paneId) ? 1.0f : 0.0f;
-    }
-
     void setDewarpStatsContext(int requestId, int[] generations) {
         int[] sources = outputSourceIndexes();
         if (generations == null || generations.length != sources.length) return;
@@ -622,11 +618,6 @@ final class ReverseCameraCompositionView extends FrameLayout {
         return samePaneGeometry(
                 model, paneBufferViewportWidth, paneBufferViewportHeight,
                 layout, viewportWidth, viewportHeight, displayTarget);
-    }
-
-    boolean usesPaneBoundedBuffers(
-            ReverseCameraLayout layout, int viewportWidth, int viewportHeight, int quality) {
-        return firstPaneBufferMismatch(layout, viewportWidth, viewportHeight, quality) == null;
     }
 
     /** Returns the first retained pane-buffer comparison that does not match the requested spec. */
@@ -742,14 +733,6 @@ final class ReverseCameraCompositionView extends FrameLayout {
                     || currentBounds[i][1] != nextBounds[i][1]) return false;
         }
         return true;
-    }
-
-    void setEditorRawMirror(int cameraIndex, SurfaceTexture texture) {
-        paneForCamera(cameraIndex).texture.setRawMirrorTexture(texture);
-    }
-
-    void setEditorCorrectedMirror(int cameraIndex, SurfaceTexture texture) {
-        paneForCamera(cameraIndex).texture.setCorrectedMirrorTexture(texture);
     }
 
     boolean editorUsesRawFallback(int cameraIndex) {
@@ -1033,16 +1016,20 @@ final class ReverseCameraCompositionView extends FrameLayout {
                         if (centralFrontDiscardNextFrame) {
                             centralFrontDiscardNextFrame = false;
                         } else {
+                            boolean wasReady = centralFrontFrameReady && pane.frameFresh;
                             centralFrontFrameReady = true;
                             pane.frameFresh = fresh;
                             pane.cover.setVisibility(View.GONE);
-                            applyEffectiveVisibility();
+                            if (wasReady != (centralFrontFrameReady && pane.frameFresh)) {
+                                applyEffectiveVisibility();
+                            }
                         }
                     }
                 } else if (fresh) {
+                    boolean becameReady = !pane.frameFresh;
                     pane.frameFresh = true;
                     pane.cover.setVisibility(View.GONE);
-                    applyEffectiveVisibility();
+                    if (becameReady) applyEffectiveVisibility();
                 }
                 acceptFrame(sourceIndex,
                         previewBase == null ? pane.generation : inputGeneration);

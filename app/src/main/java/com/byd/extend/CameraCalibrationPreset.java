@@ -90,32 +90,6 @@ final class CameraCalibrationPreset {
                         tabletTopMargin, tabletBottomMargin));
     }
 
-    static void resetCameraToDefault(
-            SharedPreferences preferences, CameraProfile profile, int target,
-            int tabletWidth, int tabletHeight,
-            int tabletMarginX, int tabletTopMargin, int tabletBottomMargin) {
-        CameraPlacement placement = BlindSpotOverlayController.defaultPlacement(profile, target,
-                tabletWidth, tabletHeight, tabletMarginX,
-                tabletTopMargin, tabletBottomMargin);
-        resetCameraCalibrationToDefault(preferences, profile);
-        BlindSpotOverlayController.writePlacement(preferences, profile, target, placement);
-    }
-
-    private static void resetCameraCalibrationToDefault(
-            SharedPreferences preferences, CameraProfile profile) {
-        if (profile == null) throw new IllegalArgumentException("camera profile required");
-        DirectCameraCrop raw = DirectCameraCrop.defaultFor(profile);
-        SharedPreferences.Editor editor = preferences.edit();
-        BlindSpotOverlayController.pinFrameAspect(editor, preferences, profile);
-        DirectCameraCrop.write(editor, profile, raw);
-        DirectCameraCrop.writeCorrected(editor, profile,
-                DirectCameraCrop.defaultCorrectedFor(profile, raw));
-        editor.remove(DirectCameraCrop.correctedAspectKey(profile));
-        CameraDewarpConfig.writeForProfile(
-                editor, profile, CameraDewarpConfig.defaultForProfile(profile));
-        editor.apply();
-    }
-
     static boolean hasParking(SharedPreferences preferences, ParkingCameraProfile profile) {
         try {
             return preferences.getInt(parkingPrefix(profile) + "version", 0) == VERSION;
@@ -417,33 +391,6 @@ final class CameraCalibrationPreset {
         return ReverseCameraLayout.sourceCrop(crop.left, crop.top, crop.width, crop.height);
     }
 
-    static void resetReverseToDefault(SharedPreferences preferences, int cameraIndex) {
-        ReverseCameraLayout.Pane pane = ReverseCameraLayout.defaults().pane(cameraIndex);
-        SharedPreferences.Editor editor = preferences.edit()
-                .putFloat(ReverseCameraController.paneSettingKey(cameraIndex, "left"),
-                        pane.destination.left)
-                .putFloat(ReverseCameraController.paneSettingKey(cameraIndex, "top"),
-                        pane.destination.top)
-                .putFloat(ReverseCameraController.paneSettingKey(cameraIndex, "width"),
-                        pane.destination.width)
-                .putFloat(ReverseCameraController.paneSettingKey(cameraIndex, "height"),
-                        pane.destination.height)
-                .putInt(ReverseCameraController.paneSettingKey(
-                        cameraIndex, "rotation_degrees"), pane.rotationDegrees)
-                .putInt(ReverseCameraController.displayModeKey(
-                        cameraIndex), pane.displayMode)
-                .putBoolean(ReverseCameraController.mirrorKey(
-                        cameraIndex), pane.mirrorHorizontally)
-                .putBoolean(ReverseCameraController.visibilityKey(
-                        cameraIndex), ReverseCameraController.DEFAULT_VISIBLE);
-        ReverseCameraController.writeSourceCrop(editor, cameraIndex, pane.sourceCrop, false);
-        ReverseCameraController.writeSourceCrop(editor, cameraIndex,
-                ReverseCameraController.defaultCorrectedSourceCrop(cameraIndex), true);
-        CameraDewarpConfig.writeForReverse(
-                editor, cameraIndex, CameraDewarpConfig.defaultForReverse(cameraIndex));
-        editor.apply();
-    }
-
     static int reverseMirrorTarget(int cameraIndex) {
         if (cameraIndex == ReverseCameraLayout.REAR_LEFT_CAMERA_INDEX) {
             return ReverseCameraLayout.REAR_RIGHT_CAMERA_INDEX;
@@ -516,11 +463,6 @@ final class CameraCalibrationPreset {
         } catch (RuntimeException invalidPreset) {
             return false;
         }
-    }
-
-    static void resetReverseFrontToDefault(
-            SharedPreferences preferences, int cameraIndex) {
-        ReverseCameraController.resetFrontCalibrationToDefault(preferences, cameraIndex);
     }
 
     static boolean mirrorReverseFront(

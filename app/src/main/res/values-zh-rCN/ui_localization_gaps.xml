@@ -27,11 +27,8 @@
     <string name="ui_gap_024">"拖动悬浮窗。长按 1 秒可隐藏。"</string>
     <string name="ui_gap_025">"显示展开式重试按钮（编辑器）"</string>
     <string name="ui_gap_026">"提醒已隐藏"</string>
-    <string name="ui_gap_027">"重试"</string>
-    <string name="ui_gap_028">"正在等待 Wi-Fi 以恢复 ADB"</string>
     <string name="ui_gap_029">"边框颜色"</string>
     <string name="ui_gap_030">"停止"</string>
-    <string name="ui_gap_031">"延时隐藏摄像头"</string>
     <string name="ui_gap_032">"权限"</string>
     <string name="ui_gap_033">"可分别为上电和下电设置是否跳过同时触发的解锁/锁车声音。"</string>
     <string name="ui_gap_034">"跳过同时触发的解锁/锁车声音"</string>
@@ -55,7 +52,6 @@
     <string name="ui_gap_052">"长按"</string>
     <string name="ui_gap_053">"双击"</string>
     <string name="ui_gap_054">"所选按键和手势将显示或隐藏后视镜悬浮窗。"</string>
-    <string name="ui_gap_055">"Element display"</string>
     <string name="ui_gap_056">"保存扩展日志"</string>
     <string name="ui_gap_057">"可能会增加 CPU 负载和存储空间占用。"</string>
     <string name="ui_gap_058">"记录 logcat"</string>
@@ -68,11 +64,6 @@
     <string name="ui_gap_065">"滚轮按下"</string>
     <string name="ui_gap_066" formatted="false">"0% 可见，100% 不可见"</string>
     <string name="ui_gap_067">"安装或更新后请检查此设置，否则 DiLink 可能会停止后台运行的 BYD Extend。"</string>
-    <string name="ui_gap_068">"Rear Left"</string>
-    <string name="ui_gap_069">"Rear Right"</string>
-    <string name="ui_gap_070">"Front Left"</string>
-    <string name="ui_gap_071">"Front Right"</string>
-    <string name="ui_gap_072">""</string>
     <string name="ui_gap_073">""</string>
     <string name="ui_gap_074">"正在导入…"</string>
     <string name="ui_gap_075">"添加文件…"</string>

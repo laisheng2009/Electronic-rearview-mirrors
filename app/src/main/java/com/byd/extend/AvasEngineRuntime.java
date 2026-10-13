@@ -61,7 +61,6 @@ final class AvasEngineRuntime implements AutoCloseable {
         if (closed) return;
         AvasConfig.Engine previous = config;
         config = next;
-        telemetry.setEnabled(next.enabled && hasOutput(next));
         readiness.setEnabled(next.enabled && hasOutput(next));
         AvasEngineSessionPolicy.Action action = policy.configure(next.enabled, hasOutput(next), next.buttonOnly);
         persistChoice();
@@ -191,6 +190,7 @@ final class AvasEngineRuntime implements AutoCloseable {
         Session next = new Session(config, ignition);
         if (ignition) next.cue = cueGate.begin();
         current = next;
+        telemetry.setEnabled(true);
         setState("starting", "");
         render.execute(() -> run(next));
     }
@@ -261,17 +261,20 @@ final class AvasEngineRuntime implements AutoCloseable {
                     cue = 2;
                 } else if (intro != null && introAt < intro.length) {
                     frames = Math.min(frames, intro.length - introAt);
-                    AvasEngineModel.State drive = telemetry.updateSnapshot(
-                            model, SystemClock.elapsedRealtime()).state;
+                    AvasEngineModel.State drive = telemetry.update(model,
+                            SystemClock.elapsedRealtime());
                     synth.renderStart(block, frames, introAt, drive.rpm, drive.load);
                     introAt += frames;
                     cue = 1;
                 } else {
                     long now = SystemClock.elapsedRealtime();
-                    AvasEngineTelemetry.Snapshot snapshot = telemetry.updateSnapshot(model, now);
-                    AvasEngineModel.State drive = snapshot.state;
+                    boolean logMotion = now - lastLog >= 5000;
+                    AvasEngineTelemetry.Snapshot snapshot = logMotion
+                            ? telemetry.updateSnapshot(model, now) : null;
+                    AvasEngineModel.State drive = snapshot == null
+                            ? telemetry.update(model, now) : snapshot.state;
                     synth.render(block, 0, frames, drive.rpm, drive.load);
-                    if (now - lastLog >= 5000) {
+                    if (logMotion) {
                         AvasConfig.Engine settings = config;
                         log("avas_engine_motion", "pack", pack.id,
                                 "rpm", drive.rpm, "load", drive.load,
@@ -411,6 +414,7 @@ final class AvasEngineRuntime implements AutoCloseable {
                         }
                         setState(failure.isEmpty() ? "stopped" : "error", failure);
                         apply(recovery);
+                        if (current == null) telemetry.setEnabled(false);
                     }
                 }
             }

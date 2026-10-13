@@ -440,6 +440,7 @@ final class DirectCameraSourceHub
         final int[] targetHeights = new int[8];
         final int[] queriedSize = new int[1];
         final AtomicBoolean sourceFailureReported = new AtomicBoolean();
+        final Runnable renderTask = this::render;
         boolean renderQueued;
         int pendingFrameSignals;
         long firstPendingSignalNs = -1L;
@@ -610,7 +611,8 @@ final class DirectCameraSourceHub
                     new int[]{EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE}, 0);
             require(idleSurface != EGL14.EGL_NO_SURFACE, "EGL idle surface failed");
             makeCurrent(idleSurface);
-            program = linkProgram(VERTEX_SHADER, SNAPSHOT_FRAGMENT_SHADER);
+            program = CameraDewarpRenderer.linkProgram(
+                    VERTEX_SHADER, SNAPSHOT_FRAGMENT_SHADER);
             positionLocation = GLES20.glGetAttribLocation(program, "aPosition");
             texCoordLocation = GLES20.glGetAttribLocation(program, "aTexCoord");
             matrixLocation = GLES20.glGetUniformLocation(program, "uTextureMatrix");
@@ -710,7 +712,7 @@ final class DirectCameraSourceHub
                 post = !renderQueued;
                 renderQueued = true;
             }
-            if (post) handler.post(this::render);
+            if (post) handler.post(renderTask);
         }
 
         private void render() {
@@ -1146,31 +1148,6 @@ final class DirectCameraSourceHub
                 .order(ByteOrder.nativeOrder()).asFloatBuffer();
         result.put(values).position(0);
         return result;
-    }
-
-    static int linkProgram(String vertexSource, String fragmentSource) {
-        int vertex = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
-        int fragment = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
-        int result = GLES20.glCreateProgram();
-        GLES20.glAttachShader(result, vertex);
-        GLES20.glAttachShader(result, fragment);
-        GLES20.glLinkProgram(result);
-        int[] linked = new int[1];
-        GLES20.glGetProgramiv(result, GLES20.GL_LINK_STATUS, linked, 0);
-        GLES20.glDeleteShader(vertex);
-        GLES20.glDeleteShader(fragment);
-        require(linked[0] != 0, "GPU fanout program link failed");
-        return result;
-    }
-
-    private static int compileShader(int type, String source) {
-        int shader = GLES20.glCreateShader(type);
-        GLES20.glShaderSource(shader, source);
-        GLES20.glCompileShader(shader);
-        int[] compiled = new int[1];
-        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0);
-        require(compiled[0] != 0, "GPU fanout shader compile failed");
-        return shader;
     }
 
     private static void requireIndex(int index) {

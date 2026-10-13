@@ -71,12 +71,6 @@ final class AvasNotificationAccess {
         return false;
     }
 
-    static boolean grantedForApi(
-            int sdk, boolean frameworkGranted, String enabledListeners, String exactComponent) {
-        return sdk >= 27 ? frameworkGranted
-                : exactComponentEnabled(enabledListeners, exactComponent);
-    }
-
     static String grantCommand(int userId, String exactComponent) {
         return "cmd notification allow_listener " + exactComponent + " " + userId;
     }

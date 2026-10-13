@@ -7,11 +7,16 @@ import android.os.Parcel;
 /** Fixed four-signal guard telemetry transport; it exposes no caller-selected FIDs. */
 final class TurnSignalTelemetryTransport implements TurnSignalTelemetryController.Transport {
     private static final FixedBydTelemetryManager.Request[] REQUESTS = {
-            new FixedBydTelemetryManager.Request(1004, 321912876, 950009900),
-            new FixedBydTelemetryManager.Request(1001,
-                    FixedBydTelemetryManager.ValueType.FLOAT, 300941320),
-            new FixedBydTelemetryManager.Request(1013,
-                    FixedBydTelemetryManager.ValueType.FLOAT, -1807745016)
+            new FixedBydTelemetryManager.Request(
+                    TurnSignalTelemetryController.STALK_DEVICE,
+                    TurnSignalTelemetryController.STALK_FID,
+                    TurnSignalTelemetryController.BLINK_FID),
+            new FixedBydTelemetryManager.Request(TurnSignalTelemetryController.STEERING_DEVICE,
+                    FixedBydTelemetryManager.ValueType.FLOAT,
+                    TurnSignalTelemetryController.STEERING_FID),
+            new FixedBydTelemetryManager.Request(TurnSignalTelemetryController.SPEED_DEVICE,
+                    FixedBydTelemetryManager.ValueType.FLOAT,
+                    TurnSignalTelemetryController.SPEED_FID)
     };
 
     private final Context context;
@@ -43,8 +48,14 @@ final class TurnSignalTelemetryTransport implements TurnSignalTelemetryControlle
 
     @Override public TurnSignalTelemetryController.Snapshot read() {
         return new TurnSignalTelemetryController.Snapshot(
-                readInt(1004, 321912876), readInt(1001, 300941320),
-                readInt(1004, 950009900), readInt(1013, -1807745016));
+                readInt(TurnSignalTelemetryController.STALK_DEVICE,
+                        TurnSignalTelemetryController.STALK_FID),
+                readInt(TurnSignalTelemetryController.STEERING_DEVICE,
+                        TurnSignalTelemetryController.STEERING_FID),
+                readInt(TurnSignalTelemetryController.BLINK_DEVICE,
+                        TurnSignalTelemetryController.BLINK_FID),
+                readInt(TurnSignalTelemetryController.SPEED_DEVICE,
+                        TurnSignalTelemetryController.SPEED_FID));
     }
 
     private int readInt(int device, int fid) {
@@ -55,7 +66,8 @@ final class TurnSignalTelemetryTransport implements TurnSignalTelemetryControlle
             data.writeInterfaceToken(binder.getInterfaceDescriptor());
             data.writeInt(device);
             data.writeInt(fid);
-            if (!binder.transact(device == 1001 || device == 1013 ? 7 : 5,
+            if (!binder.transact(device == TurnSignalTelemetryController.STEERING_DEVICE
+                            || device == TurnSignalTelemetryController.SPEED_DEVICE ? 7 : 5,
                     data, reply, 0) || reply.dataAvail() < 8) {
                 return TurnSignalTelemetryController.MISSING;
             }

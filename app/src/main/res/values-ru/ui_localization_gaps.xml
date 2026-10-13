@@ -27,11 +27,8 @@
     <string name="ui_gap_024">"Перетащите виджет. Удерживайте 1 секунду, чтобы скрыть."</string>
     <string name="ui_gap_025">"Показать раскрывающуюся кнопку повтора (редактор)"</string>
     <string name="ui_gap_026">"Напоминание скрыто"</string>
-    <string name="ui_gap_027">"Повторить"</string>
-    <string name="ui_gap_028">"Ожидание Wi-Fi для восстановления ADB"</string>
     <string name="ui_gap_029">"Цвет рамки"</string>
     <string name="ui_gap_030">"Стоп"</string>
-    <string name="ui_gap_031">"Удерживать камеру"</string>
     <string name="ui_gap_032">"Разрешения"</string>
     <string name="ui_gap_033">"Пропуск одновременного звука открытия/закрытия настраивается отдельно для включения и выключения."</string>
     <string name="ui_gap_034">"Пропускать одновременный звук\nоткрытия/закрытия"</string>
@@ -55,7 +52,6 @@
     <string name="ui_gap_052">"Удержание"</string>
     <string name="ui_gap_053">"Двойное"</string>
     <string name="ui_gap_054">"Назначенная кнопка будет показывать или скрывать виджет зеркала в соответствии с выбранным жестом."</string>
-    <string name="ui_gap_055">"Дисплей элемента"</string>
     <string name="ui_gap_056">"Сохранять расширенные логи"</string>
     <string name="ui_gap_057">"Может увеличить нагрузку на процессор и использование хранилища."</string>
     <string name="ui_gap_058">"Записывать logcat"</string>
@@ -68,11 +64,6 @@
     <string name="ui_gap_065">"Нажатие колёсика"</string>
     <string name="ui_gap_066" formatted="false">"0% — видимый, 100% — невидимый"</string>
     <string name="ui_gap_067">"Проверьте после установки или обновления, иначе DiLink может остановить BYD Extend в фоновом режиме."</string>
-    <string name="ui_gap_068">"Задняя левая"</string>
-    <string name="ui_gap_069">"Задняя правая"</string>
-    <string name="ui_gap_070">"Передняя левая"</string>
-    <string name="ui_gap_071">"Передняя правая"</string>
-    <string name="ui_gap_072">"Включить задние камеры"</string>
     <string name="ui_gap_073">"Включить передние камеры"</string>
     <string name="ui_gap_074">"Импортирование…"</string>
     <string name="ui_gap_075">"Добавить файлы…"</string>

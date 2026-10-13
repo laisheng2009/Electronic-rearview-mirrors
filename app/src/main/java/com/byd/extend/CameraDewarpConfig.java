@@ -359,11 +359,6 @@ final class CameraDewarpConfig {
                 lens, value, fovDegrees, projection, roiCenterX, roiCenterY, strengthPercent, preciseFovDegrees);
     }
 
-    CameraDewarpConfig withFov(int value) {
-        return new CameraDewarpConfig(
-                lens, enabled, value, projection, roiCenterX, roiCenterY, strengthPercent, Float.NaN);
-    }
-
     CameraDewarpConfig withProjection(int value) {
         return new CameraDewarpConfig(
                 lens, enabled, fovDegrees, value, roiCenterX, roiCenterY, strengthPercent, preciseFovDegrees);

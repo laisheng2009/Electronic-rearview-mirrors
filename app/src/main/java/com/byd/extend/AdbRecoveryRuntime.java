@@ -122,10 +122,6 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         enqueue(available ? Reason.RECONFIGURE : Reason.ADB_FAILURE);
     }
 
-    public void onAdbFailure() {
-        enqueue(Reason.ADB_FAILURE);
-    }
-
     public void onPermissionsChecked() { enqueue(Reason.RECONFIGURE); }
 
     /** Called after the UI's one-second hold; suppression is persisted for this cycle. */

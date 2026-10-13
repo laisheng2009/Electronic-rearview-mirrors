@@ -45,7 +45,7 @@ final class MusicMetadataRuntime {
     static final long PUBLISH_DEBOUNCE_MS = 750;
     static final long SESSION_REPAIR_DEBOUNCE_MS = PUBLISH_DEBOUNCE_MS;
     static final long PROGRESS_REFRESH_INTERVAL_MS = 1_000;
-    static final long MEDIA_KEY_HANDOFF_TIMEOUT_MS = 500;
+    static final long MEDIA_KEY_HANDOFF_TIMEOUT_MS = 300;
     static final int SOURCE_THIRD_PARTY = 26;
     static final int DEVICE_AUDIO = 1002;
     static final int DEVICE_INSTRUMENT = 1007;
@@ -1236,10 +1236,6 @@ final class MusicMetadataRuntime {
             String reason, boolean published, String previousPackage, String nextPackage) {
         return published && "sessions_callback".equals(reason)
                 && nextPackage != null && nextPackage.equals(previousPackage);
-    }
-
-    static boolean shouldForceObserverRetry(String reason) {
-        return "configure".equals(reason);
     }
 
     static boolean coalesceForce(boolean pending, boolean requested) {

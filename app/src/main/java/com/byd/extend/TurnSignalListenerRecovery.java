@@ -8,12 +8,6 @@ final class TurnSignalListenerRecovery {
     private boolean validPollRequired;
     private boolean neutralRequired;
 
-    static boolean validSample(int signal, int raw) {
-        if (signal == STALK) return raw >= 1 && raw <= 5;
-        if (signal == BLINK) return raw >= 1 && raw <= 9;
-        return false;
-    }
-
     boolean invalidate(int signal) {
         boolean newlyInvalid = (invalidSignals & signal) == 0;
         invalidSignals |= signal;
@@ -24,14 +18,6 @@ final class TurnSignalListenerRecovery {
 
     void validCallback(int signal) {
         invalidSignals &= ~signal;
-    }
-
-    boolean validPoll(boolean fresh, int stalk) {
-        if (!fresh) return false;
-        boolean wasReady = ready();
-        if (invalidSignals == 0) validPollRequired = false;
-        if (ready() && stalk == 1) neutralRequired = false;
-        return !wasReady && ready();
     }
 
     boolean ready() {

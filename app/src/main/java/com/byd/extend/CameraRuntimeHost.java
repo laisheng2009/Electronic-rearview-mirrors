@@ -37,7 +37,7 @@ final class CameraRuntimeHost {
     private boolean preview;
     private IBinder linkedClient;
     private IBinder.DeathRecipient clientDeath;
-    private final Runnable discoveryRetry = this::discoverCamera;
+    private final Runnable discoveryRetry = this::retryCameraDiscovery;
     private IBinder cameraEndpointFor(IBinder owner) { return new Binder() {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
             if (Binder.getCallingUid() != appUid) throw new SecurityException("camera caller denied");
@@ -162,7 +162,20 @@ final class CameraRuntimeHost {
 
     private void discoverCamera() {
         handler.removeCallbacks(discoveryRetry);
-        if (!lifetime.stopped() && !helper.discoverCamera()) handler.postDelayed(discoveryRetry, 3_000);
+        if (!lifetime.stopped()
+                && helper.discoverCameraWithResult()
+                == CameraHelperMain.DiscoveryResult.RETRYABLE_FAILURE) {
+            handler.postDelayed(discoveryRetry, 3_000);
+        }
+    }
+
+    private void retryCameraDiscovery() {
+        handler.removeCallbacks(discoveryRetry);
+        if (!lifetime.stopped()
+                && helper.retryCameraDiscovery()
+                == CameraHelperMain.DiscoveryResult.RETRYABLE_FAILURE) {
+            handler.postDelayed(discoveryRetry, 3_000);
+        }
     }
 
     private void setVisibility(boolean next) {
@@ -214,14 +227,14 @@ final class CameraRuntimeHost {
     void acceptTelemetry(String line) {
         handler.post(() -> {
             if (lifetime.stopped() || !lifetime.started()) return;
-            if ("shell_power_state".equals(DiagnosticLogPolicy.kind(line))) try {
-                JSONObject event = new JSONObject(line);
+            JSONObject event = parseEvent(line);
+            if (event != null && "shell_power_state".equals(DiagnosticLogPolicy.kind(line))) {
                 if (lifetime.updateAwakeSession(event.optLong("awake_session_id", -1),
                                 event.optBoolean("interactive"))) {
                     helper.recoverCameraSourceAfterWake();
                 }
-            } catch (org.json.JSONException ignored) { /* Controllers validate their own events. */ }
-            dispatch(line);
+            }
+            dispatch(line, event);
         });
     }
 
@@ -245,8 +258,23 @@ final class CameraRuntimeHost {
     }
 
     private void dispatch(String line) {
-        blind.acceptEvent(line); parking.acceptEvent(line); reverse.acceptEvent(line);
-        mirror.acceptEvent(line);
+        dispatch(line, parseEvent(line));
+    }
+
+    private void dispatch(String line, JSONObject event) {
+        if (event == null) {
+            blind.acceptEvent(line); parking.acceptEvent(line); reverse.acceptEvent(line);
+            mirror.acceptEvent(line);
+        } else {
+            blind.acceptEvent(event); parking.acceptEvent(event); reverse.acceptEvent(event);
+            mirror.acceptEvent(event);
+        }
+    }
+
+    private static JSONObject parseEvent(String line) {
+        if (line == null) return null;
+        try { return new JSONObject(line); }
+        catch (org.json.JSONException ignored) { return null; }
     }
 
     private void acceptCameraLine(String line) {

@@ -3,6 +3,8 @@ package com.byd.extend;
 import android.content.Context;
 import android.os.Build;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -195,7 +197,8 @@ final class DiagnosticLogExporter {
         if (!outputDirectory.isDirectory() && !outputDirectory.mkdirs()) {
             throw new IOException("Unable to create diagnostic archive directory");
         }
-        File finished = nextAvailableFile(outputDirectory, archiveName(createdAtMillis));
+        File finished = CompatibilityBundleExporter.nextAvailableFile(
+                outputDirectory, archiveName(createdAtMillis));
         File partial = new File(finished.getPath() + ".part");
         if (partial.exists() && !partial.delete()) {
             throw new IOException("Unable to replace incomplete diagnostic archive");
@@ -218,16 +221,6 @@ final class DiagnosticLogExporter {
             if (error instanceof IOException) throw (IOException) error;
             throw new IOException("Unable to create diagnostic archive", error);
         }
-    }
-
-    static String[] fixedCommands() {
-        String[] commands = new String[SYSTEM_COLLECTORS.length + 1];
-        for (int i = 0; i < SYSTEM_COLLECTORS.length; i++) {
-            commands[i] = SYSTEM_COLLECTORS[i].command;
-        }
-        commands[SYSTEM_COLLECTORS.length - 1] = ContinuousLogcatRecorder.SIZE_COMMAND;
-        commands[SYSTEM_COLLECTORS.length] = ContinuousLogcatRecorder.SNAPSHOT_COMMAND;
-        return commands;
     }
 
     static String archiveName(long createdAtMillis) {
@@ -429,27 +422,7 @@ final class DiagnosticLogExporter {
     }
 
     private static String quote(String value) {
-        if (value == null) return "null";
-        StringBuilder escaped = new StringBuilder(value.length() + 2).append('"');
-        for (int i = 0; i < value.length(); i++) {
-            char character = value.charAt(i);
-            switch (character) {
-                case '"': escaped.append("\\\""); break;
-                case '\\': escaped.append("\\\\"); break;
-                case '\b': escaped.append("\\b"); break;
-                case '\f': escaped.append("\\f"); break;
-                case '\n': escaped.append("\\n"); break;
-                case '\r': escaped.append("\\r"); break;
-                case '\t': escaped.append("\\t"); break;
-                default:
-                    if (character < 0x20) {
-                        escaped.append(String.format(Locale.US, "\\u%04x", (int) character));
-                    } else {
-                        escaped.append(character);
-                    }
-            }
-        }
-        return escaped.append('"').toString();
+        return value == null ? "null" : JSONObject.quote(value);
     }
 
     private static boolean isPermissionDenied(String error) {
@@ -504,22 +477,6 @@ final class DiagnosticLogExporter {
         do {
             candidate = "logs/" + suffix++ + "-" + fileName;
         } while (!usedNames.add(candidate));
-        return candidate;
-    }
-
-    private static File nextAvailableFile(File directory, String preferredName) {
-        File preferred = new File(directory, preferredName);
-        if (!preferred.exists() && !new File(preferred.getPath() + ".part").exists()) {
-            return preferred;
-        }
-        int extension = preferredName.lastIndexOf('.');
-        String stem = extension < 0 ? preferredName : preferredName.substring(0, extension);
-        String suffix = extension < 0 ? "" : preferredName.substring(extension);
-        int index = 2;
-        File candidate;
-        do {
-            candidate = new File(directory, stem + "-" + index++ + suffix);
-        } while (candidate.exists() || new File(candidate.getPath() + ".part").exists());
         return candidate;
     }
 

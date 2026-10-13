@@ -105,7 +105,18 @@ final class ParkingCameraController {
     void acceptEvent(String line) {
         if (shutdown || line == null) return;
         try {
-            JSONObject event = new JSONObject(line);
+            acceptEvent(new JSONObject(line));
+        } catch (Throwable ignored) {
+            // A malformed telemetry line is an invalid state; the next tick fails closed.
+            invalidateRadarFamily("");
+            speedValid = false;
+            evaluate();
+        }
+    }
+
+    void acceptEvent(JSONObject event) {
+        if (shutdown || event == null) return;
+        try {
             String kind = event.optString("kind");
             long now = event.optLong("t_ms", SystemClock.elapsedRealtime());
             if ("parking_radar_snapshot".equals(kind)) {

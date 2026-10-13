@@ -109,14 +109,6 @@ final class ReverseSideSelectorView extends View {
         invalidate();
     }
 
-    boolean isLeftVisible() {
-        return leftVisible;
-    }
-
-    boolean isRightVisible() {
-        return rightVisible;
-    }
-
     /** Returns [left, top, right, bottom] in normalized 0..1 view coordinates. */
     static float[] normalizedButtonRect(int buttonMode) {
         requireMode(buttonMode);

@@ -12,11 +12,6 @@ final class ReverseGearRuntime {
     static final int DEVICE_TYPE = 1011;
     static final int TRANSACTION = 5;
     static final int GEAR_FID = 555745336;
-    static final int PARK_RAW = ReverseGearSessionPolicy.RAW_PARK;
-    static final int REVERSE_RAW = ReverseGearSessionPolicy.RAW_REVERSE;
-    static final int NEUTRAL_RAW = ReverseGearSessionPolicy.RAW_NEUTRAL;
-    static final int DRIVE_RAW = ReverseGearSessionPolicy.RAW_DRIVE;
-
     private final Context context;
     private final Handler handler;
     private final BiConsumer<String, Object[]> eventSink;

@@ -27,11 +27,8 @@
     <string name="ui_gap_024">"Перетягніть віджет. Утримуйте 1 секунду, щоб приховати."</string>
     <string name="ui_gap_025">"Показати висувну кнопку повтору (редактор)"</string>
     <string name="ui_gap_026">"Нагадування приховано"</string>
-    <string name="ui_gap_027">"Повторити"</string>
-    <string name="ui_gap_028">"Очікування Wi-Fi для відновлення ADB"</string>
     <string name="ui_gap_029">"Колір рамки"</string>
     <string name="ui_gap_030">"Стоп"</string>
-    <string name="ui_gap_031">"Утримувати камеру"</string>
     <string name="ui_gap_032">"Права"</string>
     <string name="ui_gap_033">"Пропускання одночасного звуку відкриття/закриття налаштовується окремо для увімкнення та вимкнення авто."</string>
     <string name="ui_gap_034">"Пропускати одночасний звук\nвідкриття/закриття"</string>
@@ -55,7 +52,6 @@
     <string name="ui_gap_052">"Утримання"</string>
     <string name="ui_gap_053">"Подвійне"</string>
     <string name="ui_gap_054">"Призначена кнопка та вибраний жест показуватимуть або приховуватимуть віджет дзеркала."</string>
-    <string name="ui_gap_055">"Дисплей елемента"</string>
     <string name="ui_gap_056">"Зберігати розширені логи"</string>
     <string name="ui_gap_057">"Може збільшити навантаження на процесор і використання сховища."</string>
     <string name="ui_gap_058">"Записувати logcat"</string>
@@ -68,11 +64,6 @@
     <string name="ui_gap_065">"Коліщатко — натискання"</string>
     <string name="ui_gap_066" formatted="false">"0% — видимий, 100% — невидимий"</string>
     <string name="ui_gap_067">"Перевірте після встановлення або оновлення, інакше DiLink може зупинити BYD Extend у фоні."</string>
-    <string name="ui_gap_068">"Задня ліва"</string>
-    <string name="ui_gap_069">"Задня права"</string>
-    <string name="ui_gap_070">"Передня ліва"</string>
-    <string name="ui_gap_071">"Передня права"</string>
-    <string name="ui_gap_072">"Включити задні камери"</string>
     <string name="ui_gap_073">"Включити передні камери"</string>
     <string name="ui_gap_074">"Імпортування…"</string>
     <string name="ui_gap_075">"Додати файли…"</string>

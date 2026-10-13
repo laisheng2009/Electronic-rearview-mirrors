@@ -6,7 +6,6 @@ import java.util.List;
 /** Edges only: initial/unknown snapshots are silent. No playback delay is introduced here. */
 final class AvasEventPolicy {
     static final long CONCURRENT_LOCK_WINDOW_MS = 1_000;
-    static final long AUTO_UNLOCK_WINDOW_MS = CONCURRENT_LOCK_WINDOW_MS;
     private int power = -1;
     private int lock = -1;
     private long powerEventAt = -1;
@@ -59,7 +58,6 @@ final class AvasEventPolicy {
         return result;
     }
 
-    boolean wasUnlockSuppressed() { return "unlock".equals(suppressedProfile); }
     boolean wasEventSuppressed() { return !suppressedProfile.isEmpty(); }
     String suppressedProfile() { return suppressedProfile; }
     String suppressionPowerProfile() { return suppressionPowerProfile; }

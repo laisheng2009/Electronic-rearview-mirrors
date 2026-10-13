@@ -66,19 +66,12 @@
     <string name="runtime_logs_cleared">已清除日志：%1$d</string>
     <string name="runtime_logs_clear_failed">无法清除日志。</string>
     <string name="runtime_logs_clear_partial">已清除 %1$d 个；有 %2$d 个无法删除</string>
-    <string name="runtime_update_available">有可用更新</string>
-    <string name="runtime_update">更新</string>
     <string name="runtime_update_checking">正在检查更新…</string>
     <string name="runtime_update_check_button">检查中…</string>
     <string name="runtime_up_to_date">已安装最新版本</string>
     <string name="runtime_update_available_version">有可用版本 %1$s</string>
-    <string name="runtime_update_download_title">更新 %1$s</string>
-    <string name="runtime_update_download">下载：%1$d%%</string>
-    <string name="runtime_update_failed">无法更新应用</string>
     <string name="runtime_update_check_error">检查更新失败</string>
     <string name="runtime_update_later">关闭</string>
-    <string name="runtime_installed_version">已安装版本：%1$s</string>
-    <string name="runtime_available_version">可用版本：%1$s</string>
     <string name="runtime_car_compat_title">车辆兼容性数据包</string>
     <string name="runtime_car_compat_message">数据包可能包含大型 BYD/DiLink 专有文件、系统元数据和私密技术数据。创建过程尽力而为：无法访问的文件会被标记，但不会停止归档。请仅通过可信渠道分享。</string>
     <string name="runtime_car_compat_prepare">准备中…</string>
@@ -164,7 +157,6 @@
     <string name="runtime_status_waiting_helper">正在等待内部服务…</string>
     <string name="runtime_status_telemetry_ready">遥测已就绪</string>
     <string name="runtime_status_telemetry_error">遥测错误：%1$s</string>
-    <string name="runtime_status_helper_error">辅助服务错误：%1$s</string>
     <string name="runtime_status_helper_restarting">辅助服务正在重启：%1$s</string>
     <string name="runtime_status_guard_active">Guard 已启用</string>
     <string name="runtime_status_guard_paused">Guard 已暂停：%1$s</string>

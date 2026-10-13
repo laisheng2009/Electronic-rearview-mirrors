@@ -117,11 +117,6 @@ final class TurnSignalTelemetryController implements AutoCloseable {
 
     boolean subscriptionHealthy() { return subscribed && seeded; }
 
-    boolean reconciliationFresh(long now) {
-        return subscribed && seeded && lastGetAt != Long.MIN_VALUE
-                && elapsed(now, lastGetAt) <= CALLBACK_GET_DEADLINE_MS;
-    }
-
     boolean dataFresh(long now) {
         return seeded && lastGetAt != Long.MIN_VALUE
                 && elapsed(now, lastGetAt) <= (subscribed

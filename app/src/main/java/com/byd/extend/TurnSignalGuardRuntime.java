@@ -28,10 +28,6 @@ final class TurnSignalGuardRuntime {
     private static final int TURN_SIGNAL_SET_FID = 871366669;
     private static final int LATCH_UNKNOWN = -1;
 
-    private static final Signal STALK = new Signal(5, 1004, 321912876);
-    private static final Signal STEERING = new Signal(7, 1001, 300941320);
-    private static final Signal BLINK = new Signal(5, 1004, 950009900);
-    private static final Signal SPEED = new Signal(7, 1013, -1807745016);
     private static final Signal GEAR = new Signal(5, 1011, 555745336);
 
     private static final int BLINK_OFF = 1;
@@ -172,7 +168,7 @@ final class TurnSignalGuardRuntime {
                     "error", telemetryReady() ? "" : telemetryError());
             emit("turn_state_status", "feature_id", TURN_SIGNAL_SET_FID,
                     "assumed_latch_state", assumedLatchState);
-            emitCameraState(SystemClock.elapsedRealtime());
+            emitCameraState();
             emitGuardConfig();
         });
     }
@@ -485,7 +481,7 @@ final class TurnSignalGuardRuntime {
                         "speed_status", speed.status);
             }
             if (wasHealthy || now - lastCameraStateAt >= CAMERA_STATE_PERIOD_MS) {
-                emitCameraState(now);
+                emitCameraState();
             }
             return;
         }
@@ -543,7 +539,7 @@ final class TurnSignalGuardRuntime {
             startupCleanupFreshGeneration = awakeSessionGeneration;
         }
         if (cameraShortTurnEnded || now - lastCameraStateAt >= CAMERA_STATE_PERIOD_MS) {
-            emitCameraState(now);
+            emitCameraState();
         }
         evaluateSpeedDeferredSession(now);
         evaluateStartupAwakeSessionCleanup();
@@ -585,7 +581,7 @@ final class TurnSignalGuardRuntime {
             emit("telemetry_error", "reason", "reconciliation_deadline",
                     "deadline_ms", TurnSignalTelemetryController.CALLBACK_GET_DEADLINE_MS);
         }
-        if (now - lastCameraStateAt >= CAMERA_STATE_PERIOD_MS) emitCameraState(now);
+        if (now - lastCameraStateAt >= CAMERA_STATE_PERIOD_MS) emitCameraState();
         evaluateSpeedDeferredSession(now);
         evaluateStartupAwakeSessionCleanup();
         evaluateGuardDisableReset();
@@ -889,7 +885,7 @@ final class TurnSignalGuardRuntime {
             lastBlinkChangeAt = now;
         }
         latestBlink = blink;
-        if (changed) emitCameraState(now);
+        if (changed) emitCameraState();
         observeSpeedDeferredBlink(blink, now);
         if (blink == BLINK_HAZARD) {
             if (shouldScheduleHazardCleanup(requestedEnabled, assumedLatchState, blink)
@@ -1292,11 +1288,12 @@ final class TurnSignalGuardRuntime {
         eventSink.accept(kind, fields);
     }
 
-    private void emitCameraState(long now) {
-        lastCameraStateAt = now;
+    private void emitCameraState() {
+        long emittedAt = SystemClock.elapsedRealtime();
+        lastCameraStateAt = emittedAt;
         boolean valid = pollHealthy && Float.isFinite(latestSpeedKph)
                 && Float.isFinite(latestAngle)
-                && telemetryController.dataFresh(now);
+                && telemetryController.dataFresh(emittedAt);
         emit("vehicle_state", "valid", valid, "blink", latestBlink,
                 "speed_kph", valid ? latestSpeedKph : "unknown",
                 "steering_angle_deg", valid ? latestAngle : "unknown",
@@ -1363,10 +1360,6 @@ final class TurnSignalGuardRuntime {
         return telemetryReady && gearStatus == 0 && gear != null && gear == 1
                 && blinkStatus == 0 && blinkAllowed
                 ? null : "requires_healthy_telemetry_P_and_safe_blink_state";
-    }
-
-    static int turnSignalSetFidForTest() {
-        return TURN_SIGNAL_SET_FID;
     }
 
     static boolean speedAllowed(float speedKph, int maxSpeedKph) {
@@ -1656,7 +1649,6 @@ final class TurnSignalGuardRuntime {
                 && expectedBlinkForPayload(2) == BLINK_LEFT
                 && expectedBlinkForPayload(3) == BLINK_RIGHT
                 && GEAR.tx == 5 && GEAR.dev == 1011 && GEAR.fid == 555745336
-                && SPEED.tx == 7 && SPEED.dev == 1013 && SPEED.fid == -1807745016
                 && isActivationGesture(BLINK_LEFT, BLINK_OFF, -1, 1_000)
                 && isActivationGesture(BLINK_RIGHT, BLINK_LEFT, BLINK_OFF, 500)
                 && !isActivationGesture(BLINK_LEFT, BLINK_LEFT, BLINK_OFF, 100)
@@ -1678,10 +1670,6 @@ final class TurnSignalGuardRuntime {
                 && speedAllowed(30.0f, 30)
                 && !speedAllowed(30.1f, 30);
         if (!valid) throw new IllegalStateException("Guard mapping self-check failed");
-    }
-
-    static void selfCheckForTest() {
-        selfCheck();
     }
 
     private static String summary(Throwable error) {

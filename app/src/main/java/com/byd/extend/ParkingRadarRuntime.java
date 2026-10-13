@@ -21,7 +21,6 @@ public final class ParkingRadarRuntime {
     public static final String LISTENER_CLASS = "android.hardware.IBYDAutoListener";
     public static final int RAW_MIN = ParkingCameraProfile.RADAR_RAW_MIN;
     public static final int RAW_MAX = ParkingCameraProfile.RADAR_RAW_MAX;
-    public static final int SIDE_RAW_MAX = ParkingCameraProfile.SIDE_RADAR_RAW_MAX;
 
     private final Context context;
     private final Handler handler;

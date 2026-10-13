@@ -17,6 +17,7 @@ import android.view.Surface;
 
 import java.nio.FloatBuffer;
 import java.util.Arrays;
+import java.util.function.IntPredicate;
 
 /** Drains the OEM input without ever calling a downstream window's eglSwapBuffers. */
 final class CameraFramePump {
@@ -48,6 +49,7 @@ final class CameraFramePump {
     private FloatBuffer positions, coords;
     private final float[] matrix = new float[16];
     private final Runnable capture = this::capture;
+    private final IntPredicate readyToWritePredicate = this::readyToWrite;
     private int signals;
     private boolean queued, failed, matrixReported;
     private long lastFrameTimestamp;
@@ -90,7 +92,7 @@ final class CameraFramePump {
                 new int[]{EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE}, 0);
         require(idle != EGL14.EGL_NO_SURFACE && EGL14.eglMakeCurrent(display, idle, idle, context),
                 "camera acquisition surface failed");
-        program = DirectCameraSourceHub.linkProgram(
+        program = CameraDewarpRenderer.linkProgram(
                 DirectCameraSourceHub.VERTEX_SHADER, DirectCameraSourceHub.FRAGMENT_SHADER);
         positionLocation = GLES20.glGetAttribLocation(program, "aPosition");
         coordsLocation = GLES20.glGetAttribLocation(program, "aTexCoord");
@@ -145,7 +147,7 @@ final class CameraFramePump {
                 long size = outputSize;
                 int width = (int) (size >>> 32), height = (int) size;
                 if (width > 0 && height > 0) {
-                    slot = mailbox.reserve(this::readyToWrite);
+                    slot = mailbox.reserve(readyToWritePredicate);
                     if (slot >= 0) {
                         Frame frame = frames[slot];
                         allocate(frame, width, height);

@@ -12,7 +12,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
-import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -192,26 +191,10 @@ public final class AvasAudioLibrary {
     public Long durationMillis(String assetId) {
         File file = preparedFile(assetId);
         if (!file.isFile()) return null;
-        try (RandomAccessFile input = new RandomAccessFile(file, "r")) {
-            if (input.length() < 12 || input.readInt() != 0x52494646) return null; // RIFF
-            readLittleEndianInt(input);
-            if (input.readInt() != 0x57415645) return null; // WAVE
-            long byteRate = 0;
-            long dataBytes = -1;
-            while (input.getFilePointer() + 8 <= input.length()) {
-                int chunk = input.readInt();
-                long size = Integer.toUnsignedLong(readLittleEndianInt(input));
-                long end = input.getFilePointer() + size;
-                if (end < input.getFilePointer() || end > input.length()) return null;
-                if (chunk == 0x666d7420 && size >= 12) { // fmt[space]
-                    input.skipBytes(8);
-                    byteRate = Integer.toUnsignedLong(readLittleEndianInt(input));
-                } else if (chunk == 0x64617461) { // data
-                    dataBytes = size;
-                }
-                input.seek(end + (size & 1));
-            }
-            return byteRate > 0 && dataBytes >= 0 ? dataBytes * 1000L / byteRate : null;
+        try {
+            AvasWav.Header header = AvasWav.read(file);
+            long byteRate = (long) header.sampleRate * header.frameSize;
+            return Math.multiplyExact(header.dataBytes, 1000L) / byteRate;
         } catch (IOException | ArithmeticException ignored) {
             return null;
         }
@@ -253,10 +236,6 @@ public final class AvasAudioLibrary {
         } finally {
             delete(temp);
         }
-    }
-
-    private static int readLittleEndianInt(RandomAccessFile input) throws IOException {
-        return Integer.reverseBytes(input.readInt());
     }
 
     public File preparedFile(String assetId) {

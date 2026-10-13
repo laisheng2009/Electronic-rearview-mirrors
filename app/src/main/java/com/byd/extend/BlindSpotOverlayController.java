@@ -734,7 +734,15 @@ final class BlindSpotOverlayController {
     void acceptEvent(String line) {
         if (line == null) return;
         try {
-            JSONObject event = new JSONObject(line);
+            acceptEvent(new JSONObject(line));
+        } catch (Throwable error) {
+            emit("overlay_event_parse_error", "error", summary(error));
+        }
+    }
+
+    void acceptEvent(JSONObject event) {
+        if (event == null) return;
+        try {
             String kind = event.optString("kind");
             if ("vehicle_state".equals(kind)) {
                 boolean valid = event.optBoolean("valid");

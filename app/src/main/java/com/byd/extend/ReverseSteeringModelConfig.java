@@ -162,17 +162,6 @@ final class ReverseSteeringModelConfig {
         }
     }
 
-    /** Select the one OEM path implied by the active renderer and CarStatus identity. */
-    static String selectConfigurationPath(String carType, String subCarType,
-            int modelValue, RendererMarker marker) throws IOException {
-        requirePathPart("car type", carType);
-        requirePathPart("sub-car type", subCarType);
-        RendererResolution renderer = resolveRenderer(marker, carType, subCarType,
-                carType + "/" + subCarType, modelValue);
-        return configurationPath(carType, subCarType, modelValue,
-                renderer.renderer, carType + "/" + subCarType);
-    }
-
     private static String configurationPath(String carType, String subCarType,
             int modelValue, String renderer, String model) {
         if ("TS".equals(renderer)) {
@@ -515,18 +504,6 @@ final class ReverseSteeringModelConfig {
             }
             return new ReverseSteeringModelConfig(minimumDegrees, maximumDegrees, model);
         }
-    }
-
-    static ReverseSteeringModelConfig fromJson(String model, String json) throws Exception {
-        Bounds bounds = parseJson(json, new LinkedHashMap<>());
-        return new ReverseSteeringModelConfig(
-                bounds.minimumDegrees, bounds.maximumDegrees, model);
-    }
-
-    static ReverseSteeringModelConfig fromYaml(String model, String yaml) throws Exception {
-        Bounds bounds = parseYaml(yaml, new LinkedHashMap<>());
-        return new ReverseSteeringModelConfig(
-                bounds.minimumDegrees, bounds.maximumDegrees, model);
     }
 
     /** Mirrors the stock VehicleConfiguration line cleanup before reading the JSON object. */

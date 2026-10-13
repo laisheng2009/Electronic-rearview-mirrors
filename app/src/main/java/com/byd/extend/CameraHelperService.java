@@ -240,9 +240,12 @@ public final class CameraHelperService extends Service {
         @Override
         public void run() {
             if (helper == null || !helperRuntimeStarted) return;
-            boolean ready = helper.discoverCamera();
+            CameraHelperMain.DiscoveryResult result = helper.retryCameraDiscovery();
+            boolean ready = result == CameraHelperMain.DiscoveryResult.READY;
             lifecycle("camera_discovery_retry", "ready", ready);
-            if (!ready) runtimeHandler.postDelayed(this, CAMERA_DISCOVERY_RETRY_MS);
+            if (result == CameraHelperMain.DiscoveryResult.RETRYABLE_FAILURE) {
+                runtimeHandler.postDelayed(this, CAMERA_DISCOVERY_RETRY_MS);
+            }
         }
     };
     private HandlerThread runtimeThread;
@@ -1136,15 +1139,6 @@ public final class CameraHelperService extends Service {
         }
     }
 
-    static void routeManualMirrorSettingsChange(
-            String action, Runnable mirrorSettingsChanged, Runnable clusterSettingsChanged) {
-        if (!ACTION_MIRROR_SETTINGS_CHANGED.equals(action)
-                && !ACTION_CAMERA_SETTINGS_CHANGED.equals(action)
-                && !ACTION_SETTINGS_RELOADED.equals(action)) return;
-        mirrorSettingsChanged.run();
-        clusterSettingsChanged.run();
-    }
-
     private void syncWeatherAccessibility(boolean enabled) {
         syncWeatherAccessibility(enabled, "registration", false);
     }
@@ -1467,7 +1461,7 @@ public final class CameraHelperService extends Service {
         if (helperRuntimeStarted) return;
         GuardRecovery.sessionStarted(this);
         helperRuntimeStarted = true;
-        boolean cameraReady = helper.discoverCamera();
+        CameraHelperMain.DiscoveryResult discoveryResult = helper.discoverCameraWithResult();
         helper.startGuardRuntime();
         helper.configureAvas();
 
@@ -1475,7 +1469,7 @@ public final class CameraHelperService extends Service {
         RuntimeSettingsSnapshot.read(settings, anyParkingEnabled()).replay(helper);
         cameraRuntime.visibility(activityVisible);
         if (cameraPreviewActive) cameraRuntime.preview(true);
-        if (shouldRetryCameraDiscovery(cameraReady, helperRuntimeStarted)) {
+        if (shouldRetryCameraDiscovery(discoveryResult, helperRuntimeStarted)) {
             scheduleCameraDiscoveryRetry(CAMERA_DISCOVERY_RETRY_MS);
         }
     }
@@ -1594,8 +1588,9 @@ public final class CameraHelperService extends Service {
         runtimeHandler.postDelayed(retryCameraDiscovery, Math.max(0, delayMs));
     }
 
-    static boolean shouldRetryCameraDiscovery(boolean cameraReady, boolean runtimeActive) {
-        return !cameraReady && runtimeActive;
+    static boolean shouldRetryCameraDiscovery(
+            CameraHelperMain.DiscoveryResult result, boolean runtimeActive) {
+        return result == CameraHelperMain.DiscoveryResult.RETRYABLE_FAILURE && runtimeActive;
     }
 
     private void startForegroundRuntime() {
@@ -1638,10 +1633,6 @@ public final class CameraHelperService extends Service {
         return new File(captures, "helper-service-" + stamp + ".jsonl");
     }
 
-    static boolean shouldReopenLog(boolean writerOpen, boolean fileExists) {
-        return writerOpen && !fileExists;
-    }
-
     private boolean postRuntime(Runnable action) {
         return runtimeLifecycle.post(runtimeQueue, action);
     }
@@ -1669,21 +1660,6 @@ public final class CameraHelperService extends Service {
         });
     }
 
-    static boolean isShellOemVisibilityEvent(String line) {
-        if (line == null || !line.contains("oem_camera_visibility")) return false;
-        try {
-            String kind = new org.json.JSONObject(line).optString("kind");
-            return "oem_camera_visibility".equals(kind)
-                    || "oem_camera_visibility_listener".equals(kind);
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private void parkingEvent(String kind, Object... fields) {
-        lifecycle(kind, fields);
-    }
-
     private boolean anyParkingEnabled() {
         return anyParkingEnabled(getSharedPreferences("settings", MODE_PRIVATE));
     }
@@ -1693,12 +1669,6 @@ public final class CameraHelperService extends Service {
             if (rule != null && rule.enabled) return true;
         }
         return false;
-    }
-
-    private void reverseEvent(String kind, Object... fields) {
-        CameraHelperMain.HelperBinder activeHelper = helper;
-        if (activeHelper != null) activeHelper.emitControllerEvent(kind, fields);
-        else lifecycle(kind, fields);
     }
 
     private void lifecycle(String kind, Object... fields) {

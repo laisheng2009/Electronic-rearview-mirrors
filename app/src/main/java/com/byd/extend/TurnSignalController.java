@@ -19,7 +19,6 @@ import org.json.JSONObject;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -4147,29 +4146,7 @@ final class OverlayFrameArm {
                 event.optInt(FRAME_ARM_EPOCH, -1));
     }
 
-    static OverlayFrameArm fromEventFields(Map<String, Object> fields) {
-        return create(
-                intField(fields, CAMERA_ID),
-                intField(fields, REQUEST_ID),
-                intField(fields, SURFACE_GENERATION),
-                intField(fields, FRAME_ARM_EPOCH));
-    }
-
     int[] wireFields() {
         return new int[]{cameraId, requestId, surfaceGeneration, frameArmEpoch};
-    }
-
-    Object[] eventFields() {
-        return new Object[]{
-                REQUEST_ID, requestId,
-                SURFACE_GENERATION, surfaceGeneration,
-                FRAME_ARM_EPOCH, frameArmEpoch
-        };
-    }
-
-    private static int intField(Map<String, Object> fields, String key) {
-        Object value = fields.get(key);
-        if (!(value instanceof Number)) throw new IllegalArgumentException(key + " missing");
-        return ((Number) value).intValue();
     }
 }

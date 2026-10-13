@@ -152,7 +152,16 @@ final class ReverseCameraController {
     void acceptEvent(String line) {
         if (line == null) return;
         try {
-            JSONObject event = new JSONObject(line);
+            acceptEvent(new JSONObject(line));
+        } catch (Throwable error) {
+            emit("reverse_camera_error", "stage", "event_parse",
+                    "error", summary(error));
+        }
+    }
+
+    void acceptEvent(JSONObject event) {
+        if (event == null) return;
+        try {
             handler.post(() -> acceptEventOnMain(event));
         } catch (Throwable error) {
             emit("reverse_camera_error", "stage", "event_parse",
@@ -1167,17 +1176,6 @@ final class ReverseCameraController {
         eventSink.accept(kind, fields);
     }
 
-    static int loadEditorSelection(SharedPreferences settings) {
-        try {
-            int selected = settings.getInt(
-                    PREF_EDITOR_SELECTION, ReverseCameraLayout.REAR_CAMERA_INDEX);
-            return isEditorSelection(selected)
-                    ? selected : ReverseCameraLayout.REAR_CAMERA_INDEX;
-        } catch (RuntimeException invalidPreference) {
-            return ReverseCameraLayout.REAR_CAMERA_INDEX;
-        }
-    }
-
     static void saveEditorSelection(SharedPreferences settings, int selected) {
         if (!isEditorSelection(selected)) {
             throw new IllegalArgumentException("invalid reverse editor selection");
@@ -1392,72 +1390,6 @@ final class ReverseCameraController {
         }
     }
 
-    static void saveLayout(SharedPreferences settings, ReverseCameraLayout layout) {
-        SharedPreferences.Editor editor = settings.edit()
-                .putFloat(PREF_PREFIX + "background_left", layout.background.left)
-                .putFloat(PREF_PREFIX + "background_top", layout.background.top)
-                .putFloat(PREF_PREFIX + "background_width", layout.background.width)
-                .putFloat(PREF_PREFIX + "background_height", layout.background.height)
-                .putFloat(PREF_PREFIX + "widget_left", layout.widget.left)
-                .putFloat(PREF_PREFIX + "widget_top", layout.widget.top)
-                .putFloat(PREF_PREFIX + "widget_width", layout.widget.width)
-                .putFloat(PREF_PREFIX + "widget_height", layout.widget.height);
-        for (ReverseCameraLayout.Pane pane : layout.panes()) {
-            String prefix = PREF_PREFIX + pane.cameraIndex + "_";
-            editor.putFloat(prefix + "left", pane.destination.left)
-                    .putFloat(prefix + "top", pane.destination.top)
-                    .putFloat(prefix + "width", pane.destination.width)
-                    .putFloat(prefix + "height", pane.destination.height)
-                    .putInt(prefix + "rotation_degrees", pane.rotationDegrees)
-                    .putBoolean(mirrorKey(pane.cameraIndex), pane.mirrorHorizontally)
-                    .putInt(displayModeKey(pane.cameraIndex), pane.displayMode)
-                    .putInt(PREF_PREFIX + "z_" + pane.zOrder, pane.cameraIndex);
-            CameraDewarpConfig dewarp = CameraDewarpConfig.loadForReverse(
-                    settings, pane.cameraIndex);
-            writeSourceCrop(editor, pane.cameraIndex, pane.sourceCrop, dewarp.enabled);
-        }
-        putCompositionDisplayState(editor, layout);
-        editor.apply();
-    }
-
-    static void resetLayout(SharedPreferences settings) {
-        ReverseCameraLayout defaults = ReverseCameraLayout.defaults();
-        SharedPreferences.Editor editor = settings.edit()
-                .putFloat(PREF_PREFIX + "background_left", defaults.background.left)
-                .putFloat(PREF_PREFIX + "background_top", defaults.background.top)
-                .putFloat(PREF_PREFIX + "background_width", defaults.background.width)
-                .putFloat(PREF_PREFIX + "background_height", defaults.background.height)
-                .putFloat(PREF_PREFIX + "widget_left", defaults.widget.left)
-                .putFloat(PREF_PREFIX + "widget_top", defaults.widget.top)
-                .putFloat(PREF_PREFIX + "widget_width", defaults.widget.width)
-                .putFloat(PREF_PREFIX + "widget_height", defaults.widget.height)
-                .putBoolean(PREF_BACKGROUND_VISIBLE, DEFAULT_VISIBLE)
-                .putBoolean(PREF_WIDGET_VISIBLE, DEFAULT_WIDGET_VISIBLE);
-        for (ReverseCameraLayout.Pane pane : defaults.panes()) {
-            String prefix = PREF_PREFIX + pane.cameraIndex + "_";
-            editor.putFloat(prefix + "left", pane.destination.left)
-                    .putFloat(prefix + "top", pane.destination.top)
-                    .putFloat(prefix + "width", pane.destination.width)
-                    .putFloat(prefix + "height", pane.destination.height)
-                    .putInt(prefix + "rotation_degrees", pane.rotationDegrees)
-                    .putBoolean(mirrorKey(pane.cameraIndex), pane.mirrorHorizontally)
-                    .putInt(displayModeKey(pane.cameraIndex), pane.displayMode)
-                    .putInt(PREF_PREFIX + "z_" + pane.zOrder, pane.cameraIndex)
-                    .putBoolean(visibilityKey(pane.cameraIndex), DEFAULT_VISIBLE);
-            writeSourceCrop(editor, pane.cameraIndex, pane.sourceCrop);
-            writeSourceCrop(editor, pane.cameraIndex,
-                    defaultCorrectedSourceCrop(pane.cameraIndex), true);
-            CameraDewarpConfig.writeForReverse(editor, pane.cameraIndex,
-                    CameraDewarpConfig.defaultForReverse(pane.cameraIndex));
-        }
-        for (int cameraIndex : frontCameraIndexes()) {
-            writeFrontDefaults(editor, cameraIndex);
-            editor.putBoolean(frontIntegratedKey(cameraIndex), DEFAULT_FRONT_INTEGRATED);
-        }
-        putCompositionDisplayState(editor, defaults);
-        editor.apply();
-    }
-
     static void saveCompositionLayout(
             SharedPreferences settings, ReverseCameraLayout layout) {
         SharedPreferences.Editor editor = settings.edit();
@@ -1568,21 +1500,6 @@ final class ReverseCameraController {
         ReverseCameraLayout.defaults().targetFor(paneId);
         editor.putInt(displayTargetKey(paneId), target);
         putRect(editor, clusterGeometryPrefix(paneId), clusterRect);
-    }
-
-    static ReverseCameraLayout.Rect readCompositionClusterRect(
-            SharedPreferences preferences, int paneId) {
-        ReverseCameraLayout defaults = ReverseCameraLayout.defaults();
-        ReverseCameraLayout.Rect fallback = defaults.rectFor(
-                paneId, CameraDisplayTarget.CLUSTER);
-        String prefix = clusterGeometryPrefix(paneId);
-        float left = preferences.getFloat(prefix + "left", fallback.left);
-        float top = preferences.getFloat(prefix + "top", fallback.top);
-        float width = preferences.getFloat(prefix + "width", fallback.width);
-        float height = preferences.getFloat(prefix + "height", fallback.height);
-        return paneId == ReverseCameraLayout.WIDGET_PANE_ID
-                ? ReverseCameraLayout.widgetDestination(left, top, width, height)
-                : ReverseCameraLayout.destination(left, top, width, height);
     }
 
     private static void putCompositionDisplayState(
@@ -1775,11 +1692,6 @@ final class ReverseCameraController {
         return loadFrontIntegrated(settings, ReverseCameraLayout.REAR_CAMERA_INDEX);
     }
 
-    static void saveCentralFrontIntegrated(
-            SharedPreferences settings, boolean integrated) {
-        saveFrontIntegrated(settings, ReverseCameraLayout.REAR_CAMERA_INDEX, integrated);
-    }
-
     private static boolean loadMirror(
             SharedPreferences settings, String key, boolean fallback) {
         try {
@@ -1877,28 +1789,6 @@ final class ReverseCameraController {
         return layout;
     }
 
-    static void resetFrontCalibrationToDefault(
-            SharedPreferences settings, int cameraIndex) {
-        SharedPreferences.Editor editor = settings.edit();
-        writeFrontDefaults(editor, cameraIndex);
-        editor.apply();
-    }
-
-    private static void writeFrontDefaults(
-            SharedPreferences.Editor editor, int cameraIndex) {
-        DirectCameraCrop raw = defaultFrontCrop(cameraIndex);
-        DirectCameraCrop corrected = CameraDefaults.reverseFrontCorrected(cameraIndex);
-        String prefix = frontPanePrefix(cameraIndex);
-        writeFrontSourceCrop(editor, cameraIndex, rect(raw), false);
-        writeFrontSourceCrop(editor, cameraIndex, rect(corrected), true);
-        editor.putInt(prefix + "rotation_degrees", raw.rotationDegrees)
-                .putInt(prefix + "display_mode", raw.rotationMode)
-                .putBoolean(prefix + "mirror", raw.mirrorHorizontally);
-        CameraDewarpConfig.writeForReverseFront(
-                editor, cameraIndex,
-                CameraDewarpConfig.defaultForReverseFront(cameraIndex));
-    }
-
     static String frontPaneSettingKey(int cameraIndex, String field) {
         CameraDewarpConfig.lensForReverseFrontCamera(cameraIndex);
         if (!"rotation_degrees".equals(field) && !"display_mode".equals(field)
@@ -1923,12 +1813,6 @@ final class ReverseCameraController {
 
     private static ReverseCameraLayout.Rect rect(DirectCameraCrop crop) {
         return ReverseCameraLayout.sourceCrop(crop.left, crop.top, crop.width, crop.height);
-    }
-
-    private static int[] sideCameraIndexes() {
-        return new int[]{
-                ReverseCameraLayout.REAR_LEFT_CAMERA_INDEX,
-                ReverseCameraLayout.REAR_RIGHT_CAMERA_INDEX};
     }
 
     private static int[] frontCameraIndexes() {

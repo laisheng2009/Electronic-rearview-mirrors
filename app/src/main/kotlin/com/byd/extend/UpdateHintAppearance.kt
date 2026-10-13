@@ -53,9 +53,6 @@ data class UpdateHintAppearance @JvmOverloads constructor(
             context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
         @JvmStatic
-        fun sharedPrefs(context: Context): SharedPreferences = preferences(context)
-
-        @JvmStatic
         fun defaults(): UpdateHintAppearance = UpdateHintAppearance()
 
         /** Production deliberately has no Preview red-to-yellow migration. */

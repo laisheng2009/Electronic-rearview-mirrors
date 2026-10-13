@@ -619,11 +619,6 @@ class ProductionUiController @JvmOverloads constructor(
         state = state.copy(adbRecovery = backend.productionAdbRecoveryState())
     }
 
-    /** Opens the native-focusable HUD capture prompt after the Activity starts key learning. */
-    fun showReverseButtonCaptureDialog() {
-        showCameraButtonCaptureDialog(CameraButtonBindings.Action.ReverseSource)
-    }
-
     fun showCameraButtonCaptureDialog(action: CameraButtonBindings.Action) {
         val strings = UiStrings(state.language, context)
         pendingDialogCommand = null

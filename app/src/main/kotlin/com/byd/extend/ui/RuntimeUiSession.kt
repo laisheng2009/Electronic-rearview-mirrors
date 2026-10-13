@@ -101,9 +101,6 @@ class RuntimeUiSession {
         current ?: Session(initial).also { current = it }
 
     @Synchronized
-    fun currentSelections(): RuntimeUiSelections? = current?.selections()
-
-    @Synchronized
     fun updateSelections(value: RuntimeUiSelections) { current?.select(value) }
 
     @Synchronized

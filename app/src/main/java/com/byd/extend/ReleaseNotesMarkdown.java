@@ -112,11 +112,6 @@ public final class ReleaseNotesMarkdown {
         return out.toString();
     }
 
-    /** Alias for callers that prefer renderer-oriented terminology. */
-    static String renderPlain(String markdown) {
-        return plainText(markdown);
-    }
-
     /**
      * Renders release notes for a TextView. Lists use native spans and headings
      * use bold/size spans; unsupported syntax remains ordinary text.

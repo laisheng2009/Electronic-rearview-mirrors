@@ -1153,7 +1153,7 @@ final class CameraDewarpRenderer {
         return true;
     }
 
-    private static int linkProgram(String vertexSource, String fragmentSource) {
+    static int linkProgram(String vertexSource, String fragmentSource) {
         int vertex = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
         int fragment = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
         int linked = GLES20.glCreateProgram();

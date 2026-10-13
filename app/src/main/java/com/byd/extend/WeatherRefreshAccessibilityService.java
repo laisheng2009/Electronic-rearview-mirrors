@@ -59,10 +59,6 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
                 syncSteeringTimeout();
             };
 
-    static boolean beginSteeringButtonLearning(Context context) {
-        return beginCameraButtonLearning(context, CameraButtonBindings.Action.ReverseSource);
-    }
-
     static boolean startMicrophone() {
         WeatherRefreshAccessibilityService service = activeService;
         if (service == null || service.microphone == null) return false;
@@ -133,10 +129,6 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
         if (service == null) return;
         service.steeringGestures.cancelLearning();
         service.syncSteeringTimeout();
-    }
-
-    static boolean isSteeringButtonLearning() {
-        return isCameraButtonLearning(CameraButtonBindings.Action.ReverseSource);
     }
 
     static boolean isCameraButtonLearning(CameraButtonBindings.Action action) {

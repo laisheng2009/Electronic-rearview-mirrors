@@ -507,14 +507,6 @@ final class DirectCameraCrop {
                 mirrorHorizontally).requireFinalGeometry(SourceCropPolicy.MIN_SIZE);
     }
 
-    DirectCameraCrop withOutputTransform(int degrees, int mode) {
-        return new DirectCameraCrop(left, top, width, height, aspectMode,
-                CameraRotation.clamp(degrees),
-                CameraRotation.isValidMode(mode) ? mode : CameraRotation.MODE_FIT,
-                mirrorHorizontally)
-                .requireFinalGeometry(SourceCropPolicy.MIN_SIZE);
-    }
-
     /** Applies output-only defaults without changing the calibrated geometry. */
     DirectCameraCrop withOutputTransformPreservingGeometry(
             int degrees, int mode, boolean mirror) {
@@ -623,17 +615,6 @@ final class DirectCameraCrop {
                 safeRotationMode).requireFinalGeometry(minimumSize);
     }
 
-    static DirectCameraCrop parsePercent(
-            String x, String y, String width, String height, int aspectMode,
-            int rotationDegrees, int rotationMode) {
-        float left = parsePercentValue(x, "X");
-        float top = parsePercentValue(y, "Y");
-        float parsedWidth = parsePercentValue(width, "W");
-        float parsedHeight = parsePercentValue(height, "H");
-        return requireNormalized(left, top, parsedWidth, parsedHeight, aspectMode,
-                rotationDegrees, rotationMode);
-    }
-
     static DirectCameraCrop requireNormalized(
             float left, float top, float width, float height, int aspectMode,
             int rotationDegrees, int rotationMode) {
@@ -669,27 +650,11 @@ final class DirectCameraCrop {
                         rotationDegrees, rotationMode, mirror);
     }
 
-    DirectCameraCrop withAspectMode(int mode) {
-        int safeMode = sanitizeAspectMode(mode);
-        if (safeMode == aspectMode) return this;
-        return of(left, top, width,
-                safeMode == ASPECT_FREE ? height : width * heightPerWidth(safeMode),
-                safeMode, rotationDegrees, rotationMode)
-                .withMirrorHorizontally(mirrorHorizontally);
-    }
-
     DirectCameraCrop withRotation(int degrees) {
         int safeDegrees = CameraRotation.clamp(degrees);
         return safeDegrees == rotationDegrees ? this
                 : new DirectCameraCrop(left, top, width, height, aspectMode,
                         safeDegrees, rotationMode, mirrorHorizontally).requireFinalGeometry(SourceCropPolicy.MIN_SIZE);
-    }
-
-    DirectCameraCrop withRotationMode(int mode) {
-        int safeMode = CameraRotation.isValidMode(mode) ? mode : CameraRotation.MODE_FIT;
-        return safeMode == rotationMode ? this
-                : new DirectCameraCrop(left, top, width, height, aspectMode,
-                        rotationDegrees, safeMode, mirrorHorizontally).requireFinalGeometry(SourceCropPolicy.MIN_SIZE);
     }
 
     DirectCameraCrop centered() {
@@ -860,16 +825,6 @@ final class DirectCameraCrop {
             return preferences.getBoolean(key, fallback);
         } catch (RuntimeException ignored) {
             return fallback;
-        }
-    }
-
-    private static float parsePercentValue(String value, String field) {
-        try {
-            float parsed = Float.parseFloat(value.trim().replace(',', '.')) / 100.0f;
-            if (!finite(parsed)) throw new NumberFormatException();
-            return parsed;
-        } catch (RuntimeException error) {
-            throw new IllegalArgumentException(field + " має бути числом");
         }
     }
 
