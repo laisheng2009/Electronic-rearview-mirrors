@@ -205,7 +205,7 @@ final class TurnSignalController {
         }
         pendingAvas.clear();
         handler.removeCallbacks(pingRunnable);
-        LocalAdbClient.cancelPendingAuthorization();
+        // Foreground RSA belongs to the process session, not this controller's lifetime.
         StockAvmOpenState canceledOpen = cancelStockAvmOpen(0);
         if (keepAvas) {
             shutdownTurnHelperKeepingAvas();
