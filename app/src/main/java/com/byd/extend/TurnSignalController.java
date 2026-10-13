@@ -70,15 +70,6 @@ final class TurnSignalController {
             return true;
         }
     };
-    private final Binder avmCallback = new Binder() {
-        @Override
-        protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
-            if (code != StockAvmShellProtocol.CB_EVENT) return false;
-            data.enforceInterface(StockAvmShellProtocol.CALLBACK_DESCRIPTOR);
-            acceptShellEvent(data.readString());
-            return true;
-        }
-    };
     private final Runnable pingRunnable = new Runnable() {
         @Override
         public void run() {
@@ -731,6 +722,9 @@ final class TurnSignalController {
                         if (isStockAvmCanceled(openState)) return;
                         value = ensureAvmShell();
                         epoch = avmShellEpoch(value);
+                        openState.shell = value;
+                        openState.avmEpoch = epoch;
+                        openState.cameraEpoch = cameraHelperEpoch;
                         if (isStockAvmCanceled(openState)) return;
                         remoteOpenAttempted = true;
                         Surface inputSurface = transactAvmOpen(
@@ -782,6 +776,7 @@ final class TurnSignalController {
                 }
                 if (!transactionComplete && !shellFailureNotified) {
                     emit("stock_avm_shell_died", "avm_shell_epoch", epoch,
+                            "camera_shell_epoch", openState.cameraEpoch, "request_id", requestId,
                             "error", summary(error));
                 }
                 emit("camera_error", "renderer", "stock_avm_shell",
@@ -2638,6 +2633,28 @@ final class TurnSignalController {
 
     private void transactAvmCallback(IBinder value) throws Exception {
         transactLogging(value, StockAvmShellProtocol.DESCRIPTOR, StockAvmShellProtocol.TX_CONFIGURE_LOGGING);
+        long registeredEpoch = avmShellEpoch(value);
+        Binder avmCallback = new Binder() {
+            @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
+                if (code != StockAvmShellProtocol.CB_EVENT) return false;
+                data.enforceInterface(StockAvmShellProtocol.CALLBACK_DESCRIPTOR);
+                try {
+                    JSONObject event = new JSONObject(data.readString());
+                    event.put("avm_shell_epoch", registeredEpoch);
+                    synchronized (TurnSignalController.this) {
+                        StockAvmOpenState state = activeStockAvmOpen;
+                        if (state != null && state.shell == value
+                                && state.requestId == event.optInt("request_id", 0)) {
+                            event.put("camera_shell_epoch", state.cameraEpoch);
+                        }
+                    }
+                    acceptShellEvent(event.toString());
+                } catch (org.json.JSONException error) {
+                    emit("shell_event_parse_error", "error", summary(error));
+                }
+                return true;
+            }
+        };
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
@@ -2735,7 +2752,7 @@ final class TurnSignalController {
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(StockAvmShellProtocol.DESCRIPTOR);
-            surface.writeToParcel(data, 0);
+            CameraGpuOutput.writeSurface(data, surface);
             data.writeInt(viewpoint);
             data.writeInt(horizontal ? 1 : 0);
             data.writeInt(stockDewarp ? 1 : 0);
@@ -3248,12 +3265,28 @@ final class TurnSignalController {
     }
 
     private void closeStockAvmNow(String reason, int requestId) {
-        IBinder value = avmShell;
-        if (!avmPing(value)) value = resolveAvmShell();
+        StockAvmOpenState state;
+        synchronized (this) {
+            state = activeStockAvmOpen;
+            if (state == null || requestId > 0 && state.requestId != requestId) {
+                state = new StockAvmOpenState(requestId);
+                state.shell = avmShell;
+                state.avmEpoch = avmShellEpoch;
+            }
+            state.cameraEpoch = cameraHelperEpoch;
+        }
+        closeStockAvmNow(reason, state);
+    }
+
+    private void closeStockAvmNow(String reason, StockAvmOpenState state) {
+        int requestId = state.requestId;
+        IBinder value = state.shell;
         if (!avmPing(value)) {
             emit("camera_closed", "renderer", "stock_avm_shell",
                     "view", "unknown", "reason", reason == null ? "unknown" : reason,
                     "request_id", requestId,
+                    "camera_shell_epoch", state.cameraEpoch,
+                    "avm_shell_epoch", state.avmEpoch,
                     "error", "camera_helper_unavailable");
             return;
         }
@@ -3267,6 +3300,8 @@ final class TurnSignalController {
         } catch (Throwable error) {
             emit("camera_error", "renderer", "stock_avm_shell",
                     "stage", "close", "request_id", requestId,
+                    "camera_shell_epoch", state.cameraEpoch,
+                    "avm_shell_epoch", state.avmEpoch,
                     "error", summary(error));
         } finally {
             data.recycle();
@@ -3671,10 +3706,14 @@ final class TurnSignalController {
     }
 
     private boolean avmShellLost(IBinder value, long epoch, String error) {
+        StockAvmOpenState state;
+        synchronized (this) { state = activeStockAvmOpen; }
         if (!clearAvmShell(value, epoch)) return false;
         if (stockAvmResetInProgress
                 || (stockAvmRetryActive && stockAvmRetryAttempt == 1)) return true;
         emit("stock_avm_shell_died", "avm_shell_epoch", epoch,
+                "camera_shell_epoch", state == null ? cameraHelperEpoch : state.cameraEpoch,
+                "request_id", state != null && state.shell == value ? state.requestId : 0,
                 "error", error == null ? "stock AVM shell unavailable" : error);
         return true;
     }
@@ -3689,6 +3728,8 @@ final class TurnSignalController {
         StockAvmOpenState previous;
         StockAvmOpenState next = new StockAvmOpenState(requestId);
         synchronized (this) {
+            next.cameraEpoch = cameraHelperEpoch;
+            next.avmEpoch = avmShellEpoch;
             previous = activeStockAvmOpen;
             activeStockAvmOpen = next;
         }
@@ -3774,7 +3815,7 @@ final class TurnSignalController {
         try {
             worker.execute(() -> {
                 try {
-                    closeStockAvmNow(reason, state.requestId);
+                    closeStockAvmNow(reason, state);
                 } finally {
                     synchronized (TurnSignalController.this) {
                         if (activeStockAvmOpen == state) activeStockAvmOpen = null;
@@ -3979,6 +4020,9 @@ final class TurnSignalController {
 
     private static final class StockAvmOpenState {
         final int requestId;
+        volatile IBinder shell;
+        volatile long cameraEpoch;
+        volatile long avmEpoch;
         final AtomicBoolean cancelled = new AtomicBoolean();
         final AtomicBoolean cleanupQueued = new AtomicBoolean();
         final AtomicBoolean published = new AtomicBoolean();

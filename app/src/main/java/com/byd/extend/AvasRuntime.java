@@ -41,7 +41,7 @@ final class AvasRuntime implements AutoCloseable {
     private final Consumer<JSONObject> eventSink;
     private final AvasPlaybackQueue queue;
     private final AvasEngineCueGate cueGate = new AvasEngineCueGate();
-    private final AvasEventPolicy policy = new AvasEventPolicy();
+    private final AvasEventPolicy policy;
     private final AvasTelemetryController telemetryController;
     private final AvasEngineRuntime engine;
     private final ExecutorService playback = Executors.newSingleThreadExecutor(r ->
@@ -68,6 +68,10 @@ final class AvasRuntime implements AutoCloseable {
         this.context = context;
         this.ownerUid = ownerUid;
         this.eventSink = eventSink;
+        AvasPowerOffLatch powerOffLatch = new AvasPowerOffLatch(new File(CACHE, "power-off-latch.bin"), ownerUid);
+        if (powerOffLatch.loadError() != null) event("avas_power_off_latch_error",
+                "operation", "load", "error", powerOffLatch.loadError().toString());
+        policy = new AvasEventPolicy(powerOffLatch);
         AvasEngineChoiceStore choiceStore = new AvasEngineChoiceStore(
                 new File(CACHE, "engine-choice.json"), ownerUid);
         Boolean savedChoice = null;
@@ -109,6 +113,13 @@ final class AvasRuntime implements AutoCloseable {
                     }
                     @Override public boolean powerOffSuppressionEligible() {
                         return skipEligible(config, "power_off");
+                    }
+                    @Override public boolean lockTriggeredPowerOff() {
+                        return config.profile("power_off").onlyWhenLockingPoweredOff;
+                    }
+                    @Override public boolean powerOffPlaybackReady() {
+                        AvasConfig.Profile profile = config.profile("power_off");
+                        return profile.enabled && automaticReady(profile) != null;
                     }
                     @Override public void onProfile(String profile) { enqueueAutomatic(profile); }
                     @Override public void onPowerOffObserved() {

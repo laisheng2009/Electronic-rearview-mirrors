@@ -107,6 +107,8 @@ public final class StockAvmShellMain {
         private final Runnable processTerminator;
         private IBinder callback;
         private int activeRequestId;
+        private CameraGpuOutput.Binding outputLease;
+        private volatile boolean processTerminationQueued;
         private boolean processTerminationRequested;
 
         ShellBinder(Context context, Handler handler, int appUid, int versionCode) {
@@ -130,6 +132,10 @@ public final class StockAvmShellMain {
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
+            if (code == IBinder.INTERFACE_TRANSACTION) {
+                reply.writeString(StockAvmShellProtocol.DESCRIPTOR);
+                return true;
+            }
             if (!StockAvmShellProtocol.isCallerAllowed(Binder.getCallingUid(), appUid)) {
                 if (reply != null) reply.writeException(new SecurityException("caller uid denied"));
                 return true;
@@ -156,7 +162,7 @@ public final class StockAvmShellMain {
                     return true;
                 }
                 if (code == StockAvmShellProtocol.TX_OPEN) {
-                    Surface surface = Surface.CREATOR.createFromParcel(data);
+                    Surface surface = CameraGpuOutput.readSurface(data, appUid);
                     boolean surfaceTransferred = false;
                     try {
                         int viewpoint = data.readInt();
@@ -214,6 +220,10 @@ public final class StockAvmShellMain {
                 boolean horizontal, boolean stockDewarp, int requestId, int attempt) {
             String view = StockAvmPreview.viewName(viewpoint);
             try {
+                if (preview.isOpen()) closePreview("output_replaced", 0);
+                if (processTerminationQueued) throw new IllegalStateException("AVM shutdown pending");
+                outputLease = CameraGpuOutput.bind(surface,
+                        () -> handler.post(() -> closePreview("output_retired", requestId)));
                 emit("camera_config_received", "detail", config.detail(), "viewpoint", viewpoint,
                         "orientation", horizontal ? "horizontal" : "vertical", "dewarp", stockDewarp);
                 OpenResult<Surface> opened = openOwned(new OpenLifecycle<Surface>() {
@@ -234,7 +244,11 @@ public final class StockAvmShellMain {
 
                     @Override
                     public void close() throws Exception {
-                        preview.close();
+                        try { preview.close(); }
+                        catch (Exception | Error failure) {
+                            queueProcessTermination();
+                            throw failure;
+                        }
                     }
                 });
                 boolean initialized = opened.initialized;
@@ -247,6 +261,16 @@ public final class StockAvmShellMain {
                         "input_surface_valid", true);
                 return opened.value;
             } catch (Throwable error) {
+                if (!processTerminationQueued) {
+                    try {
+                        preview.close();
+                        releaseOutputLease();
+                    } catch (Throwable cleanup) {
+                        error.addSuppressed(cleanup);
+                        queueProcessTermination();
+                    }
+                }
+                surface.release();
                 if (!preview.isOpen()) activeRequestId = 0;
                 String stage = error instanceof StockAvmPreview.StageException
                         ? ((StockAvmPreview.StageException) error).stage : "open";
@@ -275,10 +299,23 @@ public final class StockAvmShellMain {
             String view = StockAvmPreview.viewName(preview.getViewpoint());
             int requestId = activeRequestId;
             String error = "";
-            try { preview.close(); } catch (Throwable failure) { error = summary(failure); }
+            try {
+                preview.close();
+                releaseOutputLease();
+            } catch (Throwable failure) {
+                error = summary(failure);
+                // A failed detach cannot acknowledge consumer release. Binder death will do it.
+                queueProcessTermination();
+            }
             activeRequestId = 0;
             emit("camera_closed", "renderer", "stock_avm_shell", "view", view,
                     "reason", reason == null ? "unknown" : reason, "request_id", requestId, "error", error);
+        }
+
+        private void releaseOutputLease() {
+            CameraGpuOutput.Binding lease = outputLease;
+            outputLease = null;
+            if (lease != null) lease.close();
         }
 
         private <T> T runOnMain(java.util.concurrent.Callable<T> callable) throws Exception {
@@ -302,6 +339,7 @@ public final class StockAvmShellMain {
         }
 
         private void queueProcessTermination() {
+            processTerminationQueued = true;
             if (!handler.post(this::terminateProcessOnce)) terminateProcessOnce();
         }
 

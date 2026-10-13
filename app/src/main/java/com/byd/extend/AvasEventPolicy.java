@@ -13,6 +13,15 @@ final class AvasEventPolicy {
     private String suppressedProfile = "";
     private String suppressionPowerProfile = "";
     private long suppressionDeltaMs = -1;
+    private final AvasPowerOffLatch latch;
+    private boolean pendingPowerOff;
+
+    AvasEventPolicy() { this(null); }
+
+    AvasEventPolicy(AvasPowerOffLatch latch) {
+        this.latch = latch;
+        pendingPowerOff = latch != null && latch.pending();
+    }
 
     List<String> sample(long now, int rawPower, int rawLock, boolean offReady) {
         return sample(now, rawPower, rawLock, false, offReady);
@@ -20,6 +29,11 @@ final class AvasEventPolicy {
 
     List<String> sample(long now, int rawPower, int rawLock,
             boolean onReady, boolean offReady) {
+        return sample(now, rawPower, rawLock, onReady, offReady, false, false);
+    }
+
+    List<String> sample(long now, int rawPower, int rawLock,
+            boolean onReady, boolean offReady, boolean lockTriggeredOff, boolean offPlaybackReady) {
         List<String> result = new ArrayList<>(2);
         clearSuppressionResult();
         int nextPower = normalizedPower(rawPower);
@@ -29,12 +43,14 @@ final class AvasEventPolicy {
             return result;
         }
         invalidateIneligible(onReady, offReady);
+        if (!lockTriggeredOff || !offPlaybackReady || nextPower == 1) setPendingPowerOff(false);
         if (powerEventAt > now || (powerEventAt >= 0
                 && now - powerEventAt > CONCURRENT_LOCK_WINDOW_MS)) clearToken();
         // Power first when both values change in one observation.
         if (nextPower >= 0 && power >= 0 && nextPower != power) {
             String profile = nextPower == 0 ? "power_off" : "power_on";
-            result.add(profile);
+            if (nextPower == 0 && lockTriggeredOff) setPendingPowerOff(offPlaybackReady);
+            else result.add(profile);
             clearToken();
             if ((nextPower == 0 && offReady) || (nextPower != 0 && onReady)) {
                 powerEventAt = now;
@@ -43,7 +59,11 @@ final class AvasEventPolicy {
         }
         if (nextLock >= 0 && lock >= 0 && nextLock != lock) {
             String profile = nextLock == 2 ? "lock" : "unlock";
-            if (powerEventAt >= 0 && now >= powerEventAt
+            if (nextLock == 2 && nextPower == 0 && pendingPowerOff) {
+                // Persist consumption before handing anything to the playback queue.
+                setPendingPowerOff(false);
+                result.add("power_off");
+            } else if (powerEventAt >= 0 && now >= powerEventAt
                     && now - powerEventAt <= CONCURRENT_LOCK_WINDOW_MS) {
                 suppressedProfile = profile;
                 suppressionPowerProfile = powerProfile;
@@ -56,6 +76,17 @@ final class AvasEventPolicy {
         power = nextPower;
         lock = nextLock;
         return result;
+    }
+
+    void lockTriggeredEligibilityChanged(boolean eligible) {
+        if (!eligible) setPendingPowerOff(false);
+    }
+
+    boolean hasPendingPowerOff() { return pendingPowerOff; }
+
+    private void setPendingPowerOff(boolean value) {
+        if (latch != null) latch.set(value);
+        pendingPowerOff = value;
     }
 
     boolean wasEventSuppressed() { return !suppressedProfile.isEmpty(); }
@@ -88,6 +119,8 @@ final class AvasEventPolicy {
         }
         power = nextPower;
         lock = nextLock;
+        // A recovered already-locked snapshot consumes silently, never replays an old event.
+        if (nextPower == 1 || nextLock == 2) setPendingPowerOff(false);
         return true;
     }
 

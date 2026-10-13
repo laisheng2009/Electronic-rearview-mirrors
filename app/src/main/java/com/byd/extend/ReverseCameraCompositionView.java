@@ -49,6 +49,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     private TextureView previewBase;
     private View previewBaseCover;
     private Surface previewBaseSurface;
+    private StockAvmOutput previewBaseOutput;
     private final BlindSpotCameraView.InputGeneration previewBaseInputGeneration =
             new BlindSpotCameraView.InputGeneration();
     private int previewBaseGeneration;
@@ -211,7 +212,8 @@ final class ReverseCameraCompositionView extends FrameLayout {
             public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
                 int lostGeneration = previewBaseGeneration;
                 boolean required = previewBaseRequired();
-                if (previewBaseSurface != null) previewBaseSurface.release();
+                if (previewBaseOutput != null) previewBaseOutput.retire();
+                previewBaseOutput = null;
                 previewBaseSurface = null;
                 previewBaseViewportWidth = 0;
                 previewBaseViewportHeight = 0;
@@ -222,7 +224,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
                         callback.onReverseSurfaceLost(0, lostGeneration);
                     }
                 }
-                return true;
+                return !StockAvmOutput.retainOnDestroy(texture);
             }
 
             @Override
@@ -777,7 +779,8 @@ final class ReverseCameraCompositionView extends FrameLayout {
 
     void retirePreviewInputs() {
         clearFrames();
-        if (previewBaseSurface != null) previewBaseSurface.release();
+        if (previewBaseOutput != null) previewBaseOutput.retire();
+        previewBaseOutput = null;
         previewBaseSurface = null;
         previewBaseViewportWidth = 0;
         previewBaseViewportHeight = 0;
@@ -1254,7 +1257,8 @@ final class ReverseCameraCompositionView extends FrameLayout {
         if (changed) configurePreviewBaseBuffer(texture, width, height);
         if (!previewBaseGeometryReady) return;
         if (previewBaseSurface == null) {
-            previewBaseSurface = new Surface(texture);
+            previewBaseOutput = new StockAvmOutput(texture, width, height);
+            previewBaseSurface = previewBaseOutput.surface;
             previewBaseGeneration = previewBaseInputGeneration.next();
             clearFrames();
             notifySurfacesReady();

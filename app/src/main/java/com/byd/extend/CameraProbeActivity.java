@@ -3045,7 +3045,7 @@ public final class CameraProbeActivity extends ComponentActivity
             profiles.add(new AvasProfileUiState(profile.id, profile.enabled, profile.random,
                     selectedName, assets, profile.volume, avasPlayback(profile.id),
                     profile.selectedAssetId.isEmpty() ? null : profile.selectedAssetId,
-                    profile.skipConcurrentLockUnlock));
+                    profile.skipConcurrentLockUnlock, profile.onlyWhenLockingPoweredOff));
         }
         String importing = preferences == null ? null
                 : preferences.getString(PREF_AVAS_IMPORT_PROFILE, null);
@@ -3160,6 +3160,7 @@ public final class CameraProbeActivity extends ComponentActivity
             Integer volume = null;
             String selected = null;
             Boolean skipConcurrentLockUnlock = null;
+            Boolean onlyWhenLockingPoweredOff = null;
             if (kind == AvasActionKind.SetEnabled && action.getBooleanValue() != null) {
                 enabled = action.getBooleanValue();
                 if (!enabled) stopAvasListAudition(avasAudition.getSessionId());
@@ -3170,13 +3171,16 @@ public final class CameraProbeActivity extends ComponentActivity
             } else if (kind == AvasActionKind.SetSkipConcurrentLockUnlock
                     && action.getBooleanValue() != null) {
                 skipConcurrentLockUnlock = action.getBooleanValue();
+            } else if (kind == AvasActionKind.SetOnlyWhenLockingPoweredOff
+                    && "power_off".equals(profileId) && action.getBooleanValue() != null) {
+                onlyWhenLockingPoweredOff = action.getBooleanValue();
             } else if (kind == AvasActionKind.SelectAsset && action.getStringValue() != null) {
                 selected = action.getStringValue();
             } else {
                 return;
             }
             avasLibrary.updateProfileSettings(profileId, enabled, random, volume, selected,
-                    skipConcurrentLockUnlock);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
             CameraHelperService.configureAvas(this);
         } catch (RuntimeException invalid) {
             if (action.getKind() == AvasActionKind.StartAudition) {
@@ -10197,7 +10201,7 @@ public final class CameraProbeActivity extends ComponentActivity
             data.writeInterfaceToken(CameraHelperMain.DESCRIPTOR);
             data.writeInt(requestId);
             data.writeInt(bundle.panoramaSurface != null ? 1 : 0);
-            if (bundle.panoramaSurface != null) bundle.panoramaSurface.writeToParcel(data, 0);
+            if (bundle.panoramaSurface != null) CameraGpuOutput.writeSurface(data, bundle.panoramaSurface);
             data.writeInt(bundle.sourceIndexes.length);
             for (int i = 0; i < bundle.sourceIndexes.length; i++) {
                 data.writeInt(bundle.sourceIndexes[i]);
@@ -10257,7 +10261,7 @@ public final class CameraProbeActivity extends ComponentActivity
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(CameraHelperMain.DESCRIPTOR);
-            surface.writeToParcel(data, 0);
+            CameraGpuOutput.writeSurface(data, surface);
             data.writeInt(viewpoint);
             data.writeInt(horizontal ? 1 : 0);
             data.writeInt(stockDewarp ? 1 : 0);
@@ -10932,6 +10936,21 @@ public final class CameraProbeActivity extends ComponentActivity
                 }
                 // Validate a stock death against the live epoch before retiring that epoch.
                 boolean backgroundHandled = handleReversePreviewBackgroundEvent(json);
+                if (!backgroundHandled && "stock_avm_shell_died".equals(kind)
+                        && isMatchingCurrentAvmShellEpoch(json)
+                        && isMatchingActivityCameraShellEpoch(activityCameraShellEpoch,
+                                json.optLong("camera_shell_epoch", 0))) {
+                    int deadRequest = json.optInt("request_id", 0);
+                    if (deadRequest > 0 && deadRequest == closingActivityCameraRequestId
+                            && (activityClosePending || cameraTransition.pending())) {
+                        String failure = json.optString("error", "stock renderer died");
+                        String token = cameraTransition.pendingToken();
+                        if (activityColdResetInFlight) failActivityColdReset(deadRequest, failure);
+                        else if (token != null) failCameraTransition(token, failure);
+                        else finishActivityStoppedClose(deadRequest, failure);
+                        backgroundHandled = true;
+                    }
+                }
                 rememberActivityAvmShellEpoch(json, false);
                 if (backgroundHandled) return;
                 if ("reverse_camera_start".equals(kind)) {
@@ -11066,7 +11085,11 @@ public final class CameraProbeActivity extends ComponentActivity
                     int requestId = json.optInt("request_id", 0);
                     if (isMatchingStockShellCloseError(
                             json.optString("renderer"), json.optString("stage"),
-                            closingActivityCameraRequestId, requestId)) {
+                            closingActivityCameraRequestId, requestId)
+                            && isMatchingActivityCameraShellEpoch(activityCameraShellEpoch,
+                                    json.optLong("camera_shell_epoch", 0))
+                            && (json.optLong("avm_shell_epoch", 0) <= 0
+                                    || isMatchingCurrentAvmShellEpoch(json))) {
                         String failure = json.optString("error", "stock shell close failed");
                         String transitionToken = cameraTransition.pendingToken();
                         if (transitionToken != null) {

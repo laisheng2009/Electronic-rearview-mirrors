@@ -31,6 +31,8 @@ final class AvasTelemetryController implements AutoCloseable {
     interface Sink {
         boolean powerOnSuppressionEligible();
         boolean powerOffSuppressionEligible();
+        default boolean lockTriggeredPowerOff() { return false; }
+        default boolean powerOffPlaybackReady() { return false; }
         void onProfile(String profile);
         default void onPowerOffObserved() {}
         default void onRawPower(int power, boolean baseline) {}
@@ -77,7 +79,15 @@ final class AvasTelemetryController implements AutoCloseable {
     void activate() { executor.execute(this::activateSerialized); }
     void deactivate() { executor.execute(this::deactivateSerialized); }
     void eligibilityChanged(boolean onReady, boolean offReady) {
-        executor.execute(() -> policy.invalidateIneligible(onReady, offReady));
+        executor.execute(() -> {
+            policy.invalidateIneligible(onReady, offReady);
+            try {
+                policy.lockTriggeredEligibilityChanged(
+                        sink.lockTriggeredPowerOff() && sink.powerOffPlaybackReady());
+            } catch (RuntimeException failure) {
+                sink.log("avas_power_off_latch_error", "error", failure.toString());
+            }
+        });
     }
 
     private void activateSerialized() {
@@ -276,13 +286,13 @@ final class AvasTelemetryController implements AutoCloseable {
             if (!initialized) {
                 power = snapshot.power;
                 lock = snapshot.lock;
-                policy.reconcile(power, lock);
+                if (!reconcilePolicy()) return;
                 initialized = true;
                 logReadyOnce(source, power, lock, clock.now());
             } else if (mismatch) {
                 power = snapshot.power;
                 lock = snapshot.lock;
-                policy.reconcile(power, lock);
+                if (!reconcilePolicy()) return;
                 initialized = true;
                 sink.log("avas_telemetry_reconciled", "source", source, "power", power,
                         "lock", lock, "action", "silent_no_audio_no_power_token");
@@ -314,13 +324,23 @@ final class AvasTelemetryController implements AutoCloseable {
             return;
         }
         if (!initialized) {
-            policy.reconcile(power, lock);
+            if (!reconcilePolicy()) return;
             initialized = true;
             logReadyOnce(source, power, lock, observedMs);
             return;
         }
-        List<String> profiles = policy.sample(observedMs, power, lock,
-                sink.powerOnSuppressionEligible(), sink.powerOffSuppressionEligible());
+        List<String> profiles;
+        boolean pendingBefore = policy.hasPendingPowerOff();
+        try {
+            profiles = policy.sample(observedMs, power, lock,
+                    sink.powerOnSuppressionEligible(), sink.powerOffSuppressionEligible(),
+                    sink.lockTriggeredPowerOff(), sink.powerOffPlaybackReady());
+        } catch (RuntimeException failure) {
+            resetBaseline();
+            sink.log("avas_power_off_latch_error", "error", failure.toString());
+            return;
+        }
+        logLatchChange(pendingBefore, source);
         for (String profile : profiles) sink.onProfile(profile);
         if (policy.wasEventSuppressed()) sink.onSuppressed(policy.suppressedProfile(),
                 policy.suppressionPowerProfile(), policy.suppressionDeltaMs());
@@ -328,6 +348,24 @@ final class AvasTelemetryController implements AutoCloseable {
             sink.log("avas_telemetry_transition", "source", source, "power", power,
                     "lock", lock, "received_t_ms", observedMs);
         }
+    }
+
+    private boolean reconcilePolicy() {
+        boolean pendingBefore = policy.hasPendingPowerOff();
+        try {
+            boolean valid = policy.reconcile(power, lock);
+            logLatchChange(pendingBefore, "silent_baseline");
+            return valid;
+        } catch (RuntimeException failure) {
+            resetBaseline();
+            sink.log("avas_power_off_latch_error", "error", failure.toString());
+            return false;
+        }
+    }
+
+    private void logLatchChange(boolean before, String source) {
+        if (before != policy.hasPendingPowerOff()) sink.log("avas_power_off_latch",
+                "pending", policy.hasPendingPowerOff(), "source", source, "power", power, "lock", lock);
     }
 
     private void enterFallback(String reason, boolean loseBaseline) {

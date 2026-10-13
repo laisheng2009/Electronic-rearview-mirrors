@@ -2,6 +2,8 @@ package com.byd.extend;
 
 import android.content.Context;
 import android.graphics.SurfaceTexture;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.view.Surface;
 import java.util.Map;
 import java.util.function.BiConsumer;
@@ -12,18 +14,33 @@ final class BydStockAvm implements AutoCloseable {
     private final BiConsumer<String, String> stage;
     private Object api;
     private Surface input;
+    private String configuration;
 
     BydStockAvm(BiConsumer<String, String> stage) { this.stage = stage; }
 
     void open(Context context, Config config, ReverseSteeringModelConfig.Selection selection,
             Surface display, int viewpoint, boolean horizontal) throws Exception {
         ClassLoader loader = context.getClassLoader();
+        String nextConfiguration = config.detail() + ";" + config.intrinsic + ";"
+                + selection.resourceSuffix + ";" + selection.packageLastUpdateTime;
+        if (api != null && !nextConfiguration.equals(configuration)) {
+            close();
+            invoke(api, "terminate", new Class<?>[0]);
+            awaitRenderer();
+            api = null;
+        }
+        if (api != null) {
+            attach(display, viewpoint, horizontal);
+            return;
+        }
         Class<?> type = Class.forName("com.byd.carvis.AvmAPI", true, loader);
         java.lang.reflect.Method initialize = type.getMethod("initialize", String.class,
-                int.class, int.class, int.class, int.class, String.class, Context.class);
+                int.class, int.class, int.class, int.class, String.class, String.class, Context.class);
         String root = "/data/local/tmp/bydextend_avm/byd/" + config.carType
                 + selection.resourceSuffix + "/" + config.panoHeight + "/" + selection.packageLastUpdateTime;
         String model = root + "/model", parameters = root + "/parameters", pano = root + "/pano";
+        String common = root + "/common";
+        copyAssetDirectory(loader, context, "resource_byd/common", common);
         copyAssetDirectory(loader, context,
                 "resource_byd/" + config.carType + "/CarModel" + selection.resourceSuffix, model);
         copyAssetDirectory(loader, context, "resource_byd/" + config.carType + "/"
@@ -55,15 +72,23 @@ final class BydStockAvm implements AutoCloseable {
         api = type.getConstructor().newInstance();
         invoke(api, "setCameraIndex", new Class<?>[]{int.class, int.class, int.class, int.class},
                 0, 1, rearLeftRightFront ? 2 : 3, rearLeftRightFront ? 3 : 2);
-        initialize.invoke(api, model, config.panoWidth, config.panoHeight, width, height, parameters, context);
+        initialize.invoke(api, model, config.panoWidth, config.panoHeight, width, height,
+                parameters, common, context);
         invoke(api, "setCameraType", new Class<?>[]{int.class, int.class}, cameraType, 0);
         invoke(api, "setAutomaticCalibrationStr", new Class<?>[]{String.class}, config.intrinsic);
         invoke(api, "setCarResources", new Class<?>[]{String.class, String.class, String.class, String.class},
                 config.carType, config.subCarType, color == null ? "" : color, pano);
         stage.accept("byd_initialize", "model=" + model + ";parameters=" + parameters
+                + ";common=" + common
                 + ";camera_order=" + (rearLeftRightFront ? "rear_left_right_front" : "rear_left_front_right"));
+        configuration = nextConfiguration;
+        attach(display, viewpoint, horizontal);
+    }
+
+    private void attach(Surface display, int viewpoint, boolean horizontal) throws Exception {
         if (!Boolean.TRUE.equals(invoke(api, "initDisplay", new Class<?>[]{Context.class, Surface.class},
                 null, display))) throw new IllegalStateException("BYD initDisplay rejected surface");
+        awaitRenderer();
         setViewpoint(viewpoint, horizontal);
         long deadline = System.nanoTime() + 3_000_000_000L;
         do {
@@ -123,10 +148,20 @@ final class BydStockAvm implements AutoCloseable {
     }
 
     @Override public void close() throws Exception {
-        Throwable failure = terminate(api);
-        api = null;
+        if (api != null) {
+            invoke(api, "freeDisplay", new Class<?>[0]);
+            awaitRenderer();
+        }
         // Release our producer wrapper, not the SurfaceTexture owned by the OEM renderer.
         if (input != null) { input.release(); input = null; }
-        if (failure != null) throw new Exception(failure);
+    }
+
+    private void awaitRenderer() throws Exception {
+        // AvmAPI queues attach/free on its HandlerThread; Java return is not EGL completion.
+        if (!(api instanceof HandlerThread)) throw new IllegalStateException("Unknown BYD render queue");
+        Handler handler = new Handler(((HandlerThread) api).getLooper());
+        java.util.concurrent.FutureTask<Void> barrier = new java.util.concurrent.FutureTask<>(() -> null);
+        if (!handler.post(barrier)) throw new IllegalStateException("BYD render queue stopped");
+        barrier.get(5, java.util.concurrent.TimeUnit.SECONDS);
     }
 }

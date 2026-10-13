@@ -67,11 +67,15 @@ final class CameraGpuOutput extends Binder {
     }
 
     static Surface readSurface(Parcel data) {
+        return readSurface(data, Binder.getCallingUid());
+    }
+
+    static Surface readSurface(Parcel data, int ownerUid) {
         Surface surface = Surface.CREATOR.createFromParcel(data);
         try {
             IBinder endpoint = data.readStrongBinder();
             if (endpoint != null) synchronized (OUTPUTS) {
-                OUTPUTS.put(surface, new Endpoint(endpoint, Binder.getCallingUid()));
+                OUTPUTS.put(surface, new Endpoint(endpoint, ownerUid));
             }
             return surface;
         } catch (RuntimeException error) {

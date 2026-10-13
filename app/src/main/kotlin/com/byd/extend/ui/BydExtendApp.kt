@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -22,6 +24,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -564,6 +569,7 @@ private fun avasTitle(id: String, strings: UiStrings) = when (id) {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun FormScope.AvasIntegration(
     state: AvasUiState, strings: UiStrings, colors: UiPalette,
     onAction: (BydExtendUiAction) -> Unit,
@@ -590,7 +596,9 @@ private fun FormScope.AvasIntegration(
         ?: AvasProfileUiState(id = id) }
         .chunked(columns).forEachIndexed { pairIndex, pair ->
             row("avas-profile-pair-$pairIndex") {
-                    Row(Modifier.fillMaxWidth().padding(top = 12.dp).height(IntrinsicSize.Max),
+                    var powerOffConditionHeight by remember { mutableIntStateOf(0) }
+                    val density = LocalDensity.current
+                    FlowRow(Modifier.fillMaxWidth().padding(top = 12.dp), maxItemsInEachRow = columns,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         pair.forEach { profile ->
                             val importing = state.importingProfileId != null
@@ -600,7 +608,7 @@ private fun FormScope.AvasIntegration(
                             }
                             val selectedLabel = selectedAsset?.let { avasAssetLabel(it, strings) }
                                 ?: profile.currentFilename
-                            Section(title, colors, Modifier.weight(1f).fillMaxHeight()
+                            Section(title, colors, Modifier.weight(1f).fillMaxRowHeight()
                                 .testTag("avas-${profile.id}"), header = {
                                 Row(Modifier.fillMaxWidth().background(colors.panelAlt)
                                     .avasSwitchRow(profile.enabled, {
@@ -624,7 +632,18 @@ private fun FormScope.AvasIntegration(
                                         profile.skipConcurrentLockUnlock, {
                                             send(profile.id, AvasActionKind.SetSkipConcurrentLockUnlock,
                                                 boolean = it)
-                                        }, colors, enabled = profile.enabled)
+                                        }, colors, enabled = profile.enabled
+                                            && (profile.id != AvasProfileIds.POWER_OFF || !profile.onlyWhenLockingPoweredOff))
+                                }
+                                if (profile.id == AvasProfileIds.POWER_OFF) {
+                                    Box(Modifier.onSizeChanged { powerOffConditionHeight = it.height }) {
+                                        SwitchLine(strings.resource(com.byd.extend.R.string.avas_only_when_locking_powered_off), "",
+                                            profile.onlyWhenLockingPoweredOff, {
+                                                send(profile.id, AvasActionKind.SetOnlyWhenLockingPoweredOff, boolean = it)
+                                            }, colors, enabled = profile.enabled && !profile.skipConcurrentLockUnlock)
+                                    }
+                                } else if (profile.id == AvasProfileIds.POWER_ON && columns > 1) {
+                                    Spacer(Modifier.height(with(density) { powerOffConditionHeight.toDp() }))
                                 }
                                 Text(strings.text("Обраний аудіофайл", "Selected audio file", "已选音频文件"),
                                     color = colors.muted, fontSize = 12.sp)

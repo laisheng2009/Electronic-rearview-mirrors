@@ -46,6 +46,7 @@ final class BlindSpotCameraView extends TextureView
     private Callback callback;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Surface cameraSurface;
+    private StockAvmOutput stockOutput;
     private CameraDewarpRenderer dewarpRenderer;
     private SurfaceTexture rendererTexture;
     private CameraDewarpRenderer retiringRenderer;
@@ -450,7 +451,8 @@ final class BlindSpotCameraView extends TextureView
             applyCurrentCrop();
             return;
         }
-        cameraSurface = new Surface(texture);
+        stockOutput = new StockAvmOutput(texture, bufferWidth, bufferHeight);
+        cameraSurface = stockOutput.surface;
         setAlpha(1.0f);
         setRawFallbackActive(false);
         applyCurrentCrop();
@@ -498,7 +500,8 @@ final class BlindSpotCameraView extends TextureView
                 && rendererGeneration == dewarpGeneration
                 && texture == getSurfaceTexture() && isAvailable()) {
             Log.e(TAG, "Dewarp renderer unavailable; using direct Surface", startupError);
-            cameraSurface = new Surface(texture);
+            stockOutput = new StockAvmOutput(texture, bufferWidth, bufferHeight);
+            cameraSurface = stockOutput.surface;
             setRawFallbackActive(dewarpConfig.enabled);
             setAlpha(1.0f);
             applyCurrentCrop();
@@ -524,6 +527,10 @@ final class BlindSpotCameraView extends TextureView
             rendererTexture = null;
             cameraSurface = null;
             renderer.releaseAsync();
+        } else if (stockOutput != null) {
+            stockOutput.retire();
+            stockOutput = null;
+            cameraSurface = null;
         } else if (cameraSurface != null) {
             cameraSurface.release();
             cameraSurface = null;
@@ -567,7 +574,7 @@ final class BlindSpotCameraView extends TextureView
         }
         if (rendererOwnsTexture) deferredReleaseTexture = texture;
         retireCameraInput();
-        return !rendererOwnsTexture;
+        return !StockAvmOutput.retainOnDestroy(texture) && !rendererOwnsTexture;
     }
 
     @Override

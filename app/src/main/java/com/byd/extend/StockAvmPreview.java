@@ -187,7 +187,7 @@ final class StockAvmPreview {
             requestedSurface.release();
             throw new IllegalArgumentException("Surface is invalid");
         }
-        if (byd != null || panoApi != null) {
+        if (surface != null && (byd != null || panoApi != null)) {
             try {
                 if (byd != null) {
                     byd.setViewpoint(requestedViewpoint, horizontal);
@@ -251,7 +251,7 @@ final class StockAvmPreview {
             stage(currentStage, selection.renderer + ";resource=" + selection.resourceSuffix);
             if ("BYD".equals(selection.renderer)) {
                 currentStage = "initialize_byd";
-                byd = new BydStockAvm(stageSink);
+                if (byd == null) byd = new BydStockAvm(stageSink);
                 byd.open(stockContext, config, selection, requestedSurface, requestedViewpoint, horizontal);
                 inputSurface = byd.input();
                 surface = requestedSurface;
@@ -412,12 +412,9 @@ final class StockAvmPreview {
             viewpoint = requestedViewpoint;
             return true;
         } catch (Throwable error) {
-            terminate(openedApi);
-            if (byd != null) {
-                try { byd.close(); } catch (Exception cleanup) { error.addSuppressed(cleanup); }
-                byd = null;
-            }
-            requestedSurface.release();
+            // Shell cleanup owns partial opens too; acknowledge output only after detach succeeds.
+            panoApi = openedApi;
+            surface = requestedSurface;
             throw new StageException(currentStage, root(error));
         }
     }
@@ -428,7 +425,7 @@ final class StockAvmPreview {
     }
 
     synchronized boolean isOpen() {
-        return panoApi != null || byd != null;
+        return surface != null;
     }
 
     synchronized int getViewpoint() {
@@ -452,9 +449,8 @@ final class StockAvmPreview {
         Throwable failure = terminate(activeApi);
         if (byd != null) {
             try { byd.close(); } catch (Throwable error) { failure = error; }
-            byd = null;
         }
-        if (activeSurface != null) activeSurface.release();
+        if (failure == null && activeSurface != null) activeSurface.release();
         // AvmController retains this exact Surface in a static cache across SDK sessions.
         stage("closed", failure == null ? "ok" : summary(failure));
         if (failure != null) throw new Exception(failure);

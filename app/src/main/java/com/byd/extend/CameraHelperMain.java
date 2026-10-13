@@ -326,8 +326,17 @@ final class CameraHelperMain {
         @Override
         protected synchronized boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
+            if (code == IBinder.INTERFACE_TRANSACTION) {
+                reply.writeString(DESCRIPTOR);
+                return true;
+            }
             if (cameraRuntime != null && CameraRuntimeClient.isCameraTransaction(code))
                 return cameraRuntime.transactCamera(code, data, reply, flags);
+            return transactCameraAs(code, data, reply, flags, Binder.getCallingUid());
+        }
+
+        synchronized boolean transactCameraAs(int code, Parcel data, Parcel reply, int flags,
+                int callerUid) throws RemoteException {
             try {
                 data.enforceInterface(DESCRIPTOR);
                 if (code == TX_REGISTER_CALLBACK) {
@@ -409,7 +418,7 @@ final class CameraHelperMain {
                     return true;
                 }
                 if (code == TX_OPEN_STOCK_AVM) {
-                    Surface requestedSurface = Surface.CREATOR.createFromParcel(data);
+                    Surface requestedSurface = CameraGpuOutput.readSurface(data, callerUid);
                     int viewpoint = data.readInt();
                     boolean horizontal = data.readInt() != 0;
                     boolean stockDewarp = data.readInt() != 0;
@@ -422,7 +431,7 @@ final class CameraHelperMain {
                     return true;
                 }
                 if (code == TX_OPEN_DIRECT) {
-                    Surface requestedSurface = CameraGpuOutput.readSurface(data);
+                    Surface requestedSurface = CameraGpuOutput.readSurface(data, callerUid);
                     String requestedTag = data.readString();
                     int requestedIndex = data.readInt();
                     int requestId = data.readInt();
@@ -446,7 +455,7 @@ final class CameraHelperMain {
                 if (code == TX_OPEN_REVERSE_PREVIEW_TARGETED) {
                     int requestId = data.readInt();
                     requireActivityRequestId(requestId);
-                    ReversePreviewRequest requested = readTargetedReversePreview(data);
+                    ReversePreviewRequest requested = readTargetedReversePreview(data, callerUid);
                     String result = openReversePreview(
                             requested.panoOutput, requested.directSurfaces,
                             requested.directIndexes, requestId);
@@ -4695,7 +4704,7 @@ final class CameraHelperMain {
             }
         }
 
-        private static ReversePreviewRequest readTargetedReversePreview(Parcel data) {
+        private static ReversePreviewRequest readTargetedReversePreview(Parcel data, int callerUid) {
             int hasPanorama = data.readInt();
             if (hasPanorama != 0 && hasPanorama != 1) {
                 throw new IllegalArgumentException("invalid Pano-base flag");
@@ -4705,7 +4714,7 @@ final class CameraHelperMain {
             int[] directIndexes = new int[0];
             try {
                 if (hasPanorama == 1) {
-                    panoOutput = Surface.CREATOR.createFromParcel(data);
+                    panoOutput = CameraGpuOutput.readSurface(data, callerUid);
                 }
                 int count = data.readInt();
                 if (count < 1 || count > 4) {
@@ -4716,7 +4725,7 @@ final class CameraHelperMain {
                 directIndexes = new int[count];
                 for (int i = 0; i < count; i++) {
                     directIndexes[i] = data.readInt();
-                    directSurfaces[i] = CameraGpuOutput.readSurface(data);
+                    directSurfaces[i] = CameraGpuOutput.readSurface(data, callerUid);
                 }
                 String validation = validateReversePreviewTargets(
                         panoOutput, directSurfaces, directIndexes);

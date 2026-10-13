@@ -16,7 +16,7 @@ public final class AvasConfig {
     public static final List<String> PROFILE_IDS = Collections.unmodifiableList(Arrays.asList(
             "lock", "unlock", "power_off", "power_on"));
     private static final int MAX_JSON_LENGTH = 1_048_576;
-    private static final int VERSION = 3;
+    private static final int VERSION = 4;
 
     public final List<Profile> profiles;
     public final Engine engine;
@@ -90,6 +90,7 @@ public final class AvasConfig {
                         .put("volume", profile.volume)
                         .put("selectedAssetId", profile.selectedAssetId)
                         .put("skipConcurrentLockUnlock", profile.skipConcurrentLockUnlock)
+                        .put("onlyWhenLockingPoweredOff", profile.onlyWhenLockingPoweredOff)
                         .put("assets", assets));
             }
             JSONObject engineValue = new JSONObject()
@@ -117,7 +118,7 @@ public final class AvasConfig {
             if (version < 1 || version > VERSION) {
                 throw new IllegalArgumentException("unsupported AVAS configuration");
             }
-            if (version == VERSION) requireKeys(root, "version", "profiles", "engine");
+            if (version >= 3) requireKeys(root, "version", "profiles", "engine");
             else requireKeys(root, "version", "profiles");
             JSONArray input = root.getJSONArray("profiles");
             if (input.length() != PROFILE_IDS.size()) {
@@ -129,9 +130,12 @@ public final class AvasConfig {
                 if (version == 1) {
                     requireKeys(value, "id", "enabled", "random", "volume",
                             "selectedAssetId", "assets");
-                } else {
+                } else if (version < 4) {
                     requireKeys(value, "id", "enabled", "random", "volume",
                             "selectedAssetId", "skipConcurrentLockUnlock", "assets");
+                } else {
+                    requireKeys(value, "id", "enabled", "random", "volume",
+                            "selectedAssetId", "skipConcurrentLockUnlock", "onlyWhenLockingPoweredOff", "assets");
                 }
                 JSONArray assetValues = value.getJSONArray("assets");
                 List<Asset> assets = new ArrayList<>();
@@ -143,9 +147,10 @@ public final class AvasConfig {
                 profiles.add(new Profile(value.getString("id"), strictBoolean(value.get("enabled")),
                         strictBoolean(value.get("random")), strictInt(value.get("volume"), "volume"),
                         value.getString("selectedAssetId"), assets,
-                        version == 1 || strictBoolean(value.get("skipConcurrentLockUnlock"))));
+                        version == 1 || strictBoolean(value.get("skipConcurrentLockUnlock")),
+                        version >= 4 && strictBoolean(value.get("onlyWhenLockingPoweredOff"))));
             }
-            Engine engine = version == VERSION
+            Engine engine = version >= 3
                     ? parseEngine(root.getJSONObject("engine")) : Engine.defaults();
             return new AvasConfig(profiles, engine);
         } catch (IllegalArgumentException error) {
@@ -259,6 +264,7 @@ public final class AvasConfig {
         public final String selectedAssetId;
         public final List<Asset> assets;
         public final boolean skipConcurrentLockUnlock;
+        public final boolean onlyWhenLockingPoweredOff;
 
         public Profile(String id, boolean enabled, boolean random, int volume,
                 String selectedAssetId, List<Asset> assets) {
@@ -267,7 +273,15 @@ public final class AvasConfig {
 
         public Profile(String id, boolean enabled, boolean random, int volume,
                 String selectedAssetId, List<Asset> assets, boolean skipConcurrentLockUnlock) {
+            this(id, enabled, random, volume, selectedAssetId, assets, skipConcurrentLockUnlock, false);
+        }
+
+        public Profile(String id, boolean enabled, boolean random, int volume,
+                String selectedAssetId, List<Asset> assets, boolean skipConcurrentLockUnlock,
+                boolean onlyWhenLockingPoweredOff) {
             if (!PROFILE_IDS.contains(id)) throw new IllegalArgumentException("invalid profile id");
+            if (onlyWhenLockingPoweredOff && !"power_off".equals(id))
+                throw new IllegalArgumentException("lock-triggered power-off is only valid for power_off");
             if (volume < 0 || volume > 100) throw new IllegalArgumentException("invalid volume");
             if (selectedAssetId == null || assets == null) {
                 throw new IllegalArgumentException("null profile field");
@@ -288,24 +302,31 @@ public final class AvasConfig {
             this.volume = volume;
             this.selectedAssetId = selectedAssetId;
             this.assets = copy;
-            this.skipConcurrentLockUnlock = skipConcurrentLockUnlock;
+            this.onlyWhenLockingPoweredOff = onlyWhenLockingPoweredOff;
+            this.skipConcurrentLockUnlock = skipConcurrentLockUnlock && !onlyWhenLockingPoweredOff;
         }
 
         public Profile withSettings(boolean enabled, boolean random, int volume,
                 String selectedAssetId) {
             return new Profile(id, enabled, random, volume, selectedAssetId, assets,
-                    skipConcurrentLockUnlock);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
         }
 
         public Profile withSettings(boolean enabled, boolean random, int volume,
                 String selectedAssetId, boolean skipConcurrentLockUnlock) {
             return new Profile(id, enabled, random, volume, selectedAssetId, assets,
-                    skipConcurrentLockUnlock);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
+        }
+
+        public Profile withSettings(boolean enabled, boolean random, int volume,
+                String selectedAssetId, boolean skipConcurrentLockUnlock, boolean onlyWhenLockingPoweredOff) {
+            return new Profile(id, enabled, random, volume, selectedAssetId, assets,
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
         }
 
         public Profile withAssets(List<Asset> assets, String selectedAssetId) {
             return new Profile(id, enabled, random, volume, selectedAssetId, assets,
-                    skipConcurrentLockUnlock);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
         }
     }
 

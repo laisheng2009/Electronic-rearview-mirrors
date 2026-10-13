@@ -45,8 +45,9 @@ final class CameraRuntimeHost {
                 throw new IllegalStateException("camera client attachment expired");
             if (!CameraRuntimeClient.isCameraTransaction(code))
                 throw new SecurityException("not a camera operation");
+            int callerUid = Binder.getCallingUid();
             long identity = Binder.clearCallingIdentity();
-            try { return helper.onTransact(code, data, reply, flags); }
+            try { return helper.transactCameraAs(code, data, reply, flags, callerUid); }
             catch (android.os.RemoteException error) { throw new IllegalStateException(error); }
             finally { Binder.restoreCallingIdentity(identity); }
         }
