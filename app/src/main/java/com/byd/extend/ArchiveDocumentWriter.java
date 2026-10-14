@@ -6,7 +6,7 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
 
-/** Streams a completed ZIP unchanged, without loading the archive into memory. */
+/** Streams a completed export unchanged, without loading it into memory. */
 final class ArchiveDocumentWriter {
     private ArchiveDocumentWriter() {}
 

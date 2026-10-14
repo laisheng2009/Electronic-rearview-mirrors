@@ -1089,6 +1089,7 @@ class ProductionUiController @JvmOverloads constructor(
             CommandId.ShareCompatibilityPackage,
             CommandId.SaveCompatibilityPackage,
             CommandId.ExportCameraPresets,
+            CommandId.SaveCameraPresets,
             CommandId.ImportLegacySettings,
             CommandId.RestoreLegacyAccess,
             CommandId.OpenWeatherAttribution,
@@ -1141,8 +1142,7 @@ class ProductionUiController @JvmOverloads constructor(
                 selectedView = ParkingView.entries.getOrElse(index) { ParkingView.FrontLeft }))
             SelectionId.ReverseElement -> {
                 val value = ReverseElement.entries.getOrElse(index) { ReverseElement.RearLeft }
-                // Changing panes starts on Rear; only section navigation retains the source.
-                val source = ReverseSource.Rear
+                val source = state.reverse.sourceFor(value, state.reverse.selectedSource)
                 preferences.edit().putInt(UiSelectionPreferences.REVERSE_ELEMENT, value.ordinal)
                     .putInt(UiSelectionPreferences.REVERSE_SOURCE, source.ordinal).apply()
                 val target = state.reverse.elementTargets[value] ?: DisplayTarget.Tablet
@@ -1383,6 +1383,7 @@ private fun CommandId.allowedInLegacyHandover() = this == CommandId.OpenBackgrou
     this == CommandId.ShareCompatibilityPackage ||
     this == CommandId.SaveCompatibilityPackage ||
     this == CommandId.ExportCameraPresets ||
+    this == CommandId.SaveCameraPresets ||
     this == CommandId.ImportLegacySettings ||
     this == CommandId.RestoreLegacyAccess ||
     this == CommandId.OpenWeatherAttribution

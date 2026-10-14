@@ -13,6 +13,13 @@ import java.nio.charset.StandardCharsets;
 final class CameraPresetFiles {
     private CameraPresetFiles() {}
 
+    static File restore(File cacheDirectory, String name) {
+        if (name == null || !name.equals(new File(name).getName())
+                || !name.startsWith("byd-extend-camera-preset-") || !name.endsWith(".json")) return null;
+        File file = new File(new File(cacheDirectory, "shared_presets"), name);
+        return file.isFile() ? file : null;
+    }
+
     static String read(InputStream input) throws IOException {
         if (input == null) throw new IOException("Не вдалося відкрити файл пресету");
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();

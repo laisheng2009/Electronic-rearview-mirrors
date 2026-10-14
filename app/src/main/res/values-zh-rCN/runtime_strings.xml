@@ -50,6 +50,11 @@
     <string name="runtime_preset_load_failed">无法完成摄像头预设的加载。</string>
     <string name="runtime_preset_export_progress">正在生成摄像头预设…</string>
     <string name="runtime_preset_ready">摄像头预设已准备好分享。</string>
+    <string name="runtime_preset_choose_destination">选择摄像头预设的保存位置</string>
+    <string name="runtime_preset_saving">正在保存摄像头预设…</string>
+    <string name="runtime_preset_document_saved">摄像头预设已保存到所选位置</string>
+    <string name="runtime_preset_save_canceled">已取消保存摄像头预设</string>
+    <string name="runtime_preset_document_failed">无法保存摄像头预设。请检查可用空间和所选位置的访问权限；可能留有不完整的文件。</string>
     <string name="runtime_preset_choose">请选择摄像头预设 JSON 文件。</string>
     <string name="runtime_preset_load_canceled">已取消加载摄像头预设；设置未更改。</string>
     <string name="runtime_preset_export_title">分享摄像头预设</string>

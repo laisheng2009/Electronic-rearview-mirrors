@@ -320,10 +320,16 @@ private fun FormScope.LogSettings(state: SettingsUiState, strings: UiStrings, co
         row("presets") { SettingsActionRow(strings.text("Пресети камер", "Camera presets"),
             strings.text("Експорт і завантаження налаштувань камер", "Export and load camera settings"),
             colors, verticalPadding = 8.dp) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton(strings.text("Вивантажити", "Export"), colors, Modifier.width(190.dp),
+            Row(Modifier.width(586.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ActionButton(strings.text("Поділитись", "Share"), colors, Modifier.width(190.dp),
+                    icon = Icons.Outlined.Share, primary = true,
                     enabled = state.presetOperation.enabled && !state.presetOperation.pending) {
                     onAction(BydExtendUiAction.Run(CommandId.ExportCameraPresets))
+                }
+                ActionButton(strings.text("Зберегти як…", "Save as…", "另存为…"), colors, Modifier.width(190.dp),
+                    mainBackground = true,
+                    enabled = state.presetOperation.enabled && !state.presetOperation.pending) {
+                    onAction(BydExtendUiAction.Run(CommandId.SaveCameraPresets))
                 }
                 ActionButton(strings.text("Завантажити", "Load"), colors, Modifier.width(190.dp),
                     enabled = state.presetOperation.enabled && !state.presetOperation.pending) {

@@ -50,6 +50,11 @@
     <string name="runtime_preset_load_failed">Не вдалося завершити завантаження пресету камер.</string>
     <string name="runtime_preset_export_progress">Формування пресету камер…</string>
     <string name="runtime_preset_ready">Пресет камер готовий до поширення.</string>
+    <string name="runtime_preset_choose_destination">Виберіть місце збереження пресету камер</string>
+    <string name="runtime_preset_saving">Збереження пресету камер…</string>
+    <string name="runtime_preset_document_saved">Пресет камер збережено у вибране місце</string>
+    <string name="runtime_preset_save_canceled">Збереження пресету камер скасовано</string>
+    <string name="runtime_preset_document_failed">Не вдалося зберегти пресет камер. Перевірте вільне місце й доступ до вибраної теки; неповний файл може залишитися.</string>
     <string name="runtime_preset_choose">Виберіть JSON-файл пресету камер.</string>
     <string name="runtime_preset_load_canceled">Завантаження пресету скасовано; налаштування не змінено.</string>
     <string name="runtime_preset_export_title">Поширити пресет камер</string>

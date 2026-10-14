@@ -50,6 +50,11 @@
     <string name="runtime_preset_load_failed">Could not finish loading the camera preset.</string>
     <string name="runtime_preset_export_progress">Preparing camera preset…</string>
     <string name="runtime_preset_ready">Camera preset is ready to share.</string>
+    <string name="runtime_preset_choose_destination">Choose where to save the camera preset</string>
+    <string name="runtime_preset_saving">Saving camera preset…</string>
+    <string name="runtime_preset_document_saved">Camera preset saved to the selected location</string>
+    <string name="runtime_preset_save_canceled">Camera preset saving canceled</string>
+    <string name="runtime_preset_document_failed">Could not save the camera preset. Check free space and access to the selected location; an incomplete file may remain.</string>
     <string name="runtime_preset_choose">Choose a camera preset JSON file.</string>
     <string name="runtime_preset_load_canceled">Camera preset loading was canceled; settings were not changed.</string>
     <string name="runtime_preset_export_title">Share camera preset</string>

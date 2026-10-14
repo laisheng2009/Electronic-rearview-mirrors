@@ -272,6 +272,7 @@ enum class CommandId {
     ShareCompatibilityPackage,
     SaveCompatibilityPackage,
     ExportCameraPresets,
+    SaveCameraPresets,
     LoadCameraPresets,
     ImportLegacySettings,
     RestoreLegacyAccess,

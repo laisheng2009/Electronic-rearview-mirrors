@@ -145,6 +145,8 @@ public final class CameraProbeActivity extends ComponentActivity
     private static final int CAMERA_PRESET_REQUEST = 12;
     private static final int AVAS_AUDIO_REQUEST = 13;
     private static final int ARCHIVE_SAVE_REQUEST = 14;
+    private static final int CAMERA_PRESET_SAVE_REQUEST = 15;
+    private static final String STATE_PRESET_SAVE_NAME = "preset_save_name";
     private static final String STATE_ARCHIVE_SAVE_NAME = "archive_save_name";
     private static final String STATE_ARCHIVE_SAVE_COMPATIBILITY = "archive_save_compatibility";
     private static final String STATE_UPDATE_CHECK_DIALOG_REQUESTED = "update_check_dialog_requested";
@@ -755,6 +757,7 @@ public final class CameraProbeActivity extends ComponentActivity
     private boolean compatibilityExportInProgress;
     private boolean exportArchiveToDocument;
     private File pendingArchiveDocument;
+    private File pendingPresetDocument;
     private boolean pendingArchiveCompatibility;
     private volatile CompatibilityBundleExporter.ExportControl compatibilityExportControl;
     private volatile CompatibilityBundleExporter.ExportControl diagnosticExportControl;
@@ -1036,6 +1039,7 @@ public final class CameraProbeActivity extends ComponentActivity
         boolean clearedShutdown = GuardRecovery.isUserShutdownActive(this);
         productionUi = new ProductionUiController(preferences, this, this);
         restoreArchiveDocumentState(savedInstanceState);
+        restorePresetDocumentState(savedInstanceState);
         if (backgroundStartSettingsRequired) productionUi.selectInstallationSettings();
         selectedTab = rootTabToLegacy(productionUi.getState().getActiveTab());
         ProductionUiInstaller.install(this, productionUi);
@@ -1082,6 +1086,9 @@ public final class CameraProbeActivity extends ComponentActivity
         if (pendingArchiveDocument != null) {
             outState.putString(STATE_ARCHIVE_SAVE_NAME, pendingArchiveDocument.getName());
             outState.putBoolean(STATE_ARCHIVE_SAVE_COMPATIBILITY, pendingArchiveCompatibility);
+        }
+        if (pendingPresetDocument != null) {
+            outState.putString(STATE_PRESET_SAVE_NAME, pendingPresetDocument.getName());
         }
         super.onSaveInstanceState(outState);
     }
@@ -1432,7 +1439,7 @@ public final class CameraProbeActivity extends ComponentActivity
         settingsTransferDialog.show();
     }
 
-    private void exportCameraPreset() {
+    private void exportCameraPreset(boolean saveAs) {
         if (!beginSettingsTransfer(SettingsOperation.Preset)) return;
         showSettingsTransferProgress(runtimeText(R.string.runtime_preset_export_progress));
         logExportExecutor.execute(() -> {
@@ -1440,6 +1447,16 @@ public final class CameraProbeActivity extends ComponentActivity
                 File file = CameraPresetFiles.write(getCacheDir(),
                         CameraSettingsTransfer.exportCameraPreset(this, preferences));
                 mainHandler.post(() -> {
+                    if (saveAs) {
+                        dismissSettingsTransferDialog();
+                        if (activityDestroyed || isFinishing() || !activityResumed) {
+                            file.delete();
+                            finishSettingsTransfer();
+                            return;
+                        }
+                        choosePresetDocument(file);
+                        return;
+                    }
                     finishSettingsTransfer();
                     if (activityDestroyed || isFinishing()) return;
                     recordOperationFeedback(runtimeText(R.string.runtime_preset_ready));
@@ -1466,6 +1483,90 @@ public final class CameraProbeActivity extends ComponentActivity
         });
     }
 
+    private void restorePresetDocumentState(Bundle state) {
+        if (state == null || !state.containsKey(STATE_PRESET_SAVE_NAME)) return;
+        pendingPresetDocument = CameraPresetFiles.restore(getCacheDir(),
+                state.getString(STATE_PRESET_SAVE_NAME));
+        activeSettingsOperation = SettingsOperation.Preset;
+        settingsTransferInProgress = pendingPresetDocument != null;
+        if (pendingPresetDocument == null) {
+            finishPresetDocument(R.string.runtime_preset_document_failed, StatusTone.Error);
+            return;
+        }
+        publishSettingsOperation(SettingsOperation.Preset,
+                runtimeText(R.string.runtime_preset_choose_destination), StatusTone.Warning, true, true);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void choosePresetDocument(File file) {
+        pendingPresetDocument = file;
+        publishSettingsOperation(SettingsOperation.Preset,
+                runtimeText(R.string.runtime_preset_choose_destination), StatusTone.Warning, true);
+        try {
+            startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("application/json")
+                    .putExtra(Intent.EXTRA_TITLE, file.getName()), CAMERA_PRESET_SAVE_REQUEST);
+        } catch (RuntimeException error) {
+            pendingPresetDocument = null;
+            file.delete();
+            record("camera_preset_save", "state", "picker_failed", "error", error.toString());
+            finishPresetDocument(R.string.runtime_archive_picker_failed, StatusTone.Error);
+        }
+    }
+
+    private void acceptPresetDocument(int resultCode, Intent data) {
+        final File file = pendingPresetDocument;
+        pendingPresetDocument = null;
+        if (file == null) {
+            finishPresetDocument(R.string.runtime_preset_document_failed, StatusTone.Error);
+            return;
+        }
+        final Uri destination = resultCode == RESULT_OK && data != null ? data.getData() : null;
+        if (destination == null) {
+            file.delete();
+            finishPresetDocument(R.string.runtime_preset_save_canceled, StatusTone.Warning);
+            return;
+        }
+        publishSettingsOperation(SettingsOperation.Preset,
+                runtimeText(R.string.runtime_preset_saving), StatusTone.Warning, true);
+        final Context appContext = getApplicationContext();
+        try {
+            logExportExecutor.execute(() -> {
+                Throwable failure = null;
+                try (OutputStream output = appContext.getContentResolver().openOutputStream(destination, "w")) {
+                    ArchiveDocumentWriter.copy(file, output);
+                } catch (Exception error) {
+                    failure = error;
+                    try {
+                        android.provider.DocumentsContract.deleteDocument(appContext.getContentResolver(), destination);
+                    } catch (Exception ignored) { /* The provider may retain an incomplete new document. */ }
+                }
+                final long bytes = file.length();
+                file.delete();
+                final Throwable error = failure;
+                mainHandler.post(() -> {
+                    record("camera_preset_save", "state", error == null ? "saved" : "failed",
+                            "bytes", bytes, "error", error == null ? "" : error.toString());
+                    finishPresetDocument(error == null ? R.string.runtime_preset_document_saved
+                            : R.string.runtime_preset_document_failed, error == null ? StatusTone.Ok : StatusTone.Error);
+                });
+            });
+        } catch (RuntimeException error) {
+            file.delete();
+            record("camera_preset_save", "state", "start_failed", "error", error.toString());
+            finishPresetDocument(R.string.runtime_preset_document_failed, StatusTone.Error);
+        }
+    }
+
+    private void finishPresetDocument(int message, StatusTone tone) {
+        finishSettingsTransfer();
+        if (activityDestroyed || isFinishing()) return;
+        publishSettingsOperation(SettingsOperation.Preset, runtimeText(message), tone, false);
+        recordOperationFeedback(runtimeText(message));
+        showSettingsResultToast(runtimeText(message));
+    }
+
     @SuppressWarnings("deprecation")
     private void chooseCameraPreset() {
         if (!beginSettingsTransfer(SettingsOperation.Preset)) return;
@@ -1484,6 +1585,10 @@ public final class CameraProbeActivity extends ComponentActivity
     @SuppressWarnings("deprecation")
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == CAMERA_PRESET_SAVE_REQUEST) {
+            acceptPresetDocument(resultCode, data);
+            return;
+        }
         if (requestCode == ARCHIVE_SAVE_REQUEST) {
             acceptArchiveDocument(resultCode, data);
             return;
@@ -4104,6 +4209,10 @@ public final class CameraProbeActivity extends ComponentActivity
         if (productionUi != null) {
             productionReverseEditor.setSelectedCameraSilently(reverseElementIndex(
                     productionUi.getState().getReverse().getSelectedElement()));
+            boolean front = productionUi.getState().getReverse().getShowFront();
+            int mode = front ? ReverseSideSelectorView.MODE_FRONT : ReverseSideSelectorView.MODE_REAR;
+            if (reverseCameraPreview.sideMode() != mode) reverseCameraPreview.setSideMode(mode);
+            ReverseCameraController.applyBorders(preferences, productionReverseEditor, front);
         }
         reverseCameraPreview.applyVisibility(
                 ReverseCameraController.loadVisibilityMask(preferences));
@@ -4877,7 +4986,8 @@ public final class CameraProbeActivity extends ComponentActivity
         else if (command == CommandId.ClearLogs) clearCaptureLogs();
         else if (command == CommandId.ShareCompatibilityPackage) confirmCompatibilityBundleShare();
         else if (command == CommandId.SaveCompatibilityPackage) confirmCompatibilityBundleExport(true);
-        else if (command == CommandId.ExportCameraPresets) exportCameraPreset();
+        else if (command == CommandId.ExportCameraPresets) exportCameraPreset(false);
+        else if (command == CommandId.SaveCameraPresets) exportCameraPreset(true);
         else if (command == CommandId.LoadCameraPresets) chooseCameraPreset();
         else if (command == CommandId.ImportLegacySettings) readLegacySettings();
         else if (command == CommandId.RestoreLegacyAccess) confirmLegacyAccessRestore();
