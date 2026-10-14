@@ -244,20 +244,25 @@ final class StockAvmPreview {
             stage(currentStage, "ok");
 
             currentStage = "select_renderer";
-            ReverseSteeringModelConfig.Selection selection = new ReverseSteeringModelConfig.PreparedModel(
-                    stockContext, stockContext.getPackageManager().getPackageInfo(STOCK_PACKAGE, 0),
-                    config.carType + "/" + config.subCarType, config.modelValue,
-                    config.carType, config.subCarType)
-                    .resolveResources();
-            stage(currentStage, selection.renderer + ";resource=" + selection.resourceSuffix);
-            if ("BYD".equals(selection.renderer)) {
-                currentStage = "initialize_byd";
-                if (byd == null) byd = new BydStockAvm(stageSink);
-                byd.open(stockContext, config, selection, requestedSurface, requestedViewpoint, horizontal);
-                inputSurface = byd.input();
-                surface = requestedSurface;
-                viewpoint = requestedViewpoint;
-                return true;
+            if (config.usesLegacyTsRenderer()) {
+                // Preserve the proven whole-view TS layout without changing steering resource selection.
+                stage(currentStage, "TS;source=legacy_uked_286");
+            } else {
+                ReverseSteeringModelConfig.Selection selection = new ReverseSteeringModelConfig.PreparedModel(
+                        stockContext, stockContext.getPackageManager().getPackageInfo(STOCK_PACKAGE, 0),
+                        config.carType + "/" + config.subCarType, config.modelValue,
+                        config.carType, config.subCarType)
+                        .resolveResources();
+                stage(currentStage, selection.renderer + ";resource=" + selection.resourceSuffix);
+                if ("BYD".equals(selection.renderer)) {
+                    currentStage = "initialize_byd";
+                    if (byd == null) byd = new BydStockAvm(stageSink);
+                    byd.open(stockContext, config, selection, requestedSurface, requestedViewpoint, horizontal);
+                    inputSurface = byd.input();
+                    surface = requestedSurface;
+                    viewpoint = requestedViewpoint;
+                    return true;
+                }
             }
 
             currentStage = "set_sub_car_type";
@@ -1054,6 +1059,10 @@ final class StockAvmPreview {
             this.carType = carType;
             this.subCarType = subCarType;
             validate();
+        }
+
+        boolean usesLegacyTsRenderer() {
+            return modelValue == 286 && "uked".equals(carType) && "uked".equals(subCarType);
         }
 
         void writeToParcel(Parcel parcel) {

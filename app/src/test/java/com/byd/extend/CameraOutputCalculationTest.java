@@ -5,6 +5,19 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public final class CameraOutputCalculationTest {
+    @Test public void legacyTsRenderingIsLimitedToTheConfirmedUkedModel() {
+        assertTrue(new StockAvmPreview.Config(1, 286, 1920, 1300,
+                "ocean", "uked", "uked").usesLegacyTsRenderer());
+        assertFalse(new StockAvmPreview.Config(1, 235, 1920, 1300,
+                "ocean", "shh", "shh").usesLegacyTsRenderer());
+        assertFalse(new StockAvmPreview.Config(1, 285, 1920, 1300,
+                "ocean", "uked", "uked").usesLegacyTsRenderer());
+        assertFalse(new StockAvmPreview.Config(1, 286, 1920, 1300,
+                "ocean", "ukeb", "uked").usesLegacyTsRenderer());
+        assertFalse(new StockAvmPreview.Config(1, 286, 1920, 1300,
+                "ocean", "uked", "ukeb").usesLegacyTsRenderer());
+    }
+
     @Test public void oemCanvasFitsWithoutCroppingOrStretchingInEitherOrientation() {
         for (boolean horizontal : new boolean[]{true, false}) {
             int[] canvas = BydAvmDisplayContract.canvas(2560, 1440, horizontal);
