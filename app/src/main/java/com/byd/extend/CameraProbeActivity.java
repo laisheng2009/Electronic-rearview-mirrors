@@ -492,7 +492,8 @@ public final class CameraProbeActivity extends ComponentActivity
     private FrameLayout productionAvmHost;
     private BlindSpotCameraView cameraPreview;
     private View cameraPreviewCover;
-    private SurfaceView debugPreview;
+    private TextureView debugPreview;
+    private StockAvmOutput debugOutput;
     private View debugPreviewCover;
     private SurfaceView directCameraPreview;
     private View directCameraPreviewCover;
@@ -6416,6 +6417,7 @@ public final class CameraProbeActivity extends ComponentActivity
             productionDirectHost = null;
             directCameraSurfaceReady = false;
         } else if (slot.getKind() == CameraHostKind.Avm) {
+            retireDebugOutput();
             debugPreview = null;
             debugPreviewCover = null;
             productionAvmHost = null;
@@ -6493,6 +6495,7 @@ public final class CameraProbeActivity extends ComponentActivity
             reverseCameraSurfacesReady = false;
             calibrationSurfaceReady = false;
         } else if (tab == TAB_CAMERA_DEBUG) {
+            retireDebugOutput();
             directCameraPreview = null;
             debugPreview = null;
             directCameraPreviewCover = null;
@@ -6505,6 +6508,7 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     private void releaseAllProductionCameraHosts() {
+        retireDebugOutput();
         releaseProductionCalibrationHosts();
         if (cameraPreview != null) cameraPreview.retireCameraInput();
         if (reverseCameraPreview != null) {
@@ -7112,13 +7116,15 @@ public final class CameraProbeActivity extends ComponentActivity
     private View createProductionAvmHost() {
         if (productionAvmHost == null) {
             productionAvmHost = cameraHostRoot();
-            final SurfaceView surfaceView = new SurfaceView(this);
-            debugPreview = surfaceView;
-            surfaceView.getHolder().setFormat(android.graphics.PixelFormat.OPAQUE);
-            surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
-                @Override public void surfaceCreated(SurfaceHolder holder) {
-                    if (debugPreview != surfaceView) return;
-                    debugSurfaceReady = holder.getSurface().isValid();
+            final TextureView textureView = new TextureView(this);
+            debugPreview = textureView;
+            textureView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+                private StockAvmOutput output;
+                @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
+                    if (debugPreview != textureView) return;
+                    output = new StockAvmOutput(textureView, width, height);
+                    debugOutput = output;
+                    debugSurfaceReady = output.surface.isValid();
                     CameraHostSlot slot = productionCameraSlots.get(CameraHostKind.Avm);
                     if (debugSurfaceReady && slot != null && slot.getModeIndex() != null) {
                         int mode = clamp(slot.getModeIndex(), 0,
@@ -7126,18 +7132,22 @@ public final class CameraProbeActivity extends ComponentActivity
                         openStockAvm(StockAvmPreview.horizontalViewpoint(mode), true);
                     }
                 }
-                @Override public void surfaceChanged(
-                        SurfaceHolder holder, int format, int width, int height) {
-                    if (debugPreview != surfaceView) return;
-                    debugSurfaceReady = holder.getSurface().isValid();
+                @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {
+                    if (output != null) output.refreshGeometry();
                 }
-                @Override public void surfaceDestroyed(SurfaceHolder holder) {
-                    if (debugPreview != surfaceView) return;
-                    debugSurfaceReady = false;
-                    if (activePreview == debugPreview) closeCamera("surface_destroyed");
+                @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
+                    if (output != null) output.retire();
+                    if (debugOutput == output) debugOutput = null;
+                    output = null;
+                    if (debugPreview == textureView) {
+                        debugSurfaceReady = false;
+                        if (activePreview == debugPreview) closeCamera("surface_destroyed");
+                    }
+                    return !StockAvmOutput.retainOnDestroy(texture);
                 }
+                @Override public void onSurfaceTextureUpdated(SurfaceTexture texture) { }
             });
-            productionAvmHost.addView(surfaceView, new FrameLayout.LayoutParams(
+            productionAvmHost.addView(textureView, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT));
             debugPreviewCover = blackCover();
@@ -7147,6 +7157,15 @@ public final class CameraProbeActivity extends ComponentActivity
                             FrameLayout.LayoutParams.MATCH_PARENT));
         }
         return productionAvmHost;
+    }
+
+    private void retireDebugOutput() {
+        if (debugOutput != null) debugOutput.retire();
+        debugOutput = null;
+    }
+
+    private Surface debugSurface() {
+        return debugOutput == null ? null : debugOutput.surface;
     }
 
     private FrameLayout cameraHostRoot() {
@@ -8777,6 +8796,10 @@ public final class CameraProbeActivity extends ComponentActivity
         preferences.edit().putBoolean("debug_avm_horizontal", horizontal).apply();
         record("debug_sdk_orientation", "orientation",
                 horizontal ? "horizontal" : "vertical");
+        if (productionUi != null && productionUi.getState().getDebug().getAvmSelection() == null) {
+            if (activePreview == debugPreview || pendingCameraDebug) stopActivityCameraManually("avm_mode_deferred");
+            return;
+        }
         if (requestedOpen && activePreview == debugPreview && activeCameraViewpoint >= 0) {
             openStockAvmNow(activeCameraViewpoint, true);
         }
@@ -8904,8 +8927,8 @@ public final class CameraProbeActivity extends ComponentActivity
     private void openCamera(String viewName) {
         if (!canStartActivityCamera()) return;
         IBinder current = helper;
-        Surface surface = debugPreview.getHolder().getSurface();
-        if (current == null || !debugSurfaceReady || !surface.isValid()) {
+        Surface surface = debugSurface();
+        if (current == null || !debugSurfaceReady || surface == null || !surface.isValid()) {
             record("open_rejected", "view", viewName, "reason", "camera_not_ready");
             return;
         }
@@ -9249,10 +9272,11 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private void openStockAvm(int viewpoint, boolean debug) {
         if (!canStartActivityCamera()) return;
+        if (debug && !debugAvmModeAvailable(viewpoint)) return;
         View target = debug ? debugPreview : cameraPreview;
         boolean surfaceReady = debug ? debugSurfaceReady : cameraSurfaceReady;
         Surface surface = debug
-                ? debugPreview.getHolder().getSurface()
+                ? debugSurface()
                 : cameraPreview.getCameraSurface();
         boolean right = viewpoint == StockAvmPreview.VIEW_BLIND_SPOT_RIGHT;
         if (!debug && !right && viewpoint != StockAvmPreview.VIEW_BLIND_SPOT_LEFT) {
@@ -9306,12 +9330,13 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private void openStockAvmNow(int viewpoint, boolean debug) {
         if (!canStartActivityCamera()) return;
+        if (debug && !debugAvmModeAvailable(viewpoint)) return;
         IBinder current = helper;
         View target = debug ? debugPreview : cameraPreview;
         View cover = debug ? debugPreviewCover : cameraPreviewCover;
         boolean surfaceReady = debug ? debugSurfaceReady : cameraSurfaceReady;
         Surface surface = debug
-                ? debugPreview.getHolder().getSurface()
+                ? debugSurface()
                 : cameraPreview.getCameraSurface();
         boolean right = viewpoint == StockAvmPreview.VIEW_BLIND_SPOT_RIGHT;
         String viewName = debug ? StockAvmPreview.viewName(viewpoint)
@@ -11014,7 +11039,7 @@ public final class CameraProbeActivity extends ComponentActivity
                         } else if (activePreview == debugPreview
                                 && debugSurfaceReady
                                 && debugPreview != null
-                                && debugPreview.getHolder().getSurface().isValid()
+                                && debugSurface() != null && debugSurface().isValid()
                                 && debugPreviewCover != null) {
                             debugPreviewCover.setVisibility(View.INVISIBLE);
                         }
@@ -11057,6 +11082,9 @@ public final class CameraProbeActivity extends ComponentActivity
                                 StatusTone.Ok, false);
                     }
                 } else if ("stock_avm_stage".equals(kind)) {
+                    if ("select_renderer".equals(json.optString("stage")) && productionUi != null) {
+                        productionUi.setAvmRenderer(json.optString("detail").split(";", 2)[0]);
+                    }
                     if (!isCurrentDiagnosticStageEvent(json)) {
                         recordIgnoredActivityCameraEvent(kind, json);
                     } else {
@@ -12199,14 +12227,27 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     private void applyDebugPreviewMode() {
-        if (debugPreview == null) return;
-        boolean raw = preferences.getBoolean("debug_avm_show_raw", true);
-        float startX = raw ? 0.0f
-                : StockAvmPreview.focusedTileStartX(activeCameraViewpoint);
-        debugPreview.setPivotX(debugPreview.getWidth());
-        debugPreview.setPivotY(0.0f);
-        debugPreview.setScaleX(startX > 0.0f ? 1.0f / (1.0f - startX) : 1.0f);
-        debugPreview.setScaleY(1.0f);
+        if (debugOutput != null) debugOutput.refreshGeometry();
+        // Keep the existing TS-only corner presentation outside the Sea Lion BYD correction.
+        if (debugPreview != null && productionUi != null
+                && "TS".equals(productionUi.getState().getDebug().getAvmRenderer())) {
+            float startX = preferences.getBoolean("debug_avm_show_raw", true) ? 0f
+                    : StockAvmPreview.focusedTileStartX(activeCameraViewpoint);
+            debugPreview.setPivotX(debugPreview.getWidth());
+            debugPreview.setPivotY(0f);
+            debugPreview.setScaleX(startX > 0f ? 1f / (1f - startX) : 1f);
+            debugPreview.setScaleY(1f);
+        }
+    }
+
+    private boolean debugAvmModeAvailable(int viewpoint) {
+        if (productionUi != null && "TS".equals(productionUi.getState().getDebug().getAvmRenderer()))
+            return true;
+        boolean available = BydAvmDisplayContract.nativeView(
+                StockAvmPreview.layoutName(viewpoint), debugHorizontal) != null;
+        if (!available) record("diagnostic_mode_rejected", "viewpoint", viewpoint,
+                "orientation", debugHorizontal ? "horizontal" : "vertical", "reason", "support_deferred");
+        return available;
     }
 
     private void updateControls() {

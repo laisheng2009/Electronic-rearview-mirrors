@@ -299,4 +299,5 @@
     <string name="adb_reminder_retry">Повторити запит Wi-Fi</string>
     <string name="adb_recovery_wait_authorization">Очікування авторизації ADB</string>
     <string name="adb_recovery_wait_permissions">Очікування дозволу відновлення</string>
+    <string name="avm_mode_deferred">Підтримку цього режиму відкладено</string>
 </resources>

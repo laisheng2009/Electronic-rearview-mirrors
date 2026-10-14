@@ -238,6 +238,7 @@ final class StockAvmPreview {
             stage(currentStage, config.detail());
 
             currentStage = "set_screen_density";
+            invokeStatic(loader, "com.byd.avc.util.devicestates.DevControler", "initDev");
             invokeStatic(loader, "com.byd.avc.util.devicestates.DeviceStates$ScreenStatus",
                     "setDensity");
             stage(currentStage, "ok");

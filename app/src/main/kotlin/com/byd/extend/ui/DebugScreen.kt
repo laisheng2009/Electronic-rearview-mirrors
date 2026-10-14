@@ -38,9 +38,13 @@ import androidx.compose.ui.unit.sp
 internal fun diagnosticCameraFrameAspect(
     direct: Boolean,
     displayGeometry: CameraDisplayGeometry,
-): Float = if (direct) SOURCE_CAMERA_ASPECT else displayGeometry.aspect.takeIf {
-    it.isFinite() && it > 0f
-} ?: SOURCE_CAMERA_ASPECT
+    orientation: AvmOrientation = AvmOrientation.Horizontal,
+): Float {
+    if (direct) return SOURCE_CAMERA_ASPECT
+    val aspect = displayGeometry.aspect.takeIf { it.isFinite() && it > 0f } ?: SOURCE_CAMERA_ASPECT
+    val landscape = maxOf(aspect, 1f / aspect)
+    return if (orientation == AvmOrientation.Horizontal) landscape else 1f / landscape
+}
 
 internal fun diagnosticGroupTitle(direct: Boolean, orientation: AvmOrientation): String =
     if (direct) "pano_h" else if (orientation == AvmOrientation.Horizontal) "VIEW_GROUP_H" else "VIEW_GROUP_V"
@@ -160,11 +164,14 @@ private fun CameraDiagnostics(
             }
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 itemsIndexed(modes, key = { index, _ -> index }) { index, label ->
+                    val available = direct || state.supportsAvmMode(index)
                     ActionButton(label, colors, Modifier.fillMaxWidth(), primary = selection == index,
-                        enabled = operation.enabled && !operation.pending, maxLines = 2) {
+                        enabled = available && operation.enabled && !operation.pending, maxLines = 2) {
                         onAction(BydExtendUiAction.Select(SelectionTarget.Simple(
                             if (direct) SelectionId.DirectMode else SelectionId.AvmMode), index))
                     }
+                    if (!available) Text(strings.text("Підтримку цього режиму відкладено",
+                        "Support for this mode is deferred"), color = colors.muted, fontSize = 12.sp)
                 }
             }
             ActionButton(strings.text("Зупинити", "Stop"), colors, Modifier.fillMaxWidth(),
@@ -179,11 +186,8 @@ private fun CameraDiagnostics(
             Modifier.weight(1f).fillMaxHeight(),
             trailing = { CameraStatusPill(operation.status, strings, colors) }) {
             if (selection != null) {
-                // Direct pano_h has a known 1920x1300 source. AVM's SDK output dimensions are
-                // vehicle-configured at runtime, so the resolved tablet display is the only
-                // authoritative geometry available to this Compose layer; do not invent a mode
-                // aspect here. The Java host owns clipping/filling this frame.
-                val frameAspect = diagnosticCameraFrameAspect(direct, state.displayGeometry)
+                val frameAspect = if (!direct && state.avmRenderer == "TS") state.displayGeometry.aspect
+                    else diagnosticCameraFrameAspect(direct, state.displayGeometry, state.avmOrientation)
                 CameraStageFrame(strings.text("Кадр", "Frame"), frameAspect, colors, Modifier.fillMaxSize()) {
                     cameraHost(CameraHostSlot(if (direct) CameraHostKind.Direct else CameraHostKind.Avm,
                         sourceIndex = if (direct) selection else null,

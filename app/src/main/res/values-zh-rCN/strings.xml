@@ -299,4 +299,5 @@
     <string name="adb_reminder_retry">重试 Wi-Fi 请求</string>
     <string name="adb_recovery_wait_authorization">等待 ADB 授权</string>
     <string name="adb_recovery_wait_permissions">等待恢复权限</string>
+    <string name="avm_mode_deferred">此模式的支持已暂缓</string>
 </resources>

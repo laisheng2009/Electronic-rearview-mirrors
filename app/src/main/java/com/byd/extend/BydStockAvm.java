@@ -15,11 +15,14 @@ final class BydStockAvm implements AutoCloseable {
     private Object api;
     private Surface input;
     private String configuration;
+    private int screenWidth;
+    private int screenHeight;
 
     BydStockAvm(BiConsumer<String, String> stage) { this.stage = stage; }
 
     void open(Context context, Config config, ReverseSteeringModelConfig.Selection selection,
             Surface display, int viewpoint, boolean horizontal) throws Exception {
+        nativeViewName(viewpoint, horizontal);
         ClassLoader loader = context.getClassLoader();
         String nextConfiguration = config.detail() + ";" + config.intrinsic + ";"
                 + selection.resourceSuffix + ";" + selection.packageLastUpdateTime;
@@ -56,6 +59,8 @@ final class BydStockAvm implements AutoCloseable {
                 "com.byd.avc.util.devicestates.DeviceStates$ScreenStatus", "getOriginalScreenHeight")).intValue();
         if (width < 320 || width > 4096 || height < 240 || height > 4096)
             throw new IllegalStateException("Invalid OEM display size: " + width + "x" + height);
+        screenWidth = width;
+        screenHeight = height;
         boolean board7325L = (Boolean) invokeStatic(loader,
                 "com.byd.avc.util.devicestates.CarStatus", "isBootBoard7325L");
         String supplier = (String) invokeStatic(loader,
@@ -70,6 +75,12 @@ final class BydStockAvm implements AutoCloseable {
         String color = (String) invokeStatic(loader,
                 "com.byd.avc.util.CarBodyColorController", "getCurrentColor");
         api = type.getConstructor().newInstance();
+        Object uiType = invokeStatic(loader, "com.byd.avc.util.devicestates.DevControler", "getUiType");
+        String uiName = ((Enum<?>) uiType).name();
+        int layoutVersion = "UI_TYPE_5X".equals(uiName) ? 5
+                : "UI_TYPE_PLATFORM".equals(uiName) ? 7 : 0;
+        if (layoutVersion != 0)
+            invoke(api, "setLayoutVerison", new Class<?>[]{int.class}, layoutVersion);
         invoke(api, "setCameraIndex", new Class<?>[]{int.class, int.class, int.class, int.class},
                 0, 1, rearLeftRightFront ? 2 : 3, rearLeftRightFront ? 3 : 2);
         initialize.invoke(api, model, config.panoWidth, config.panoHeight, width, height,
@@ -80,12 +91,19 @@ final class BydStockAvm implements AutoCloseable {
                 config.carType, config.subCarType, color == null ? "" : color, pano);
         stage.accept("byd_initialize", "model=" + model + ";parameters=" + parameters
                 + ";common=" + common
+                + ";screen=" + width + "x" + height + ";layout_version=" + layoutVersion
                 + ";camera_order=" + (rearLeftRightFront ? "rear_left_right_front" : "rear_left_front_right"));
         configuration = nextConfiguration;
         attach(display, viewpoint, horizontal);
     }
 
     private void attach(Surface display, int viewpoint, boolean horizontal) throws Exception {
+        if (viewpoint != VIEW_REAR_DUAL && viewpoint != VIEW_REAR_LEFT && viewpoint != VIEW_REAR_RIGHT) {
+            int[] canvas = BydAvmDisplayContract.canvas(screenWidth, screenHeight, horizontal);
+            CameraGpuOutput.configureStockCanvas(display, canvas[0], canvas[1]);
+            stage.accept("byd_canvas", "width=" + canvas[0] + ";height=" + canvas[1]
+                    + ";orientation=" + (horizontal ? "horizontal" : "vertical"));
+        }
         if (!Boolean.TRUE.equals(invoke(api, "initDisplay", new Class<?>[]{Context.class, Surface.class},
                 null, display))) throw new IllegalStateException("BYD initDisplay rejected surface");
         awaitRenderer();
@@ -115,29 +133,10 @@ final class BydStockAvm implements AutoCloseable {
         if (view == VIEW_REAR_DUAL) return horizontal ? "LANDSCAPE_REARLR" : "PORTRAIT_REAR_LR";
         if (view == VIEW_REAR_LEFT) return "PORTRAIT_LEFT_REARLR";
         if (view == VIEW_REAR_RIGHT) return "PORTRAIT_RIGHT_REARLR";
-        // TS-only clairvoyance layouts must not silently show an unrelated BYD view.
         String layout = layoutName(view);
-        String prefix = horizontal ? "LANDSCAPE_" : "PORTRAIT_";
-        switch (layout) {
-            case "VIEW_2D_FRONT": return horizontal ? "LANDSCAPE_FRONT" : "PORTRAIT_LEFT_FRONT";
-            case "VIEW_2D_REAR": return horizontal ? "LANDSCAPE_REAR" : "PORTRAIT_LEFT_REAR";
-            case "VIEW_2D_FRONT_FULL": return prefix + "WIDE_FRONT";
-            case "VIEW_2D_REAR_FULL": return prefix + "WIDE_REAR";
-            case "VIEW_2D_LEFT_FRONT": return "PORTRAIT_LEFT_FRONT";
-            case "VIEW_2D_RIGHT_FRONT": return "PORTRAIT_RIGHT_FRONT";
-            case "VIEW_2D_LEFT_REAR": return "PORTRAIT_LEFT_REAR";
-            case "VIEW_2D_RIGHT_REAR": return "PORTRAIT_RIGHT_REAR";
-            case "VIEW_2D_FRONT_WHEELS":
-            case "VIEW_2D_FRONT_LEFT_AND_RIGHT": return horizontal ? "LANDSCAPE_FRONTLR" : "PORTRAIT_FRONT_LR";
-            case "VIEW_2D_REAR_WHEELS":
-            case "VIEW_2D_REAR_LEFT_AND_RIGHT": return horizontal ? "LANDSCAPE_REARLR" : "PORTRAIT_REAR_LR";
-            case "VIEW_2D_TOP":
-            case "VIEW_2D_TOP_FULL": return prefix + "PARKING_2D";
-            case "VIEW_3D_FRONT": return horizontal ? "LANDSCAPE_3D_FRONT" : "PORTRAIT_LEFT_3D_FRONT";
-            case "VIEW_3D_REAR": return horizontal ? "LANDSCAPE_3D_REAR" : "PORTRAIT_LEFT_3D_REAR";
-            case "VIEW_3D_TOP": return horizontal ? "LANDSCAPE_3D_TOP" : "PORTRAIT_LEFT_3D_TOP";
-            default: throw new IllegalArgumentException("No equivalent BYD layout: " + layout);
-        }
+        String nativeView = BydAvmDisplayContract.nativeView(layout, horizontal);
+        if (nativeView == null) throw new IllegalArgumentException("BYD layout support deferred: " + layout);
+        return nativeView;
     }
 
     Surface input() { return input; }

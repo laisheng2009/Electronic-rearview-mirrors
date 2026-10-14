@@ -5,6 +5,30 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public final class CameraOutputCalculationTest {
+    @Test public void oemCanvasFitsWithoutCroppingOrStretchingInEitherOrientation() {
+        for (boolean horizontal : new boolean[]{true, false}) {
+            int[] canvas = BydAvmDisplayContract.canvas(2560, 1440, horizontal);
+            assertEquals(horizontal ? 2560 : 1440, canvas[0]);
+            assertEquals(horizontal ? 1440 : 2560, canvas[1]);
+            for (int[] host : new int[][]{{1200, 500}, {400, 700}, {2560, 1440}}) {
+                float[] fit = BydAvmDisplayContract.fitScale(canvas[0], canvas[1], host[0], host[1]);
+                float visibleWidth = fit[0] * host[0], visibleHeight = fit[1] * host[1];
+                assertTrue(visibleWidth <= host[0] + .001f);
+                assertTrue(visibleHeight <= host[1] + .001f);
+                assertEquals(visibleWidth / canvas[0], visibleHeight / canvas[1], .00001f);
+                assertTrue(Math.abs(visibleWidth - host[0]) < .001f
+                        || Math.abs(visibleHeight - host[1]) < .001f);
+            }
+        }
+        assertArrayEquals(new int[]{1920, 1920}, BydAvmDisplayContract.canvas(1920, 1920, false));
+    }
+
+    @Test public void invalidOemGeometryIsRejectedInsteadOfAllocatingUnboundedBuffers() {
+        assertThrows(IllegalArgumentException.class, () -> BydAvmDisplayContract.canvas(0, 1440, true));
+        assertThrows(IllegalArgumentException.class, () -> BydAvmDisplayContract.canvas(2560, 8192, false));
+        assertThrows(IllegalArgumentException.class, () -> BydAvmDisplayContract.fitScale(2560, 1440, 0, 100));
+    }
+
     @Test public void outputStatisticsExcludeHiddenTimeAndStartAtFirstLoggedFrame() {
         DirectCameraSourceHub.StatsWindow stats = new DirectCameraSourceHub.StatsWindow();
         assertNull(outputFrame(stats, 1_000));

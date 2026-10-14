@@ -1257,7 +1257,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
         if (changed) configurePreviewBaseBuffer(texture, width, height);
         if (!previewBaseGeometryReady) return;
         if (previewBaseSurface == null) {
-            previewBaseOutput = new StockAvmOutput(texture, width, height);
+            previewBaseOutput = new StockAvmOutput(previewBase, width, height);
             previewBaseSurface = previewBaseOutput.surface;
             previewBaseGeneration = previewBaseInputGeneration.next();
             clearFrames();
@@ -1273,10 +1273,12 @@ final class ReverseCameraCompositionView extends FrameLayout {
             previewBaseGeometryReady = false;
             return;
         }
-        int[] size = CameraBufferQuality.bufferSizeForPane(
-                width, height, SOURCE_WIDTH, PREVIEW_BASE_SOURCE_HEIGHT,
-                automaticBufferQuality);
-        texture.setDefaultBufferSize(size[0], size[1]);
+        if (previewBaseOutput == null || !previewBaseOutput.refreshGeometry()) {
+            int[] size = CameraBufferQuality.bufferSizeForPane(
+                    width, height, SOURCE_WIDTH, PREVIEW_BASE_SOURCE_HEIGHT,
+                    automaticBufferQuality);
+            texture.setDefaultBufferSize(size[0], size[1]);
+        }
         previewBaseViewportWidth = width;
         previewBaseViewportHeight = height;
         previewBaseGeometryReady = true;

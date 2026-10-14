@@ -110,6 +110,9 @@ class ProductionUiController @JvmOverloads constructor(
 
     fun dispatch(action: BydExtendUiAction) {
         syncLegacyRuntimeBlock()
+        if (action is BydExtendUiAction.Select &&
+            action.target == SelectionTarget.Simple(SelectionId.AvmMode) &&
+            !state.debug.supportsAvmMode(action.index)) return
         // A disposed editor may finish after a display selection. Never retarget that write.
         val stalePlacement = when (action) {
             is BydExtendUiAction.Avas -> false
@@ -600,6 +603,7 @@ class ProductionUiController @JvmOverloads constructor(
                 directOperation = old.debug.directOperation,
                 avmSelection = old.debug.avmSelection,
                 avmOperation = old.debug.avmOperation,
+                avmRenderer = old.debug.avmRenderer,
             ),
             dialog = old.dialog,
         ))
@@ -781,6 +785,11 @@ class ProductionUiController @JvmOverloads constructor(
             directOperation = operation)
         else state.debug.copy(
             avmOperation = operation))
+    }
+
+    fun setAvmRenderer(renderer: String) {
+        if (renderer == "BYD" || renderer == "TS")
+            state = state.copy(debug = state.debug.copy(avmRenderer = renderer))
     }
 
     fun setProfileStatus(profile: CameraProfileId, status: StatusUiState, pending: Boolean = false) {
@@ -1191,8 +1200,13 @@ class ProductionUiController @JvmOverloads constructor(
                 directSelection = index.coerceIn(0, 4), avmSelection = null))
             SelectionId.AvmMode -> state = state.copy(debug = state.debug.copy(
                 avmSelection = index.coerceIn(0, 50), directSelection = null))
-            SelectionId.AvmOrientation -> state = state.copy(debug = state.debug.copy(
-                avmOrientation = if (index == 0) AvmOrientation.Horizontal else AvmOrientation.Vertical))
+            SelectionId.AvmOrientation -> {
+                val orientation = if (index == 0) AvmOrientation.Horizontal else AvmOrientation.Vertical
+                state = state.copy(debug = state.debug.copy(avmOrientation = orientation,
+                    avmSelection = state.debug.avmSelection?.takeIf {
+                        state.debug.supportsAvmMode(it, orientation)
+                    }))
+            }
             else -> Unit
         }
         RuntimeUiSession.updateSelections(RuntimeUiSelections.from(state))

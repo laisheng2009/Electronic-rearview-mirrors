@@ -299,4 +299,5 @@
     <string name="adb_reminder_retry">Repeat Wi-Fi request</string>
     <string name="adb_recovery_wait_authorization">Waiting for ADB authorization</string>
     <string name="adb_recovery_wait_permissions">Waiting for recovery permission</string>
+    <string name="avm_mode_deferred">Support for this mode is deferred</string>
 </resources>

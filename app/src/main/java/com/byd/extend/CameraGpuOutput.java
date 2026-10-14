@@ -19,6 +19,7 @@ final class CameraGpuOutput extends Binder {
     private static final int DETACHED = BIND + 2;
     private static final int UPDATE = BIND + 3;
     private static final int RELEASE = BIND + 4;
+    private static final int STOCK_CANVAS = BIND + 5;
     private static final Map<Surface, Endpoint> OUTPUTS = new WeakHashMap<>();
     private static final class Endpoint {
         final IBinder binder;
@@ -34,6 +35,7 @@ final class CameraGpuOutput extends Binder {
     private IBinder control;
     private Runnable stopped;
     private boolean released;
+    private java.util.function.BiConsumer<Integer, Integer> stockCanvas;
     private final DeathRecipient death = this::disconnected;
 
     CameraGpuOutput(int width, int height, CameraDewarpConfig config, long token,
@@ -90,6 +92,25 @@ final class CameraGpuOutput extends Binder {
         return endpoint == null ? null : new Binding(endpoint.binder, endpoint.uid, releaseTarget);
     }
 
+    void setStockCanvasHandler(java.util.function.BiConsumer<Integer, Integer> handler) {
+        stockCanvas = handler;
+    }
+
+    static void configureStockCanvas(Surface surface, int width, int height) throws RemoteException {
+        Endpoint endpoint;
+        synchronized (OUTPUTS) { endpoint = OUTPUTS.get(surface); }
+        if (endpoint == null) throw new IllegalStateException("Stock canvas endpoint missing");
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(DESCRIPTOR);
+            data.writeInt(width);
+            data.writeInt(height);
+            if (!endpoint.binder.transact(STOCK_CANVAS, data, reply, 0))
+                throw new IllegalStateException("Stock canvas configuration rejected");
+            reply.readException();
+        } finally { data.recycle(); reply.recycle(); }
+    }
+
     synchronized void update(CameraDewarpConfig config, long token) {
         if (released || token <= request.token) return;
         request = new CameraDewarpRenderer.MappingRequest(config, token);
@@ -124,12 +145,30 @@ final class CameraGpuOutput extends Binder {
         if (completion != null) completion.run();
     }
 
-    @Override protected synchronized boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+    @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
         if (!CameraShellProtocol.isCallerAllowed(Binder.getCallingUid(), Process.myUid())) {
             throw new SecurityException("GPU output sender denied");
         }
         data.enforceInterface(DESCRIPTOR);
+        if (code == STOCK_CANVAS) {
+            int w = data.readInt(), h = data.readInt();
+            if (w < 240 || h < 240 || w > 4096 || h > 4096)
+                throw new IllegalArgumentException("Invalid stock canvas dimensions");
+            synchronized (this) {
+                if (released || !lifecycleOnly || stockCanvas == null)
+                    throw new IllegalStateException("Stock canvas unavailable");
+            }
+            // The main-thread resize must not hold the lease lock used by view retirement.
+            stockCanvas.accept(w, h);
+            reply.writeNoException();
+            return true;
+        }
+        return transactLease(code, data, reply);
+    }
+
+    private synchronized boolean transactLease(int code, Parcel data, Parcel reply)
+            throws RemoteException {
         if (code == BIND) {
             if (released || control != null) throw new IllegalStateException("GPU output not available");
             IBinder next = data.readStrongBinder();

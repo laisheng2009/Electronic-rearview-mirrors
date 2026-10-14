@@ -751,11 +751,18 @@ data class DebugUiState(
     val avmSelection: Int? = null,
     val avmOperation: OperationUiState = OperationUiState(),
     val avmOrientation: AvmOrientation = AvmOrientation.Horizontal,
+    val avmRenderer: String = "",
     val avmShowRaw: Boolean = true,
     val avmDewarp: Boolean = false,
     /** Resolved tablet output bounds used to size diagnostic camera frames. */
     val displayGeometry: CameraDisplayGeometry = CameraDisplayGeometry(),
-)
+) {
+    fun supportsAvmMode(index: Int, orientation: AvmOrientation = avmOrientation): Boolean {
+        val layout = AvmModeNames.getOrNull(index) ?: return false
+        return avmRenderer == "TS" || com.byd.extend.BydAvmDisplayContract.nativeView(
+            layout, orientation == AvmOrientation.Horizontal) != null
+    }
+}
 
 @Immutable
 data class DialogUiState @JvmOverloads constructor(
