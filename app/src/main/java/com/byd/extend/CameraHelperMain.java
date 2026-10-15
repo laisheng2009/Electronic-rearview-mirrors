@@ -2424,8 +2424,8 @@ final class CameraHelperMain {
 
         private String closePersistentProducerIfIdle(
                 String reason, boolean shellCloseAlreadyQueued) {
-            if (!persistentPanoProducer || persistentSession.hasSourceDemand()
-                    || persistentSession.hasConsumers() || activityPreview.has()) return null;
+            if (!persistentPanoProducer || !persistentSession.isIdle()
+                    || activityPreview.has()) return null;
             return tearDownPersistentProducer(reason, null, shellCloseAlreadyQueued);
         }
 
@@ -4264,8 +4264,8 @@ final class CameraHelperMain {
                 return mask;
             }
 
-            boolean hasSourceDemand() {
-                return retainedSourceDemandMask() != 0;
+            boolean isIdle() {
+                return retainedSourceDemandMask() == 0 && !hasConsumers();
             }
 
             boolean hasConsumers() {
@@ -4283,6 +4283,8 @@ final class CameraHelperMain {
             }
 
             private void reconcileSourceDemand(PersistentCameraPort port) throws Exception {
+                // The owner checks Activity preview too, then stops the producer before detaching.
+                if (isIdle()) return;
                 int required = retainedSourceDemandMask();
                 ensureSources(port, indexesFromMask(required));
                 for (ConsumerGroup group : new ConsumerGroup[]{
@@ -5145,6 +5147,7 @@ final class CameraHelperMain {
                         "stock_avm_shell_died", this::emit,
                         producerCameraId, producerEpoch);
                 refreshPersistentLegacyState();
+                closePersistentProducerIfIdle("stock_avm_shell_died", true);
             } catch (PersistentSessionFailure failure) {
                 tearDownPersistentProducer(failure.reason, failure.getCause(), true);
             }
@@ -5153,7 +5156,7 @@ final class CameraHelperMain {
         private synchronized void cameraShellDiedCleanup() {
             // The stock SDK lives in another process; losing the overlay shell does not
             // terminate it. Close it before dropping the input group's ownership.
-            cancelPendingStock("camera_shell_died", stockRequest.id());
+            boolean shellCloseQueued = cancelPendingStock("camera_shell_died", stockRequest.id());
             releaseSurfaces(pendingReversePreviewSurfaces);
             pendingReversePreviewSurfaces = new Surface[0];
             pendingReversePreviewRequestId = 0;
@@ -5164,6 +5167,7 @@ final class CameraHelperMain {
                             "camera_shell_died", this::emit,
                             producerCameraId, producerEpoch);
                     refreshPersistentLegacyState();
+                    closePersistentProducerIfIdle("camera_shell_died", shellCloseQueued);
                 } catch (PersistentSessionFailure failure) {
                     tearDownPersistentProducer(
                             failure.reason, failure.getCause(), true);
@@ -5186,6 +5190,7 @@ final class CameraHelperMain {
                             new ReflectivePersistentCameraPort(camera), reason, this::emit,
                             producerCameraId, producerEpoch);
                     refreshPersistentLegacyState();
+                    closePersistentProducerIfIdle(reason, shellCloseQueued);
                 } catch (PersistentSessionFailure error) {
                     tearDownPersistentProducer(error.reason, error.getCause(), shellCloseQueued);
                 }
@@ -5348,6 +5353,7 @@ final class CameraHelperMain {
                         new ReflectivePersistentCameraPort(camera), reason, this::emit,
                         producerCameraId, producerEpoch);
                 refreshPersistentLegacyState();
+                closePersistentProducerIfIdle(reason);
             } catch (PersistentSessionFailure failure) {
                 tearDownPersistentProducer(failure.reason, failure.getCause(), true);
             }

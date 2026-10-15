@@ -5,6 +5,31 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public final class CameraOutputCalculationTest {
+    @Test public void idleRetirementWaitsForDemandAndTheCurrentReverseLease() throws Exception {
+        CameraHelperMain.HelperBinder.PersistentSession session =
+                new CameraHelperMain.HelperBinder.PersistentSession();
+        assertTrue(session.isIdle());
+        session.setBlindStandbyDemand(null, CameraSourceDemand.blindStandby(true, false));
+        session.setMirrorDemand(null, CameraSourceDemand.mirror(true, true));
+        session.setBlindStandbyDemand(null, 0);
+        assertFalse(session.isIdle()); // Hiding Blind must not retire a visible Mirror.
+        session.setMirrorDemand(null, 0);
+        assertTrue(session.isIdle());
+
+        CameraSourceDemand.ReverseWarmLease lease = session.reverseWarmLease;
+        long previous = lease.arm(10, 2, CameraSourceDemand.bit(1));
+        assertFalse(session.isIdle());
+        long current = lease.arm(11, 2, CameraSourceDemand.bit(1));
+        assertFalse(session.expireReverseDemand(null, previous, 10, 2));
+        assertFalse(session.expireReverseDemand(null, current, 11, 1));
+        assertFalse(session.isIdle());
+        session.setBlindStandbyDemand(null, CameraSourceDemand.blindStandby(false, true));
+        assertTrue(session.expireReverseDemand(null, current, 11, 2));
+        assertFalse(session.isIdle()); // Reverse expiry must leave warm Blind sources alone.
+        session.setBlindStandbyDemand(null, 0);
+        assertTrue(session.isIdle());
+    }
+
     @Test public void legacyTsRenderingIsLimitedToTheConfirmedUkedModel() {
         assertTrue(new StockAvmPreview.Config(1, 286, 1920, 1300,
                 "ocean", "uked", "uked").usesLegacyTsRenderer());

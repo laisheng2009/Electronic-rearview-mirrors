@@ -5,6 +5,8 @@ import android.graphics.SurfaceTexture;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.view.Surface;
+import java.io.File;
+import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.function.BiConsumer;
 import static com.byd.extend.StockAvmPreview.*;
@@ -37,13 +39,38 @@ final class BydStockAvm implements AutoCloseable {
             return;
         }
         Class<?> type = Class.forName("com.byd.carvis.AvmAPI", true, loader);
-        java.lang.reflect.Method initialize = type.getMethod("initialize", String.class,
-                int.class, int.class, int.class, int.class, String.class, String.class, Context.class);
+        Method initialize;
+        boolean explicitCommon;
+        try {
+            initialize = type.getMethod("initialize", String.class, int.class, int.class,
+                    int.class, int.class, String.class, String.class, Context.class);
+            explicitCommon = true;
+        } catch (NoSuchMethodException absent) {
+            initialize = type.getMethod("initialize", String.class, int.class, int.class,
+                    int.class, int.class, String.class, Context.class);
+            explicitCommon = false;
+        }
+        Method setLayoutVersion = null;
+        try {
+            setLayoutVersion = type.getMethod("setLayoutVerison", int.class);
+        } catch (NoSuchMethodException absent) {
+            // Old AutoVideo selects its Java UI layout without a native layout setter.
+        }
         String root = "/data/local/tmp/bydextend_avm/byd/" + config.carType
                 + selection.resourceSuffix + "/" + config.panoHeight + "/" + selection.packageLastUpdateTime;
-        String model = root + "/model", parameters = root + "/parameters", pano = root + "/pano";
-        String common = root + "/common";
-        copyAssetDirectory(loader, context, "resource_byd/common", common);
+        // Preserve the old OEM model layout, separate from the flat eight-argument cache.
+        String model = explicitCommon ? root + "/model"
+                : root + "/sdk7/" + config.carType + "/CarModel" + selection.resourceSuffix + "/resource";
+        String parameters = root + "/parameters", pano = root + "/pano";
+        String common = explicitCommon ? root + "/common"
+                : new File(model, "../../../common").getCanonicalPath();
+        String[] commonAssets = context.getAssets().list("resource_byd/common");
+        boolean hasCommonAssets = commonAssets != null && commonAssets.length > 0;
+        stage.accept("byd_sdk_contract", "initialize_args=" + (explicitCommon ? 8 : 7)
+                + ";layout_method=" + (setLayoutVersion != null)
+                + ";common_assets=" + hasCommonAssets);
+        if (explicitCommon || hasCommonAssets)
+            copyAssetDirectory(loader, context, "resource_byd/common", common);
         copyAssetDirectory(loader, context,
                 "resource_byd/" + config.carType + "/CarModel" + selection.resourceSuffix, model);
         copyAssetDirectory(loader, context, "resource_byd/" + config.carType + "/"
@@ -79,18 +106,23 @@ final class BydStockAvm implements AutoCloseable {
         String uiName = ((Enum<?>) uiType).name();
         int layoutVersion = "UI_TYPE_5X".equals(uiName) ? 5
                 : "UI_TYPE_PLATFORM".equals(uiName) ? 7 : 0;
-        if (layoutVersion != 0)
-            invoke(api, "setLayoutVerison", new Class<?>[]{int.class}, layoutVersion);
+        if (layoutVersion != 0 && setLayoutVersion != null)
+            setLayoutVersion.invoke(api, layoutVersion);
         invoke(api, "setCameraIndex", new Class<?>[]{int.class, int.class, int.class, int.class},
                 0, 1, rearLeftRightFront ? 2 : 3, rearLeftRightFront ? 3 : 2);
-        initialize.invoke(api, model, config.panoWidth, config.panoHeight, width, height,
-                parameters, common, context);
+        if (explicitCommon) {
+            initialize.invoke(api, model, config.panoWidth, config.panoHeight, width, height,
+                    parameters, common, context);
+        } else {
+            initialize.invoke(api, model, config.panoWidth, config.panoHeight, width, height,
+                    parameters, context);
+        }
         invoke(api, "setCameraType", new Class<?>[]{int.class, int.class}, cameraType, 0);
         invoke(api, "setAutomaticCalibrationStr", new Class<?>[]{String.class}, config.intrinsic);
         invoke(api, "setCarResources", new Class<?>[]{String.class, String.class, String.class, String.class},
                 config.carType, config.subCarType, color == null ? "" : color, pano);
         stage.accept("byd_initialize", "model=" + model + ";parameters=" + parameters
-                + ";common=" + common
+                + ";common=" + (hasCommonAssets ? common : "model_local")
                 + ";screen=" + width + "x" + height + ";layout_version=" + layoutVersion
                 + ";camera_order=" + (rearLeftRightFront ? "rear_left_right_front" : "rear_left_front_right"));
         configuration = nextConfiguration;
