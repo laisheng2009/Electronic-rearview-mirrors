@@ -35,6 +35,9 @@ interface ProductionUiBackend {
     /** Typed AVAS mutation; imports are completed by the Activity's system file picker. */
     fun onProductionAvasAction(action: AvasBackendAction) = Unit
 
+    /** Activity owns the user-facing Bluetooth permission request before activation. */
+    fun onProductionCallsEnabled(profile: CallsSettings.Profile, enabled: Boolean)
+
     /** Independent Mirror seam; Java backends may apply the typed action asynchronously. */
     fun onProductionMirrorAction(action: MirrorBackendAction) = Unit
 
@@ -194,8 +197,13 @@ class ProductionUiController @JvmOverloads constructor(
                 typedBackendHandled = true
                 when (val change = action.action) {
                     is CallsUiAction.SetEnabled -> {
-                        CallsSettings.setEnabled(preferences, change.profile, change.enabled)
+                        backend.onProductionCallsEnabled(change.profile, change.enabled)
                         refreshCallsSettings()
+                    }
+                    is CallsUiAction.ClearDestination -> {
+                        CallsSettings.clearDestination(preferences, change.profile)
+                        refreshCallsSettings()
+                        clearCallsFeedback()
                     }
                     is CallsUiAction.SaveDestination -> {
                         if (CallsSettings.saveDestination(preferences, change.profile,
@@ -1141,7 +1149,7 @@ class ProductionUiController @JvmOverloads constructor(
         "Runtime controls are locked while settings transfer completes.",
         "设置传送完成前，运行控制已锁定。")
 
-    private fun refreshCallsSettings() {
+    fun refreshCallsSettings() {
         fun read(profile: CallsSettings.Profile) = CallsSettings.read(preferences, profile).let {
             CallsProfileUiState(it.enabled, it.name, it.number)
         }

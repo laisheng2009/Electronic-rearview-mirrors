@@ -939,6 +939,9 @@ sealed interface CallsUiAction {
     @Immutable data class SaveDestination(
         val profile: com.byd.extend.CallsSettings.Profile, val name: String, val number: String,
     ) : CallsUiAction
+    @Immutable data class ClearDestination(
+        val profile: com.byd.extend.CallsSettings.Profile,
+    ) : CallsUiAction
     @Immutable data class BeginContactSelection(
         val profile: com.byd.extend.CallsSettings.Profile,
     ) : CallsUiAction

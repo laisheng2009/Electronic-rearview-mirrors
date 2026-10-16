@@ -19,9 +19,12 @@ final class AppPermissionProvisioner {
     }
 
     static boolean hasBluetoothCallAccess(Context context) {
-        return context.checkSelfPermission(Build.VERSION.SDK_INT >= 31
-                ? Manifest.permission.BLUETOOTH_CONNECT : Manifest.permission.BLUETOOTH)
-                == PackageManager.PERMISSION_GRANTED;
+        if ((Build.VERSION.SDK_INT < 31 || context.getApplicationInfo().targetSdkVersion <= 30)
+                && context.checkSelfPermission(Manifest.permission.BLUETOOTH)
+                        != PackageManager.PERMISSION_GRANTED) return false;
+        return Build.VERSION.SDK_INT < 31
+                || context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                        == PackageManager.PERMISSION_GRANTED;
     }
 
     /** Native app-UID readback works even while ADB is unavailable. Binding is separate. */
@@ -50,10 +53,6 @@ final class AppPermissionProvisioner {
         event(events, "app_permission_readback", "permission", "wss", "reason", reason,
                 "granted", wssGranted);
         if (Build.VERSION.SDK_INT >= 31 && CallsRuntime.requiresBluetoothConnect(app)) {
-            if (!hasBluetoothCallAccess(app)) {
-                run(app, "pm grant --user " + user + " " + app.getPackageName()
-                        + " android.permission.BLUETOOTH_CONNECT", "bluetooth_calls", reason, events);
-            }
             event(events, "app_permission_readback", "permission", "bluetooth_calls",
                     "reason", reason, "granted", hasBluetoothCallAccess(app));
         }

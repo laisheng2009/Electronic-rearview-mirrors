@@ -83,6 +83,14 @@ public final class CameraButtonBindings {
     }
 
     public static Binding load(SharedPreferences preferences, Action action) {
+        return load(preferences, action, null);
+    }
+
+    public static Binding loadForSource(SharedPreferences preferences, Action action, Source source) {
+        return load(preferences, action, source);
+    }
+
+    private static Binding load(SharedPreferences preferences, Action action, Source requestedSource) {
         if (action == null) return new Binding(UNASSIGNED, Press.Single);
         if (action == Action.ReverseSource) {
             return new Binding(ReverseSteeringButtonPreferences.load(preferences), Press.Single);
@@ -109,6 +117,17 @@ public final class CameraButtonBindings {
             } catch (RuntimeException ignored) {
                 source = Source.AndroidKey;
             }
+            if (requestedSource == Source.AndroidKey && source != Source.AndroidKey) {
+                try {
+                    press = Press.valueOf(preferences.getString(steeringPressKey(action), press.name()));
+                } catch (RuntimeException ignored) {
+                    press = Press.Single;
+                }
+            }
+        }
+        if (requestedSource != null) {
+            source = requestedSource;
+            if (!supports(action, source, press)) press = Press.Single;
         }
         return new Binding(source, keyCode,
                 action == Action.AvasMicrophone ? Press.Single : press);
@@ -127,12 +146,21 @@ public final class CameraButtonBindings {
             ReverseSteeringButtonPreferences.save(preferences, value.keyCode);
             return;
         }
-        preferences.edit()
-                .putInt(keyCodeKey(action), value.keyCode)
+        SharedPreferences.Editor editor = preferences.edit()
                 .putString(pressKey(action), (action == Action.AvasMicrophone
                         ? Press.Single : value.press).name())
-                .putString(sourceKey(action), value.source.name())
-                .apply();
+                .putString(sourceKey(action), value.source.name());
+        if (value.source == Source.AndroidKey) {
+            editor.putInt(keyCodeKey(action), value.keyCode)
+                    .putString(steeringPressKey(action), value.press.name());
+        } else {
+            // Rescue sources must not overwrite the learned steering key or its press type.
+            Binding previous = load(preferences, action);
+            if (previous.source == Source.AndroidKey) {
+                editor.putString(steeringPressKey(action), previous.press.name());
+            }
+        }
+        editor.apply();
     }
 
     public static void reset(SharedPreferences preferences, Action action) {
@@ -156,6 +184,10 @@ public final class CameraButtonBindings {
                 .putInt(ENGINE_KEY_CODE, UNASSIGNED)
                 .putString(ENGINE_PRESS, Press.Single.name())
                 .putString(ENGINE_SOURCE, Source.AndroidKey.name())
+                .remove(steeringPressKey(Action.MirrorSource))
+                .remove(steeringPressKey(Action.MirrorVisibility))
+                .remove(steeringPressKey(Action.AvasMicrophone))
+                .remove(steeringPressKey(Action.AvasEngine))
                 .apply();
     }
 
@@ -235,6 +267,10 @@ public final class CameraButtonBindings {
         if (action == Action.AvasMicrophone) return MICROPHONE_SOURCE;
         return action == Action.MirrorSource
                 ? MIRROR_SOURCE_SOURCE : MIRROR_VISIBILITY_SOURCE;
+    }
+
+    private static String steeringPressKey(Action action) {
+        return pressKey(action) + "_android";
     }
 
     private static int canonicalKeyCode(int keyCode) {

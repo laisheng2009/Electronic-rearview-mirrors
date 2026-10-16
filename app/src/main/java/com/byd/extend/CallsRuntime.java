@@ -284,6 +284,11 @@ public final class CallsRuntime {
             if (confirmationUse != null) confirmationUse.setEnabled(false);
             if (numberChoiceDialog.getWindow() == null)
                 throw new IllegalStateException("number choice window unavailable");
+            if (confirmationParams == null || confirmationParams.token == null)
+                throw new IllegalStateException("accessibility window token unavailable");
+            WindowManager.LayoutParams attributes = numberChoiceDialog.getWindow().getAttributes();
+            attributes.token = confirmationParams.token;
+            numberChoiceDialog.getWindow().setAttributes(attributes);
             numberChoiceDialog.getWindow().setType(
                     WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY);
             numberChoiceDialog.show();
@@ -402,13 +407,12 @@ public final class CallsRuntime {
         confirmationStatus = panel.findViewById(R.id.calls_picker_status);
         confirmationUse = panel.findViewById(R.id.calls_picker_use);
         Button cancel = panel.findViewById(R.id.calls_picker_cancel);
-        View header = panel.findViewById(R.id.calls_picker_header);
         confirmationUse.setOnClickListener(view -> readAndConfirmContact());
         cancel.setOnClickListener(view -> {
             cancelContactSelection();
             returnToCameraProbeActivity("contact_selection_cancelled");
         });
-        installHeaderDrag(header);
+        installPanelDrag(panel);
 
         int width = Math.max(1, Math.min(dp(340), service.getResources()
                 .getDisplayMetrics().widthPixels - dp(24)));
@@ -429,11 +433,11 @@ public final class CallsRuntime {
         updateConfirmationPanel();
     }
 
-    private void installHeaderDrag(View header) {
-        if (header == null) return;
+    private void installPanelDrag(View panel) {
         final float[] down = new float[2];
         final int[] start = new int[2];
-        header.setOnTouchListener((view, event) -> {
+        // Non-clickable labels bubble touches to the panel; the two buttons keep their clicks.
+        panel.setOnTouchListener((view, event) -> {
             if (confirmationParams == null || confirmationPanel == null) return false;
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
@@ -874,7 +878,7 @@ public final class CallsRuntime {
             operation.dialInvoked = true;
             operation.stage = CallStage.DIAL_INVOKED;
             Object call = dial.invoke(proxy, device, operation.number);
-            if (call == null) {
+            if (!dialResultAccepted(call)) {
                 failCall(operation, R.string.calls_picker_dial_failed, "hfp_dial_rejected");
                 return;
             }
@@ -886,6 +890,11 @@ public final class CallsRuntime {
             failCall(operation, R.string.calls_picker_dial_failed,
                     "hfp_dial_error_" + failure.getClass().getSimpleName());
         }
+    }
+
+    static boolean dialResultAccepted(Object result) {
+        // BYD returns a boolean; the standard HFP API returns a call object.
+        return result instanceof Boolean ? (Boolean) result : result != null;
     }
 
     private boolean hasNoActiveHfpCalls(BluetoothProfile proxy, BluetoothDevice device) {

@@ -142,6 +142,10 @@ public final class CameraProbeActivity extends ComponentActivity
     private static final int CAMERA_PERMISSION_REQUEST = 10;
     private static final int LOCATION_PERMISSION_REQUEST = 11;
     private static final int MICROPHONE_PERMISSION_REQUEST = 12;
+    private static final int BLUETOOTH_PERMISSION_REQUEST = 16;
+    private static final String PREF_BLUETOOTH_PERMISSION_ASKED = "calls_bluetooth_permission_asked";
+    private static final String STATE_BLUETOOTH_PROFILES = "bluetooth_pending_profiles";
+    private static final String STATE_BLUETOOTH_PERMISSION_IN_FLIGHT = "bluetooth_permission_in_flight";
     private static final int CAMERA_PRESET_REQUEST = 12;
     private static final int AVAS_AUDIO_REQUEST = 13;
     private static final int ARCHIVE_SAVE_REQUEST = 14;
@@ -676,6 +680,9 @@ public final class CameraProbeActivity extends ComponentActivity
     private boolean cameraPermissionRequested;
     private boolean microphonePermissionPending;
     private boolean microphonePermissionInFlight;
+    private final java.util.EnumSet<CallsSettings.Profile> pendingBluetoothProfiles =
+            java.util.EnumSet.noneOf(CallsSettings.Profile.class);
+    private boolean bluetoothPermissionInFlight;
     private boolean weatherRefreshAfterPermission;
     private boolean weatherLocationPermissionPending;
     private boolean weatherLocationPermissionStartScheduled;
@@ -1001,6 +1008,15 @@ public final class CameraProbeActivity extends ComponentActivity
         if (savedInstanceState != null) {
             cameraPermissionRequested = savedInstanceState.getBoolean(STATE_CAMERA_PERMISSION_REQUESTED);
             microphonePermissionPending = savedInstanceState.getBoolean(STATE_MICROPHONE_PERMISSION_PENDING);
+            String[] pendingProfiles = savedInstanceState.getStringArray(STATE_BLUETOOTH_PROFILES);
+            if (pendingProfiles != null) {
+                for (CallsSettings.Profile profile : CallsSettings.Profile.values()) {
+                    for (String pending : pendingProfiles) {
+                        if (profile.name().equals(pending)) pendingBluetoothProfiles.add(profile);
+                    }
+                }
+            }
+            bluetoothPermissionInFlight = savedInstanceState.getBoolean(STATE_BLUETOOTH_PERMISSION_IN_FLIGHT);
             pendingManualAdbEvent = savedInstanceState.getString(STATE_MANUAL_ADB_EVENT);
             pendingManualAdbOperation = savedInstanceState.getString(STATE_MANUAL_ADB_OPERATION);
         }
@@ -1065,6 +1081,9 @@ public final class CameraProbeActivity extends ComponentActivity
         outState.putBoolean(STATE_CAMERA_PERMISSION_REQUESTED, cameraPermissionRequested);
         outState.putBoolean(STATE_MICROPHONE_PERMISSION_PENDING,
                 microphonePermissionPending || microphonePermissionInFlight);
+        outState.putStringArray(STATE_BLUETOOTH_PROFILES, pendingBluetoothProfiles.stream()
+                .map(Enum::name).toArray(String[]::new));
+        outState.putBoolean(STATE_BLUETOOTH_PERMISSION_IN_FLIGHT, bluetoothPermissionInFlight);
         outState.putString(STATE_MANUAL_ADB_EVENT, pendingManualAdbEvent);
         outState.putString(STATE_MANUAL_ADB_OPERATION, pendingManualAdbOperation);
         outState.putBoolean(STATE_WEATHER_PERMISSION_IN_FLIGHT,
@@ -1203,7 +1222,9 @@ public final class CameraProbeActivity extends ComponentActivity
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == MICROPHONE_PERMISSION_REQUEST) {
+        if (requestCode == BLUETOOTH_PERMISSION_REQUEST) {
+            finishBluetoothPermissionRequest();
+        } else if (requestCode == MICROPHONE_PERMISSION_REQUEST) {
             microphonePermissionInFlight = false;
             microphonePermissionPending = false;
             boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
@@ -1586,6 +1607,10 @@ public final class CameraProbeActivity extends ComponentActivity
     @SuppressWarnings("deprecation")
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == BLUETOOTH_PERMISSION_REQUEST) {
+            finishBluetoothPermissionRequest();
+            return;
+        }
         if (requestCode == CAMERA_PRESET_SAVE_REQUEST) {
             acceptPresetDocument(resultCode, data);
             return;
@@ -1766,7 +1791,7 @@ public final class CameraProbeActivity extends ComponentActivity
             String title, String message, boolean cancellable, String confirmLabel,
             String dismissLabel, String markdown, Runnable confirm, Runnable dismiss) {
         if (activityDestroyed || isFinishing() || shutdownRequested || !activityResumed
-                || cameraPermissionPending || microphonePermissionInFlight
+                || cameraPermissionPending || microphonePermissionInFlight || bluetoothPermissionInFlight
                 || weatherLocationPermissionInFlight || adbAuthPending
                 || settingsTransferDialog != null || legacyImportOfferDialog != null
                 || productionUi == null || productionUi.getState().getDialog() != null) return false;
@@ -1828,7 +1853,7 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private void showInstallationReminder() {
         if (!backgroundStartSettingsRequired || backgroundStartSettingsActive
-                || cameraPermissionPending || microphonePermissionInFlight
+                || cameraPermissionPending || microphonePermissionInFlight || bluetoothPermissionInFlight
                 || weatherLocationPermissionInFlight || adbAuthPending) return;
         UiStrings strings = new UiStrings(productionUi.getState().getLanguage(), this);
         showRuntimeDialog(RuntimeDialogOwner.BACKGROUND, DialogKind.Background,
@@ -2469,6 +2494,7 @@ public final class CameraProbeActivity extends ComponentActivity
     private boolean canPresentUpdateResult(boolean replacingUpdateDialog) {
         return activityResumed && !activityDestroyed && !isFinishing() && !shutdownRequested
                 && !cameraPermissionPending && !microphonePermissionInFlight
+                && !bluetoothPermissionInFlight && pendingBluetoothProfiles.isEmpty()
                 && !microphonePermissionPending && pendingManualAdbEvent == null
                 && !backgroundStartSettingsPending()
                 && !weatherLocationPermissionPending && !weatherLocationPermissionInFlight
@@ -3435,6 +3461,64 @@ public final class CameraProbeActivity extends ComponentActivity
         }
     }
 
+    @Override
+    public void onProductionCallsEnabled(CallsSettings.Profile profile, boolean enabled) {
+        if (!enabled || AppPermissionProvisioner.hasBluetoothCallAccess(this)) {
+            pendingBluetoothProfiles.remove(profile);
+            CallsSettings.setEnabled(preferences, profile, enabled);
+        } else {
+            pendingBluetoothProfiles.add(profile);
+            requestBluetoothPermission();
+        }
+        if (productionUi != null) productionUi.refreshCallsSettings();
+        refreshProductionHeader();
+    }
+
+    private void requestBluetoothPermission() {
+        if (bluetoothPermissionInFlight || pendingBluetoothProfiles.isEmpty()) return;
+        if (AppPermissionProvisioner.hasBluetoothCallAccess(this)) {
+            finishBluetoothPermissionRequest();
+            return;
+        }
+        if (!runtimePermissionWindowAvailable()) return;
+        bluetoothPermissionInFlight = true;
+        try {
+            if (android.os.Build.VERSION.SDK_INT < 31
+                    || preferences.getBoolean(PREF_BLUETOOTH_PERMISSION_ASKED, false)
+                    && !shouldShowRequestPermissionRationale(Manifest.permission.BLUETOOTH_CONNECT)) {
+                // A permanently denied permission can only be changed in Android settings.
+                startActivityForResult(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName())), BLUETOOTH_PERMISSION_REQUEST);
+                record("calls_bluetooth_permission_settings_opened");
+            } else {
+                preferences.edit().putBoolean(PREF_BLUETOOTH_PERMISSION_ASKED, true).apply();
+                requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},
+                        BLUETOOTH_PERMISSION_REQUEST);
+                record("calls_bluetooth_permission_requested");
+            }
+        } catch (RuntimeException error) {
+            record("calls_bluetooth_permission_failed", "error", error.toString());
+            finishBluetoothPermissionRequest();
+        }
+    }
+
+    private void finishBluetoothPermissionRequest() {
+        bluetoothPermissionInFlight = false;
+        boolean granted = AppPermissionProvisioner.hasBluetoothCallAccess(this);
+        for (CallsSettings.Profile profile : pendingBluetoothProfiles) {
+            CallsSettings.setEnabled(preferences, profile, granted && !shutdownRequested);
+        }
+        boolean requested = !pendingBluetoothProfiles.isEmpty();
+        pendingBluetoothProfiles.clear();
+        record("calls_bluetooth_permission_result", "granted", granted);
+        if (requested && !granted && !shutdownRequested) {
+            Toast.makeText(this, runtimeText(R.string.calls_bluetooth_permission), Toast.LENGTH_LONG).show();
+        }
+        if (productionUi != null) productionUi.refreshCallsSettings();
+        refreshProductionHeader();
+        advanceStartupAuthorizationFlow();
+    }
+
     private AvasPlaybackUiState avasPlayback(String profileId) {
         AvasPlaybackUiState value = avasPlayback.get(profileId);
         return value == null ? AvasPlaybackUiState.Idle : value;
@@ -3616,14 +3700,8 @@ public final class CameraProbeActivity extends ComponentActivity
                     (BydExtendUiAction.SetCameraButtonSource) action;
             if (cameraButtonActionEnabled(change.getAction())) {
                 cancelReverseButtonLearning();
-                CameraButtonBindings.Binding before = CameraButtonBindings.load(
-                        preferences, change.getAction());
-                CameraButtonBindings.Press press = before.press;
-                if (!CameraButtonBindings.supports(change.getAction(), change.getSource(), press)) {
-                    press = CameraButtonBindings.Press.Single;
-                }
-                CameraButtonBindings.Binding candidate = new CameraButtonBindings.Binding(
-                        change.getSource(), before.keyCode, press);
+                CameraButtonBindings.Binding candidate = CameraButtonBindings.loadForSource(
+                        preferences, change.getAction(), change.getSource());
                 if (CameraButtonBindings.hasRescueConflict(preferences, change.getAction(), candidate)) {
                     Toast.makeText(this, runtimeText(R.string.calls_binding_conflict),
                             Toast.LENGTH_LONG).show();
@@ -3717,7 +3795,7 @@ public final class CameraProbeActivity extends ComponentActivity
     private boolean startupOverlayPermissionBlocked() {
         return !activityResumed || !hasWindowFocus() || activityDestroyed || isFinishing()
                 || shutdownRequested || cameraPermissionPending
-                || microphonePermissionInFlight || backgroundStartSettingsPending()
+                || microphonePermissionInFlight || bluetoothPermissionInFlight || backgroundStartSettingsPending()
                 || weatherLocationPermissionInFlight
                 || adbAuthPending || adbAuthorizationStartScheduled
                 || startupOverlayPermissionFlow.foregroundAuthorizationInFlight()
@@ -10806,6 +10884,7 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     private void advanceStartupAuthorizationFlow() {
+        if (bluetoothPermissionInFlight) return;
         if (startupOverlayPermissionFlow.overlaySettingsInFlight()) return;
         if (settingsTransferInProgress || settingsReloadPending) return;
         if (productionUi != null && productionUi.getState().getDialog() != null) {
@@ -10854,6 +10933,10 @@ public final class CameraProbeActivity extends ComponentActivity
             requestMicrophonePermission();
             if (microphonePermissionInFlight) return;
         }
+        if (!pendingBluetoothProfiles.isEmpty()) {
+            requestBluetoothPermission();
+            return;
+        }
         if (isAutoPreviewTab(selectedTab) || selectedTab == TAB_CAMERA_DEBUG) {
             requestCameraPermissionIfNeeded();
             if (cameraPermissionPending) return;
@@ -10870,6 +10953,7 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private void maybeShowLegacyImportOffer() {
         if (!activityResumed || !hasWindowFocus() || cameraPermissionPending
+                || bluetoothPermissionInFlight || !pendingBluetoothProfiles.isEmpty()
                 || microphonePermissionInFlight || microphonePermissionPending || pendingManualAdbEvent != null
                 || backgroundStartSettingsPending() || weatherLocationPermissionPending
                 || weatherLocationPermissionInFlight || weatherLocationPermissionStartScheduled
@@ -10916,7 +11000,8 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     void openBackgroundStartSettings(String reason) {
-        if (cameraPermissionPending || backgroundStartSettingsActive || adbAuthPending) return;
+        if (cameraPermissionPending || backgroundStartSettingsActive || adbAuthPending
+                || bluetoothPermissionInFlight) return;
         cancelPendingBackgroundStartSettings();
         cancelPendingForegroundAdbAuthorization();
         acknowledgeInstallationReminder();
@@ -10953,6 +11038,7 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private boolean foregroundAdbAuthorizationReady() {
         return activityResumed && !activityDestroyed && !isFinishing() && !shutdownRequested
+                && !bluetoothPermissionInFlight
                 && !settingsTransferInProgress && !settingsReloadPending
                 && !weatherLocationPermissionInFlight && !microphonePermissionInFlight
                 && !startupOverlayPermissionFlow.overlaySettingsInFlight()

@@ -1,10 +1,13 @@
 <resources>
+    <string name="calls_clear_destination">Clear saved name and number</string>
+    <string name="calls_clear_field">Clear field</string>
+    <string name="calls_bluetooth_permission">Bluetooth access was not granted. The call profile remains off. Enable it again to request access or open Android permissions.</string>
     <string name="calls_title">Calls</string>
-    <string name="calls_hint">Set separate SOS and HELP contacts. A configured long press replaces the vehicle action with one call through the connected Bluetooth phone.</string>
+    <string name="calls_hint">Set separate SOS and Help contacts. A configured long press replaces the vehicle action with one call through the connected Bluetooth phone.</string>
     <string name="calls_hold_sos">Hold SOS</string>
-    <string name="calls_hold_help">Hold HELP</string>
+    <string name="calls_hold_help">Hold Help</string>
     <string name="calls_profile_sos">SOS</string>
-    <string name="calls_profile_help">HELP</string>
+    <string name="calls_profile_help">Help</string>
     <string name="calls_profile_hint">A long press on the matching vehicle control starts a call to this saved destination.</string>
     <string name="calls_destination">Saved destination</string>
     <string name="calls_not_selected">No number selected</string>
@@ -21,9 +24,9 @@
     <string name="calls_binding_source">Button input</string>
     <string name="calls_press_type">Press type</string>
     <string name="calls_button_not_selected">No button selected</string>
-    <string name="calls_source_android_key">Android key</string>
+    <string name="calls_source_android_key">Steering-wheel button</string>
     <string name="calls_source_sos">SOS</string>
-    <string name="calls_source_help">HELP</string>
+    <string name="calls_source_help">Help</string>
     <string name="calls_press_single">Single</string>
     <string name="calls_press_double">Double</string>
     <string name="calls_press_hold">Hold</string>

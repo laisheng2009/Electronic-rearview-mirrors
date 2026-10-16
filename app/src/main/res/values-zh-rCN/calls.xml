@@ -1,10 +1,13 @@
 <resources>
+    <string name="calls_clear_destination">清除已保存的姓名和号码</string>
+    <string name="calls_clear_field">清空输入框</string>
+    <string name="calls_bluetooth_permission">未授予蓝牙权限，通话配置仍处于关闭状态。再次启用即可重新请求权限或打开 Android 权限设置。</string>
     <string name="calls_title">通话</string>
-    <string name="calls_hint">分别设置 SOS 和 HELP 联系人。配置的长按会将车辆原有操作替换为通过已连接蓝牙手机拨打一次电话。</string>
+    <string name="calls_hint">分别设置 SOS 和帮助联系人。配置的长按会将车辆原有操作替换为通过已连接蓝牙手机拨打一次电话。</string>
     <string name="calls_hold_sos">长按 SOS</string>
     <string name="calls_hold_help">长按帮助按钮</string>
     <string name="calls_profile_sos">SOS</string>
-    <string name="calls_profile_help">HELP</string>
+    <string name="calls_profile_help">帮助</string>
     <string name="calls_profile_hint">长按对应的车辆按键，即可呼叫此处保存的号码。</string>
     <string name="calls_destination">已保存的号码</string>
     <string name="calls_not_selected">未选择号码</string>
@@ -21,9 +24,9 @@
     <string name="calls_binding_source">按键输入</string>
     <string name="calls_press_type">按压方式</string>
     <string name="calls_button_not_selected">未选择按键</string>
-    <string name="calls_source_android_key">Android 按键</string>
+    <string name="calls_source_android_key">方向盘按键</string>
     <string name="calls_source_sos">SOS</string>
-    <string name="calls_source_help">HELP</string>
+    <string name="calls_source_help">帮助</string>
     <string name="calls_press_single">单击</string>
     <string name="calls_press_double">双击</string>
     <string name="calls_press_hold">长按</string>

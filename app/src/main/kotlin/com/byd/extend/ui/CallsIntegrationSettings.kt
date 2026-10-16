@@ -51,14 +51,18 @@ internal fun FormScope.CallsIntegrationSettings(
         Text(strings.resource(R.string.calls_hint), color = colors.muted, fontSize = 14.sp,
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
     }
-    CallsProfileSection(
-        CallsSettings.Profile.Sos, R.string.calls_profile_sos, R.string.calls_hold_sos, state.sos,
-        strings, colors, onAction, onEditDestination,
-    )
-    CallsProfileSection(
-        CallsSettings.Profile.Help, R.string.calls_profile_help, R.string.calls_hold_help, state.help,
-        strings, colors, onAction, onEditDestination,
-    )
+    row("calls-profiles") {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            CallsProfileSection(
+                CallsSettings.Profile.Sos, R.string.calls_profile_sos, R.string.calls_hold_sos, state.sos,
+                strings, colors, onAction, onEditDestination, Modifier.weight(1f),
+            )
+            CallsProfileSection(
+                CallsSettings.Profile.Help, R.string.calls_profile_help, R.string.calls_hold_help, state.help,
+                strings, colors, onAction, onEditDestination, Modifier.weight(1f),
+            )
+        }
+    }
     if (state.feedback.visible) {
         row("calls-feedback") { Box(Modifier.padding(14.dp)) { StatusText(state.feedback, colors) } }
     }
@@ -66,7 +70,7 @@ internal fun FormScope.CallsIntegrationSettings(
 }
 
 @Composable
-private fun FormScope.CallsProfileSection(
+private fun CallsProfileSection(
     profile: CallsSettings.Profile,
     titleRes: Int,
     holdTitleRes: Int,
@@ -75,20 +79,20 @@ private fun FormScope.CallsProfileSection(
     colors: UiPalette,
     onAction: (BydExtendUiAction) -> Unit,
     onEditDestination: (CallsSettings.Profile) -> Unit,
-): FormScope {
+    modifier: Modifier,
+) {
     val title = strings.resource(titleRes)
     val holdTitle = strings.resource(holdTitleRes)
-    FormSection(title, colors, bodyPadding = 10.dp, key = "calls-${profile.keyName()}") {
-        row("${profile.keyName()}-enable") {
-            SwitchLine(holdTitle, strings.resource(R.string.calls_profile_hint), value.enabled,
-                { onAction(BydExtendUiAction.Calls(CallsUiAction.SetEnabled(profile, it))) },
-                colors, compactSwitch = false)
-        }
-        row("${profile.keyName()}-destination") {
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp))
-                .background(colors.panelAlt).border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp))
-                .padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp)) {
+    Section(title, colors, modifier, bodyPadding = 10.dp) {
+        SwitchLine(holdTitle, strings.resource(R.string.calls_profile_hint), value.enabled,
+            { onAction(BydExtendUiAction.Calls(CallsUiAction.SetEnabled(profile, it))) },
+            colors, compactSwitch = false)
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp))
+            .background(colors.panelAlt).border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp))
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(strings.resource(R.string.calls_destination), color = colors.muted, fontSize = 12.sp)
                 Text(value.name.ifBlank {
                     strings.resource(if (value.number.isBlank()) R.string.calls_not_selected else R.string.calls_manual_number)
@@ -96,24 +100,26 @@ private fun FormScope.CallsProfileSection(
                     color = if (value.number.isBlank()) colors.muted else colors.text,
                     fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
                     overflow = TextOverflow.Ellipsis)
-                if (value.number.isNotBlank()) Text(value.number, color = colors.text,
-                    fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+                Text(value.number.ifBlank { " " }, color = colors.text,
+                    fontFamily = FontFamily.Monospace, fontSize = 14.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            DeleteIconButton(strings.resource(R.string.calls_clear_destination), colors,
+                enabled = value.name.isNotEmpty() || value.number.isNotEmpty()) {
+                onAction(BydExtendUiAction.Calls(CallsUiAction.ClearDestination(profile)))
             }
         }
-        row("${profile.keyName()}-actions") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton(strings.resource(R.string.calls_choose_contact), colors,
-                    Modifier.weight(1f), enabled = value.enabled, primary = true) {
-                    onAction(BydExtendUiAction.Calls(CallsUiAction.BeginContactSelection(profile)))
-                }
-                ActionButton(strings.resource(R.string.calls_enter_manually), colors,
-                    Modifier.weight(1f), enabled = value.enabled, mainBackground = true) {
-                    onEditDestination(profile)
-                }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionButton(strings.resource(R.string.calls_choose_contact), colors,
+                Modifier.weight(1f), enabled = value.enabled, primary = true) {
+                onAction(BydExtendUiAction.Calls(CallsUiAction.BeginContactSelection(profile)))
+            }
+            ActionButton(strings.resource(R.string.calls_enter_manually), colors,
+                Modifier.weight(1f), enabled = value.enabled, mainBackground = true) {
+                onEditDestination(profile)
             }
         }
     }
-    return this
 }
 
 @Composable
@@ -137,9 +143,9 @@ internal fun CallsDestinationDialog(
                     R.string.calls_hold_sos else R.string.calls_hold_help),
                     color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
                 CallsTextInput(strings.resource(R.string.calls_contact_name), name, { name = it },
-                    keyboardType = KeyboardType.Text, imeAction = ImeAction.Next, colors = colors)
+                    keyboardType = KeyboardType.Text, imeAction = ImeAction.Next, strings = strings, colors = colors)
                 CallsTextInput(strings.resource(R.string.calls_phone_number), number, { number = it },
-                    keyboardType = KeyboardType.Phone, imeAction = ImeAction.Done, colors = colors)
+                    keyboardType = KeyboardType.Phone, imeAction = ImeAction.Done, strings = strings, colors = colors)
                 Text(if (normalizedNumber == null && number.isNotBlank())
                     strings.resource(R.string.calls_number_invalid)
                 else strings.resource(R.string.calls_number_hint),
@@ -167,21 +173,21 @@ private fun CallsTextInput(
     onValueChange: (String) -> Unit,
     keyboardType: KeyboardType,
     imeAction: ImeAction,
+    strings: UiStrings,
     colors: UiPalette,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Text(title, color = colors.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(colors.field)
-            .border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp)).padding(horizontal = 12.dp, vertical = 11.dp)) {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(colors.field)
+            .border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp)).padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             BasicTextField(value, onValueChange, singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
                 textStyle = TextStyle(color = colors.text, fontSize = 16.sp),
-                cursorBrush = SolidColor(colors.accent), modifier = Modifier.fillMaxWidth())
+                cursorBrush = SolidColor(colors.accent), modifier = Modifier.weight(1f))
+            DeleteIconButton(strings.resource(R.string.calls_clear_field), colors,
+                enabled = value.isNotEmpty()) { onValueChange("") }
         }
     }
-}
-
-private fun CallsSettings.Profile.keyName() = when (this) {
-    CallsSettings.Profile.Sos -> "sos"
-    CallsSettings.Profile.Help -> "help"
 }

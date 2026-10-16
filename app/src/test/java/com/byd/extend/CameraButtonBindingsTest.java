@@ -8,6 +8,70 @@ import static org.junit.Assert.assertTrue;
 
 public final class CameraButtonBindingsTest {
     @Test
+    public void sourceSwitchPreservesSteeringAssignmentAcrossSettingsReload() {
+        for (CameraButtonBindings.Action action : new CameraButtonBindings.Action[] {
+                CameraButtonBindings.Action.MirrorSource,
+                CameraButtonBindings.Action.MirrorVisibility,
+                CameraButtonBindings.Action.AvasMicrophone }) {
+            CameraRuntimePreferences preferences = new CameraRuntimePreferences();
+            CameraButtonBindings.Press originalPress = action == CameraButtonBindings.Action.AvasMicrophone
+                    ? CameraButtonBindings.Press.Single : CameraButtonBindings.Press.Hold;
+            String key = action == CameraButtonBindings.Action.MirrorSource
+                    ? CameraButtonBindings.MIRROR_SOURCE_KEY_CODE
+                    : action == CameraButtonBindings.Action.MirrorVisibility
+                            ? CameraButtonBindings.MIRROR_VISIBILITY_KEY_CODE
+                            : CameraButtonBindings.MICROPHONE_KEY_CODE;
+            String press = action == CameraButtonBindings.Action.MirrorSource
+                    ? CameraButtonBindings.MIRROR_SOURCE_PRESS
+                    : action == CameraButtonBindings.Action.MirrorVisibility
+                            ? CameraButtonBindings.MIRROR_VISIBILITY_PRESS
+                            : CameraButtonBindings.MICROPHONE_PRESS;
+            // Actual pre-upgrade preference input: no saved steering-press backup yet.
+            preferences.edit().putInt(key, 88).putString(press, originalPress.name()).apply();
+
+            CameraButtonBindings.save(preferences, action, CameraButtonBindings.loadForSource(
+                    preferences, action, CameraButtonBindings.Source.Sos));
+            assertEquals(CameraButtonBindings.Press.Single,
+                    CameraButtonBindings.load(preferences, action).press);
+            CameraButtonBindings.save(preferences, action, new CameraButtonBindings.Binding(
+                    CameraButtonBindings.Source.Help,
+                    action == CameraButtonBindings.Action.AvasMicrophone
+                            ? CameraButtonBindings.Press.Single : CameraButtonBindings.Press.Double));
+            assertEquals(88, preferences.getInt(key, -1));
+
+            // Exercise the shipped preference replica, not a mocked SharedPreferences.
+            CameraRuntimePreferences reopened = new CameraRuntimePreferences();
+            reopened.reconcile(preferences.getAll());
+            CameraButtonBindings.save(reopened, action, CameraButtonBindings.loadForSource(
+                    reopened, action, CameraButtonBindings.Source.AndroidKey));
+            assertEquals(new CameraButtonBindings.Binding(88, originalPress),
+                    CameraButtonBindings.load(reopened, action));
+        }
+    }
+
+    @Test
+    public void explicitResetDoesNotRestoreTheRememberedKey() {
+        CameraRuntimePreferences preferences = new CameraRuntimePreferences();
+        CameraButtonBindings.Action action = CameraButtonBindings.Action.MirrorVisibility;
+        CameraButtonBindings.save(preferences, action,
+                new CameraButtonBindings.Binding(305, CameraButtonBindings.Press.Hold));
+        CameraButtonBindings.save(preferences, action, CameraButtonBindings.loadForSource(
+                preferences, action, CameraButtonBindings.Source.Help));
+        CameraButtonBindings.reset(preferences, action);
+        assertFalse(CameraButtonBindings.loadForSource(preferences, action,
+                CameraButtonBindings.Source.AndroidKey).isAssigned());
+
+        CameraButtonBindings.save(preferences, action,
+                new CameraButtonBindings.Binding(305, CameraButtonBindings.Press.Hold));
+        CameraButtonBindings.save(preferences, action, CameraButtonBindings.loadForSource(
+                preferences, action, CameraButtonBindings.Source.Sos));
+        CameraButtonBindings.reset(preferences);
+        assertEquals(new CameraButtonBindings.Binding(-1, CameraButtonBindings.Press.Single),
+                CameraButtonBindings.loadForSource(preferences, action,
+                        CameraButtonBindings.Source.AndroidKey));
+    }
+
+    @Test
     public void legacyConstructorRemainsAnAndroidKeyBinding() {
         CameraButtonBindings.Binding binding = new CameraButtonBindings.Binding(
                 303, CameraButtonBindings.Press.Double);

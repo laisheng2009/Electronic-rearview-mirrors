@@ -1,10 +1,13 @@
 <resources>
+    <string name="calls_clear_destination">Очистить сохранённые имя и номер</string>
+    <string name="calls_clear_field">Очистить поле</string>
+    <string name="calls_bluetooth_permission">Доступ к Bluetooth не предоставлен. Профиль звонка остаётся выключенным. Включите его снова, чтобы повторить запрос или открыть разрешения Android.</string>
     <string name="calls_title">Звонки</string>
-    <string name="calls_hint">Настройте отдельные контакты SOS и HELP. Удержание настроенной кнопки заменит штатное действие одним звонком через подключённый Bluetooth-телефон.</string>
+    <string name="calls_hint">Настройте отдельные контакты SOS и Справка. Удержание настроенной кнопки заменит штатное действие одним звонком через подключённый Bluetooth-телефон.</string>
     <string name="calls_hold_sos">Удержание SOS</string>
-    <string name="calls_hold_help">Удержание СПРАВКА</string>
+    <string name="calls_hold_help">Удержание Справка</string>
     <string name="calls_profile_sos">SOS</string>
-    <string name="calls_profile_help">HELP</string>
+    <string name="calls_profile_help">Справка</string>
     <string name="calls_profile_hint">Удержание соответствующей кнопки автомобиля начнёт звонок на этот сохранённый номер.</string>
     <string name="calls_destination">Сохранённый номер</string>
     <string name="calls_not_selected">Номер не выбран</string>
@@ -21,9 +24,9 @@
     <string name="calls_binding_source">Источник кнопки</string>
     <string name="calls_press_type">Тип нажатия</string>
     <string name="calls_button_not_selected">Кнопка не выбрана</string>
-    <string name="calls_source_android_key">Кнопка Android</string>
+    <string name="calls_source_android_key">Кнопка руля</string>
     <string name="calls_source_sos">SOS</string>
-    <string name="calls_source_help">HELP</string>
+    <string name="calls_source_help">Справка</string>
     <string name="calls_press_single">Одиночное</string>
     <string name="calls_press_double">Двойное</string>
     <string name="calls_press_hold">Удержание</string>

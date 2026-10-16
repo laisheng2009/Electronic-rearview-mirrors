@@ -810,7 +810,7 @@ private fun FormScope.AvasIntegration(
                                 }
                             }
                             Box(Modifier.width(54.dp).height(42.dp), contentAlignment = Alignment.CenterEnd) {
-                                if (!asset.builtin) AvasDeleteButton(strings.format("Видалити %1\$s",
+                                if (!asset.builtin) DeleteIconButton(strings.format("Видалити %1\$s",
                                     "Delete %1\$s", "删除 %1\$s", asset.filename), colors) {
                                     if (playing) audition.sessionId?.let {
                                         send(profile.id, AvasActionKind.StopAudition, text = it)
@@ -871,16 +871,19 @@ private fun AvasVectorButton(
 }
 
 @Composable
-private fun AvasDeleteButton(description: String, colors: UiPalette, onClick: () -> Unit) {
-    val press = rememberPressFeedback()
+internal fun DeleteIconButton(
+    description: String, colors: UiPalette, enabled: Boolean = true, onClick: () -> Unit,
+) {
+    val press = rememberPressFeedback(enabled)
     val visualClick = rememberVisualFirstClick(onClick)
+    val tint = if (enabled) colors.red else colors.muted
     Box(Modifier.size(42.dp).clip(RoundedCornerShape(7.dp))
-        .border(1.dp, colors.red.copy(alpha = .85f), RoundedCornerShape(7.dp))
-        .background(if (press.pressed) colors.red.copy(alpha = .55f) else colors.red.copy(alpha = .16f))
+        .border(1.dp, tint.copy(alpha = .85f), RoundedCornerShape(7.dp))
+        .background(if (press.pressed) tint.copy(alpha = .55f) else tint.copy(alpha = .16f))
         .then(press.modifier).clickable(interactionSource = press.interactionSource,
-            indication = null, role = Role.Button, onClick = visualClick).padding(9.dp),
+            indication = null, enabled = enabled, role = Role.Button, onClick = visualClick).padding(9.dp),
         contentAlignment = Alignment.Center) {
-        Icon(painterResource(R.drawable.ic_delete), description, tint = colors.red,
+        Icon(painterResource(R.drawable.ic_delete), description, tint = tint,
             modifier = Modifier.size(24.dp))
     }
 }

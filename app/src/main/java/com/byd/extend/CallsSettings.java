@@ -42,6 +42,10 @@ public final class CallsSettings {
         preferences.edit().putBoolean(profile.key + "_enabled", enabled).apply();
     }
 
+    public static void clearDestination(SharedPreferences preferences, Profile profile) {
+        preferences.edit().remove(profile.key + "_name").remove(profile.key + "_number").apply();
+    }
+
     /** Invalid input leaves the previously saved destination intact. */
     public static boolean saveDestination(
             SharedPreferences preferences, Profile profile, String name, String number) {

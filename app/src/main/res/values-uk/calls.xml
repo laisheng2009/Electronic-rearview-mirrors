@@ -1,10 +1,13 @@
 <resources>
+    <string name="calls_clear_destination">Очистити збережені ім’я та номер</string>
+    <string name="calls_clear_field">Очистити поле</string>
+    <string name="calls_bluetooth_permission">Доступ до Bluetooth не надано. Профіль дзвінка залишається вимкненим. Увімкніть його знову, щоб повторити запит або відкрити дозволи Android.</string>
     <string name="calls_title">Дзвінки</string>
-    <string name="calls_hint">Налаштуйте окремі контакти SOS і HELP. Утримання налаштованої кнопки замінює штатну дію одним дзвінком через підключений Bluetooth-телефон.</string>
+    <string name="calls_hint">Налаштуйте окремі контакти SOS і Довідка. Утримання налаштованої кнопки замінює штатну дію одним дзвінком через підключений Bluetooth-телефон.</string>
     <string name="calls_hold_sos">Утримання SOS</string>
-    <string name="calls_hold_help">Утримання ДОВІДКА</string>
+    <string name="calls_hold_help">Утримання Довідка</string>
     <string name="calls_profile_sos">SOS</string>
-    <string name="calls_profile_help">HELP</string>
+    <string name="calls_profile_help">Довідка</string>
     <string name="calls_profile_hint">Утримання відповідної кнопки автомобіля розпочне дзвінок на цей збережений номер.</string>
     <string name="calls_destination">Збережений номер</string>
     <string name="calls_not_selected">Номер не вибрано</string>
@@ -21,9 +24,9 @@
     <string name="calls_binding_source">Джерело кнопки</string>
     <string name="calls_press_type">Тип натискання</string>
     <string name="calls_button_not_selected">Кнопку не вибрано</string>
-    <string name="calls_source_android_key">Кнопка Android</string>
+    <string name="calls_source_android_key">Кнопка керма</string>
     <string name="calls_source_sos">SOS</string>
-    <string name="calls_source_help">HELP</string>
+    <string name="calls_source_help">Довідка</string>
     <string name="calls_press_single">Одиночне</string>
     <string name="calls_press_double">Подвійне</string>
     <string name="calls_press_hold">Утримання</string>
