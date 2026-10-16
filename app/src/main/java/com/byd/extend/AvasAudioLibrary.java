@@ -176,6 +176,13 @@ public final class AvasAudioLibrary {
     public AvasConfig updateProfileSettings(String profileId, Boolean enabled, Boolean random,
             Integer volume, String selectedAssetId, Boolean skipConcurrentLockUnlock,
             Boolean onlyWhenLockingPoweredOff) {
+        return updateProfileSettings(profileId, enabled, random, volume, selectedAssetId,
+                skipConcurrentLockUnlock, onlyWhenLockingPoweredOff, null);
+    }
+
+    public AvasConfig updateProfileSettings(String profileId, Boolean enabled, Boolean random,
+            Integer volume, String selectedAssetId, Boolean skipConcurrentLockUnlock,
+            Boolean onlyWhenLockingPoweredOff, Boolean internalSpeaker) {
         if (!AvasConfig.PROFILE_IDS.contains(profileId)) {
             throw new IllegalArgumentException("unknown AVAS profile");
         }
@@ -191,7 +198,8 @@ public final class AvasAudioLibrary {
                             ? profile.skipConcurrentLockUnlock : skipConcurrentLockUnlock,
                     Boolean.TRUE.equals(skipConcurrentLockUnlock) ? false
                             : onlyWhenLockingPoweredOff == null
-                            ? profile.onlyWhenLockingPoweredOff : onlyWhenLockingPoweredOff);
+                            ? profile.onlyWhenLockingPoweredOff : onlyWhenLockingPoweredOff)
+                    .withInternalSpeaker(internalSpeaker == null ? profile.internalSpeaker : internalSpeaker);
             AvasConfig updated = latest.withProfile(updatedProfile);
             if (!updated.toJson().equals(latest.toJson())) saveConfigLocked(updated);
             return updated;

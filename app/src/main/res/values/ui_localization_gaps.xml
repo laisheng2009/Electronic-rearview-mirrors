@@ -69,4 +69,6 @@
     <string name="ui_gap_075">"Add files…"</string>
     <string name="ui_gap_076">"The assigned button will switch front/rear cameras instead of its original action. Front views require enabled integration."</string>
     <string name="avas_only_when_locking_powered_off">Only when locking the powered-off vehicle</string>
+    <string name="avas_internal_speaker">Only through the cabin speaker</string>
+    <string name="avas_random_selected_output_hint">Only for this automation. Start plays the selected file through the selected speaker.</string>
 </resources>

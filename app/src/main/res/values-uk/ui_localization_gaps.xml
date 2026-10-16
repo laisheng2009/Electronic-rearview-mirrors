@@ -69,4 +69,6 @@
     <string name="ui_gap_075">"Додати файли…"</string>
     <string name="ui_gap_076">"Призначена кнопка перемикатиме передні й задні камери замість штатної дії. Передні види доступні лише з увімкненою інтеграцією."</string>
     <string name="avas_only_when_locking_powered_off">Тільки при замиканні вимкненого авто</string>
+    <string name="avas_internal_speaker">Тільки у внутрішній динамік кабіни</string>
+    <string name="avas_random_selected_output_hint">Лише для цієї автоматизації. «Старт» відтворює вибраний файл через обраний динамік.</string>
 </resources>

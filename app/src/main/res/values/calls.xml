@@ -24,7 +24,7 @@
     <string name="calls_binding_source">Button input</string>
     <string name="calls_press_type">Press type</string>
     <string name="calls_button_not_selected">No button selected</string>
-    <string name="calls_source_android_key">Steering-wheel button</string>
+    <string name="calls_source_android_key">Steering button</string>
     <string name="calls_source_sos">SOS</string>
     <string name="calls_source_help">Help</string>
     <string name="calls_press_single">Single</string>

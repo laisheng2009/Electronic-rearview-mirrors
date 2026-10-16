@@ -71,6 +71,7 @@ dependencies {
     implementation("org.bouncycastle:bcpkix-jdk18on:1.85")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 val copyPerformanceApkToBuildOutput by tasks.registering(Copy::class) {

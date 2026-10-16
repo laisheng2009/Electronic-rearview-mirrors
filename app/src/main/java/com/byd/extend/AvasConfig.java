@@ -16,7 +16,7 @@ public final class AvasConfig {
     public static final List<String> PROFILE_IDS = Collections.unmodifiableList(Arrays.asList(
             "lock", "unlock", "power_off", "power_on"));
     private static final int MAX_JSON_LENGTH = 1_048_576;
-    private static final int VERSION = 4;
+    private static final int VERSION = 5;
 
     public final List<Profile> profiles;
     public final Engine engine;
@@ -88,6 +88,7 @@ public final class AvasConfig {
                         .put("enabled", profile.enabled)
                         .put("random", profile.random)
                         .put("volume", profile.volume)
+                        .put("internalSpeaker", profile.internalSpeaker)
                         .put("selectedAssetId", profile.selectedAssetId)
                         .put("skipConcurrentLockUnlock", profile.skipConcurrentLockUnlock)
                         .put("onlyWhenLockingPoweredOff", profile.onlyWhenLockingPoweredOff)
@@ -133,8 +134,11 @@ public final class AvasConfig {
                 } else if (version < 4) {
                     requireKeys(value, "id", "enabled", "random", "volume",
                             "selectedAssetId", "skipConcurrentLockUnlock", "assets");
-                } else {
+                } else if (version == 4) {
                     requireKeys(value, "id", "enabled", "random", "volume",
+                            "selectedAssetId", "skipConcurrentLockUnlock", "onlyWhenLockingPoweredOff", "assets");
+                } else {
+                    requireKeys(value, "id", "enabled", "random", "volume", "internalSpeaker",
                             "selectedAssetId", "skipConcurrentLockUnlock", "onlyWhenLockingPoweredOff", "assets");
                 }
                 JSONArray assetValues = value.getJSONArray("assets");
@@ -148,7 +152,8 @@ public final class AvasConfig {
                         strictBoolean(value.get("random")), strictInt(value.get("volume"), "volume"),
                         value.getString("selectedAssetId"), assets,
                         version == 1 || strictBoolean(value.get("skipConcurrentLockUnlock")),
-                        version >= 4 && strictBoolean(value.get("onlyWhenLockingPoweredOff"))));
+                        version >= 4 && strictBoolean(value.get("onlyWhenLockingPoweredOff")),
+                        version >= 5 && strictBoolean(value.get("internalSpeaker"))));
             }
             Engine engine = version >= 3
                     ? parseEngine(root.getJSONObject("engine")) : Engine.defaults();
@@ -265,6 +270,7 @@ public final class AvasConfig {
         public final List<Asset> assets;
         public final boolean skipConcurrentLockUnlock;
         public final boolean onlyWhenLockingPoweredOff;
+        public final boolean internalSpeaker;
 
         public Profile(String id, boolean enabled, boolean random, int volume,
                 String selectedAssetId, List<Asset> assets) {
@@ -279,6 +285,13 @@ public final class AvasConfig {
         public Profile(String id, boolean enabled, boolean random, int volume,
                 String selectedAssetId, List<Asset> assets, boolean skipConcurrentLockUnlock,
                 boolean onlyWhenLockingPoweredOff) {
+            this(id, enabled, random, volume, selectedAssetId, assets,
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff, false);
+        }
+
+        public Profile(String id, boolean enabled, boolean random, int volume,
+                String selectedAssetId, List<Asset> assets, boolean skipConcurrentLockUnlock,
+                boolean onlyWhenLockingPoweredOff, boolean internalSpeaker) {
             if (!PROFILE_IDS.contains(id)) throw new IllegalArgumentException("invalid profile id");
             if (onlyWhenLockingPoweredOff && !"power_off".equals(id))
                 throw new IllegalArgumentException("lock-triggered power-off is only valid for power_off");
@@ -304,29 +317,35 @@ public final class AvasConfig {
             this.assets = copy;
             this.onlyWhenLockingPoweredOff = onlyWhenLockingPoweredOff;
             this.skipConcurrentLockUnlock = skipConcurrentLockUnlock && !onlyWhenLockingPoweredOff;
+            this.internalSpeaker = internalSpeaker;
         }
 
         public Profile withSettings(boolean enabled, boolean random, int volume,
                 String selectedAssetId) {
             return new Profile(id, enabled, random, volume, selectedAssetId, assets,
-                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff, internalSpeaker);
         }
 
         public Profile withSettings(boolean enabled, boolean random, int volume,
                 String selectedAssetId, boolean skipConcurrentLockUnlock) {
             return new Profile(id, enabled, random, volume, selectedAssetId, assets,
-                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff, internalSpeaker);
         }
 
         public Profile withSettings(boolean enabled, boolean random, int volume,
                 String selectedAssetId, boolean skipConcurrentLockUnlock, boolean onlyWhenLockingPoweredOff) {
             return new Profile(id, enabled, random, volume, selectedAssetId, assets,
-                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff, internalSpeaker);
         }
 
         public Profile withAssets(List<Asset> assets, String selectedAssetId) {
             return new Profile(id, enabled, random, volume, selectedAssetId, assets,
-                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff, internalSpeaker);
+        }
+
+        public Profile withInternalSpeaker(boolean internalSpeaker) {
+            return new Profile(id, enabled, random, volume, selectedAssetId, assets,
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff, internalSpeaker);
         }
     }
 

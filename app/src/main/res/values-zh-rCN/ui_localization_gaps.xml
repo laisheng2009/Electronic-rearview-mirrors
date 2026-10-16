@@ -69,4 +69,6 @@
     <string name="ui_gap_075">"添加文件…"</string>
     <string name="ui_gap_076">"所选按键将切换前后摄像头，并取代原有操作。前方视角仅在启用集成后可用。"</string>
     <string name="avas_only_when_locking_powered_off">仅在车辆下电后锁车时播放</string>
+    <string name="avas_internal_speaker">仅通过车内扬声器播放</string>
+    <string name="avas_random_selected_output_hint">仅用于此自动化。“开始”通过所选扬声器播放所选文件。</string>
 </resources>

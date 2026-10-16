@@ -620,11 +620,16 @@ final class AvasRuntime implements AutoCloseable {
             cueGate.awaitEventStart(() -> closed || request.cancelled.get());
             if (closed || request.cancelled.get()) return;
             AvasAudioPlayer output = audioPlayer();
+            AvasPlaybackPlan.Output destination = AvasPlaybackPlan.output(profile, request.audition());
             event(request, "avas_play_start", "asset", assetId(file),
-                    "gain", profile.volume);
+                    "gain", profile.volume, "output", destination.name());
             reportStatus();
-            if (request.audition()) {
+            if (destination == AvasPlaybackPlan.Output.NAVIGATION) {
                 output.playNavigation(file, profile.volume, request.cancelled::get,
+                        request.diagnostics,
+                        () -> config.profile(request.profile).volume);
+            } else if (destination == AvasPlaybackPlan.Output.INTERIOR_MEDIA) {
+                output.playInterior(file, profile.volume, request.cancelled::get,
                         request.diagnostics,
                         () -> config.profile(request.profile).volume);
             } else {

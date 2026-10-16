@@ -690,9 +690,7 @@ private fun FormScope.AvasIntegration(
                                 SwitchLine(strings.text("Випадкова мелодія", "Random melody", "随机旋律"), "",
                                     profile.random, { send(profile.id, AvasActionKind.SetRandom, boolean = it) }, colors,
                                     enabled = profile.enabled)
-                                Text(strings.text("Лише для цієї автоматизації. «Старт» відтворює вибраний файл через зовнішній динамік.",
-                                    "Only for this automation. Start plays the selected file through the exterior speaker.",
-                                    "仅用于此自动化。“开始”通过车外扬声器播放所选文件。"),
+                                Text(strings.resource(com.byd.extend.R.string.avas_random_selected_output_hint),
                                     color = colors.muted, fontSize = 12.sp)
                                 Text(strings.text("Гучність", "Volume", "音量"), color = colors.text,
                                     fontSize = if (LocalCompactControls.current) 14.sp else 16.sp,
@@ -703,6 +701,10 @@ private fun FormScope.AvasIntegration(
                                     0f..100f, enabled = profile.enabled, adjustable = true, slider = true, showLabel = false,
                                     compactSuffix = true, narrowInput = true,
                                     identity = "avas-volume-${profile.id}")
+                                SwitchLine(strings.resource(com.byd.extend.R.string.avas_internal_speaker), "",
+                                    profile.internalSpeaker, {
+                                        send(profile.id, AvasActionKind.SetInternalSpeaker, boolean = it)
+                                    }, colors, enabled = profile.enabled)
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     ActionButton(strings.text("Старт", "Start", "开始"), colors,
                                         Modifier.weight(1f).testTag("avas-start-${profile.id}"),

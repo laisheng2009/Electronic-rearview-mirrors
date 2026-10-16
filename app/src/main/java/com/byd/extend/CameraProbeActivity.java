@@ -3178,7 +3178,8 @@ public final class CameraProbeActivity extends ComponentActivity
             profiles.add(new AvasProfileUiState(profile.id, profile.enabled, profile.random,
                     selectedName, assets, profile.volume, avasPlayback(profile.id),
                     profile.selectedAssetId.isEmpty() ? null : profile.selectedAssetId,
-                    profile.skipConcurrentLockUnlock, profile.onlyWhenLockingPoweredOff));
+                    profile.skipConcurrentLockUnlock, profile.onlyWhenLockingPoweredOff,
+                    profile.internalSpeaker));
         }
         String importing = preferences == null ? null
                 : preferences.getString(PREF_AVAS_IMPORT_PROFILE, null);
@@ -3294,6 +3295,7 @@ public final class CameraProbeActivity extends ComponentActivity
             String selected = null;
             Boolean skipConcurrentLockUnlock = null;
             Boolean onlyWhenLockingPoweredOff = null;
+            Boolean internalSpeaker = null;
             if (kind == AvasActionKind.SetEnabled && action.getBooleanValue() != null) {
                 enabled = action.getBooleanValue();
                 if (!enabled) stopAvasListAudition(avasAudition.getSessionId());
@@ -3301,6 +3303,8 @@ public final class CameraProbeActivity extends ComponentActivity
                 random = action.getBooleanValue();
             } else if (kind == AvasActionKind.SetVolume && action.getIntValue() != null) {
                 volume = Math.max(0, Math.min(100, action.getIntValue()));
+            } else if (kind == AvasActionKind.SetInternalSpeaker && action.getBooleanValue() != null) {
+                internalSpeaker = action.getBooleanValue();
             } else if (kind == AvasActionKind.SetSkipConcurrentLockUnlock
                     && action.getBooleanValue() != null) {
                 skipConcurrentLockUnlock = action.getBooleanValue();
@@ -3313,7 +3317,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 return;
             }
             avasLibrary.updateProfileSettings(profileId, enabled, random, volume, selected,
-                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff);
+                    skipConcurrentLockUnlock, onlyWhenLockingPoweredOff, internalSpeaker);
             CameraHelperService.configureAvas(this);
         } catch (RuntimeException invalid) {
             if (action.getKind() == AvasActionKind.StartAudition) {

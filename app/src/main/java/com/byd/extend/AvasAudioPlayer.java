@@ -915,6 +915,108 @@ final class AvasAudioPlayer implements AutoCloseable {
         return -2;
     }
 
+    /** Standard cabin media output: no OEM route writes or changes to shared stream volume. */
+    void playInterior(File wav, int volume, BooleanSupplier cancelled,
+            AvasAudioDiagnostics.Context diagnostics, IntSupplier currentVolume) throws Exception {
+        AvasWav.Header header = AvasWav.read(wav);
+        int initialVolume = clamp(volume);
+        long ticket = generation.incrementAndGet();
+        AudioTrack output = null;
+        AudioFocusRequest focus = null;
+        Exception playbackFailure = null;
+        SessionDiagnostics session = new SessionDiagnostics(diagnostics);
+        long framesWritten = 0;
+        try {
+            if (cancelled(ticket, cancelled)) return;
+            AudioAttributes attributes = MusicPlaybackSource.attributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC),
+                    MusicPlaybackSource.EVENT).build();
+            IntConsumer focusCallback = AvasAudioDiagnostics.bind(diagnostics,
+                    (captured, change) -> event(captured, "avas_focus_change", "value", change));
+            focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(attributes)
+                    .setOnAudioFocusChangeListener(focusCallback::accept,
+                            new Handler(Looper.getMainLooper())).build();
+            int granted = manager.requestAudioFocus(focus);
+            event(diagnostics, "avas_focus_request", "result", granted, "route", "interior_media");
+            if (granted != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                throw new IllegalStateException("Cabin media audio focus denied");
+            }
+            int channelMask = header.channels == 1
+                    ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+            int minimum = AudioTrack.getMinBufferSize(
+                    header.sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT);
+            if (minimum <= 0) throw new IllegalStateException("Invalid AudioTrack buffer " + minimum);
+            int bufferBytes = align(Math.max(minimum, header.frameSize * 256), header.frameSize);
+            output = new AudioTrack.Builder().setAudioAttributes(attributes)
+                    .setAudioFormat(new AudioFormat.Builder().setSampleRate(header.sampleRate)
+                            .setChannelMask(channelMask).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+                    .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(bufferBytes).build();
+            if (output.getState() != AudioTrack.STATE_INITIALIZED) {
+                throw new IllegalStateException("AudioTrack not initialized");
+            }
+            registerPlaybackSource(output, MusicPlaybackSource.EVENT);
+            synchronized (trackLock) {
+                if (cancelled(ticket, cancelled)) return;
+                activeTrack = output;
+            }
+            session.bind(output);
+            output.setVolume(1f);
+            output.play();
+            event(diagnostics, "avas_play_begin", "file", wav.getName(), "volume", initialVolume,
+                    "route", "interior_media", "sampleRate", header.sampleRate,
+                    "channels", header.channels, "buffer_bytes", bufferBytes);
+            byte[] pcm = new byte[align(Math.max(bufferBytes, 4096), header.frameSize)];
+            byte[] scaled = new byte[pcm.length];
+            try (FileInputStream input = new FileInputStream(wav)) {
+                skipFully(input, header.dataOffset);
+                long remaining = header.dataBytes;
+                while (remaining > 0 && !cancelled(ticket, cancelled)) {
+                    int wanted = (int) Math.min(pcm.length, remaining);
+                    readFully(input, pcm, wanted);
+                    int written = write(output, pcm, scaled, wanted, header.frameSize, ticket,
+                            cancelled, currentVolume, initialVolume, null, "wav", session);
+                    framesWritten += written / header.frameSize;
+                    remaining -= written;
+                    if (written < wanted) break;
+                }
+            }
+            long fileFrames = framesWritten;
+            long tailFrames = AvasPlaybackPlan.tailPaddingFrames(framesWritten,
+                    bufferBytes / header.frameSize);
+            if (tailFrames > 0 && !cancelled(ticket, cancelled)) {
+                byte[] tail = AvasPlaybackPlan.zeroPcm(Math.toIntExact(tailFrames * header.frameSize));
+                framesWritten += write(output, tail, scaled, tail.length, header.frameSize, ticket,
+                        cancelled, currentVolume, initialVolume, null, "tail", session) / header.frameSize;
+            }
+            drain(output, framesWritten, ticket, cancelled, session);
+            if (!cancelled(ticket, cancelled)) {
+                awaitPresentation(output, framesWritten, () -> cancelled(ticket, cancelled), diagnostics);
+            }
+            event(diagnostics, "avas_play_end", "route", "interior_media",
+                    "interrupted", cancelled(ticket, cancelled), "fileFrames", fileFrames,
+                    "framesWritten", framesWritten,
+                    "playbackHead", safePlaybackHead(output));
+        } catch (Exception failure) {
+            playbackFailure = failure;
+            throw failure;
+        } finally {
+            synchronized (trackLock) {
+                if (activeTrack == output) activeTrack = null;
+            }
+            session.finalSample(output);
+            session.unbind(output);
+            release(output);
+            try {
+                // Exterior engine/microphone sessions may still own the separate OEM route.
+                if (focus != null) manager.abandonAudioFocusRequest(focus);
+            } catch (Exception cleanupFailure) {
+                if (playbackFailure != null) playbackFailure.addSuppressed(cleanupFailure);
+                else throw cleanupFailure;
+            }
+        }
+    }
+
     /** Plays one file through the proven OEM in-cabin NAV route. */
     void playNavigation(File wav, int volume, BooleanSupplier cancelled,
             AvasAudioDiagnostics.Context diagnostics,

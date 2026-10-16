@@ -69,4 +69,6 @@
     <string name="ui_gap_075">"Добавить файлы…"</string>
     <string name="ui_gap_076">"Назначенная кнопка будет переключать передние и задние камеры вместо штатного действия. Передние виды доступны только при включённой интеграции."</string>
     <string name="avas_only_when_locking_powered_off">Только при запирании выключенного автомобиля</string>
+    <string name="avas_internal_speaker">Только во внутренний динамик салона</string>
+    <string name="avas_random_selected_output_hint">Только для этой автоматизации. «Старт» воспроизводит выбранный файл через выбранный динамик.</string>
 </resources>

@@ -3,8 +3,14 @@ package com.byd.extend;
 /** Pure per-request audio policy shared by playback and deterministic JVM tests. */
 final class AvasPlaybackPlan {
     static final int PCM_GAIN_MULTIPLIER = 2;
+    enum Output { EXTERIOR, INTERIOR_MEDIA, NAVIGATION }
 
     private AvasPlaybackPlan() {}
+
+    static Output output(AvasConfig.Profile profile, boolean audition) {
+        if (audition) return Output.NAVIGATION;
+        return profile.internalSpeaker ? Output.INTERIOR_MEDIA : Output.EXTERIOR;
+    }
 
     static float exteriorPlayerVolume(int volume, boolean loudnessEnabled) {
         int percent = Math.max(0, Math.min(100, volume));
