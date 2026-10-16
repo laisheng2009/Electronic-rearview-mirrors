@@ -17,7 +17,7 @@
     <string name="calls_choose_contact">Choose from contacts</string>
     <string name="calls_contact_name">Name (optional)</string>
     <string name="calls_phone_number">Phone number</string>
-    <string name="calls_number_hint">6–15 ASCII digits, optionally starting with +. Spaces, parentheses and hyphens are allowed.</string>
+    <string name="calls_number_hint">Digits 0–9, optionally starting with +. Short numbers are supported. Spaces, parentheses and hyphens are allowed.</string>
     <string name="calls_number_invalid">Enter a valid phone number to save this destination.</string>
     <string name="calls_save">Save</string>
     <string name="calls_cancel">Cancel</string>

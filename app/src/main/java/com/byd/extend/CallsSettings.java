@@ -59,10 +59,10 @@ public final class CallsSettings {
         return true;
     }
 
-    /** Keeps the Preview phone-number contract: only formatting whitespace is removed. */
+    /** Removes display formatting without imposing a phone-number length range. */
     public static String normalizeNumber(String input) {
         if (input == null) return null;
         String number = input.replaceAll("[\\s\\p{Zs}()\\-]", "");
-        return number.matches("\\+?[0-9]{6,15}") ? number : null;
+        return number.matches("\\+?[0-9]+") ? number : null;
     }
 }

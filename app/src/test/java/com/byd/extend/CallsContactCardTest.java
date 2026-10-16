@@ -41,11 +41,20 @@ public final class CallsContactCardTest {
 
         assertNull(CallsRuntime.ContactCard.fromFields(
                 Collections.singletonList("Test contact"),
-                Arrays.asList("+1 (202) 555-0100", "911")));
+                Arrays.asList("+1 (202) 555-0100", "112x")));
         assertNull(CallsRuntime.ContactCard.fromFields(
                 Arrays.asList("First", "Second"), Collections.singletonList("2025550100")));
         assertNull(CallsRuntime.ContactCard.fromFields(
                 Collections.singletonList("  "), Collections.singletonList("2025550100")));
+    }
+
+    @Test
+    public void acceptsShortNumbersFromContactCards() {
+        CallsRuntime.ContactCard card = CallsRuntime.ContactCard.fromFields(
+                Collections.singletonList("Short-code contact"),
+                Arrays.asList("112", "1 1 2"));
+        assertNotNull(card);
+        assertEquals(Collections.singletonList("112"), card.numbers);
     }
 
     @Test

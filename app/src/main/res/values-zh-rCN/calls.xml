@@ -17,7 +17,7 @@
     <string name="calls_choose_contact">从联系人中选择</string>
     <string name="calls_contact_name">名称（可选）</string>
     <string name="calls_phone_number">电话号码</string>
-    <string name="calls_number_hint">6–15 位 ASCII 数字，可用 + 开头。允许空格、括号和连字符。</string>
+    <string name="calls_number_hint">使用数字 0–9，可用 + 开头。支持短号码。允许空格、括号和连字符。</string>
     <string name="calls_number_invalid">请输入有效电话号码以保存联系人。</string>
     <string name="calls_save">保存</string>
     <string name="calls_cancel">取消</string>

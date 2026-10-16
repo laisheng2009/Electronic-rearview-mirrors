@@ -17,7 +17,7 @@
     <string name="calls_choose_contact">Вибрати з контактів</string>
     <string name="calls_contact_name">Назва (необов’язково)</string>
     <string name="calls_phone_number">Номер телефону</string>
-    <string name="calls_number_hint">6–15 цифр ASCII, можна з + на початку. Дозволені пробіли, дужки та дефіси.</string>
+    <string name="calls_number_hint">Цифри 0–9, можна з + на початку. Короткі номери підтримуються. Дозволені пробіли, дужки та дефіси.</string>
     <string name="calls_number_invalid">Введіть коректний номер телефону, щоб зберегти контакт.</string>
     <string name="calls_save">Зберегти</string>
     <string name="calls_cancel">Скасувати</string>
