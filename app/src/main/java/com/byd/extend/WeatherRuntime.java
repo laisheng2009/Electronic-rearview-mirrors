@@ -16,6 +16,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.Bundle;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 
 import org.json.JSONObject;
@@ -50,7 +51,6 @@ public final class WeatherRuntime {
     public static final String WEATHER_URI =
             "content://com.byd.weatherdata.utils.WeatherContentProvider/weather";
     static final String PREF_LANGUAGE = "ui_language";
-    private static final long MAX_LAST_LOCATION_AGE_MS = 30 * 60 * 1000L;
     private static final long CONNECT_TIMEOUT_MS = 8_000L;
     private static final long READ_TIMEOUT_MS = 12_000L;
     private static final int MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -243,14 +243,20 @@ public final class WeatherRuntime {
     }
 
     private void runRequest(
-            long requestGeneration, String reason, ResultCallback callback, Location location) {
+            long requestGeneration, String reason, ResultCallback callback,
+            LocationSnapshot location) {
         boolean success = false;
         String error = "";
         try {
-            emit("weather_request", "reason", reason);
+            emit("weather_request", "reason", reason,
+                    "candidate_origin", location.origin,
+                    "candidate_provider", location.provider,
+                    "candidate_mock", location.mock,
+                    "candidate_age_ms", location.ageMs);
             if (!isCurrent(requestGeneration)) throw new InterruptedException("weather disabled");
-            City city = geocode(location);
-            String query = coordinateQuery(location);
+            emitLocationDetail(location);
+            City city = geocode(location.value);
+            String query = coordinateQuery(location.value);
             JSONObject forecast = getJson("https://api.open-meteo.com/v1/forecast?" + query
                     + "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,uv_index"
                     + "&hourly=temperature_2m,weather_code,precipitation_probability,wind_speed_10m,wind_direction_10m,is_day"
@@ -414,9 +420,16 @@ public final class WeatherRuntime {
     }
 
     private void prerequisiteChanged(String trigger, Location location) {
+        Location incoming = location == null ? null : new Location(location);
         synchronized (stateLock) {
             if (!started || !enabled || !requestPending || executor.isShutdown()) return;
-            if (location != null) callbackLocation = location;
+            if (incoming != null) {
+                long incomingNanos = locationElapsedNanos(incoming);
+                long retainedNanos = locationElapsedNanos(callbackLocation);
+                long nowNanos = SystemClock.elapsedRealtimeNanos();
+                if (WeatherLocationSelection.shouldReplace(
+                        incomingNanos, retainedNanos, nowNanos)) callbackLocation = incoming;
+            }
             if (prerequisiteCheckQueued) {
                 prerequisiteRecheckRequested = true;
                 return;
@@ -485,7 +498,13 @@ public final class WeatherRuntime {
                 updatePrerequisiteCallbacksLocked(state);
                 schedulePrerequisiteRecheckLocked();
                 if (transition) {
-                    emit("weather_prerequisite_wait", "missing", waitLabel(state));
+                    if (location.value == null) {
+                        emit("weather_prerequisite_wait", "missing", waitLabel(state),
+                                "location_rejections", locationWaitRejections(location));
+                    } else {
+                        emit("weather_prerequisite_wait", "missing", waitLabel(state));
+                    }
+                    emitLocationDetail(location);
                 }
                 if (prerequisiteRecheckRequested) {
                     prerequisiteRecheckRequested = false;
@@ -517,7 +536,7 @@ public final class WeatherRuntime {
             if (readinessRetry) {
                 emit("weather_prerequisite_ready", "trigger", trigger);
             }
-            runRequest(requestGeneration, reason, callback, location.value);
+            runRequest(requestGeneration, reason, callback, location);
         }
     }
 
@@ -526,26 +545,37 @@ public final class WeatherRuntime {
                 == android.content.pm.PackageManager.PERMISSION_GRANTED
                 || context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
                 == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        if (!authorized) return new LocationSnapshot(false, null);
-        Location best;
+        if (!authorized) return new LocationSnapshot(false, null, null, 0L, 0L, null);
+        Location[] candidates = new Location[3];
         synchronized (stateLock) {
-            best = fresh(callbackLocation) ? callbackLocation : null;
+            if (callbackLocation != null) candidates[0] = new Location(callbackLocation);
         }
         LocationManager manager =
                 (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
         if (manager != null) {
-            for (String provider : new String[]{
-                    LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER}) {
+            String[] providers = {LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER};
+            for (int i = 0; i < providers.length; i++) {
                 try {
-                    Location candidate = manager.getLastKnownLocation(provider);
-                    if (fresh(candidate) && (best == null
-                            || candidate.getTime() > best.getTime())) best = candidate;
+                    Location candidate = manager.getLastKnownLocation(providers[i]);
+                    if (candidate != null) candidates[i + 1] = new Location(candidate);
                 } catch (SecurityException ignored) {
                     // One OEM provider can reject access while the granted provider remains usable.
                 }
             }
         }
-        return new LocationSnapshot(true, best);
+        long callbackNanos = locationElapsedNanos(candidates[0]);
+        long gpsNanos = locationElapsedNanos(candidates[1]);
+        long networkNanos = locationElapsedNanos(candidates[2]);
+        long nowNanos = SystemClock.elapsedRealtimeNanos();
+        int selected = WeatherLocationSelection.selectIndex(
+                nowNanos, callbackNanos, gpsNanos, networkNanos);
+        Location best = selected < 0 ? null : candidates[selected];
+        String origin = selected == 0 ? "callback" : selected == 1 ? "gps"
+                : selected == 2 ? "network" : null;
+        long selectedNanos = selected == 0 ? callbackNanos
+                : selected == 1 ? gpsNanos : selected == 2 ? networkNanos : 0L;
+        return new LocationSnapshot(true, best, origin, nowNanos, selectedNanos,
+                candidates);
     }
 
     private boolean hasValidatedDefaultNetwork() {
@@ -563,11 +593,73 @@ public final class WeatherRuntime {
         }
     }
 
-    private static boolean fresh(Location location) {
-        if (location == null) return false;
-        if (location.getTime() <= 0L) return true;
-        return Math.max(0L, System.currentTimeMillis() - location.getTime())
-                <= MAX_LAST_LOCATION_AGE_MS;
+    private void emitLocationDetail(LocationSnapshot snapshot) {
+        Location[] candidates = snapshot.candidateLocations;
+        if (!DiagnosticLogPolicy.extended() || candidates == null) return;
+        Location callback = candidates[0];
+        Location gps = candidates[1];
+        Location network = candidates[2];
+        Location selected = snapshot.value;
+        long nowNanos = snapshot.nowNanos;
+        emit("weather_location_detail",
+                "now_elapsed_ns", nowNanos,
+                "selected_origin", snapshot.origin == null ? "unavailable" : snapshot.origin,
+                "selected_provider", selected == null ? null : selected.getProvider(),
+                "selected_mock", selected != null && selected.isFromMockProvider(),
+                "selected_age_ms", selected == null ? null : Long.valueOf(snapshot.ageMs),
+                "selected_latitude", selected == null ? null : Double.valueOf(selected.getLatitude()),
+                "selected_longitude", selected == null ? null : Double.valueOf(selected.getLongitude()),
+                "selected_wall_ms", selected == null ? null : Long.valueOf(selected.getTime()),
+                "selected_elapsed_ns", selected == null ? null : Long.valueOf(selected.getElapsedRealtimeNanos()),
+                "selected_rejection", locationRejectionReason(selected, nowNanos),
+                "callback_available", callback != null,
+                "callback_provider", callback == null ? null : callback.getProvider(),
+                "callback_mock", callback != null && callback.isFromMockProvider(),
+                "callback_latitude", callback == null ? null : Double.valueOf(callback.getLatitude()),
+                "callback_longitude", callback == null ? null : Double.valueOf(callback.getLongitude()),
+                "callback_wall_ms", callback == null ? null : Long.valueOf(callback.getTime()),
+                "callback_elapsed_ns", callback == null ? null : Long.valueOf(callback.getElapsedRealtimeNanos()),
+                "callback_rejection", locationRejectionReason(callback, nowNanos),
+                "gps_available", gps != null,
+                "gps_provider", gps == null ? null : gps.getProvider(),
+                "gps_mock", gps != null && gps.isFromMockProvider(),
+                "gps_latitude", gps == null ? null : Double.valueOf(gps.getLatitude()),
+                "gps_longitude", gps == null ? null : Double.valueOf(gps.getLongitude()),
+                "gps_wall_ms", gps == null ? null : Long.valueOf(gps.getTime()),
+                "gps_elapsed_ns", gps == null ? null : Long.valueOf(gps.getElapsedRealtimeNanos()),
+                "gps_rejection", locationRejectionReason(gps, nowNanos),
+                "network_available", network != null,
+                "network_provider", network == null ? null : network.getProvider(),
+                "network_mock", network != null && network.isFromMockProvider(),
+                "network_latitude", network == null ? null : Double.valueOf(network.getLatitude()),
+                "network_longitude", network == null ? null : Double.valueOf(network.getLongitude()),
+                "network_wall_ms", network == null ? null : Long.valueOf(network.getTime()),
+                "network_elapsed_ns", network == null ? null : Long.valueOf(network.getElapsedRealtimeNanos()),
+                "network_rejection", locationRejectionReason(network, nowNanos));
+    }
+
+    private static long locationElapsedNanos(Location location) {
+        return location == null ? 0L : location.getElapsedRealtimeNanos();
+    }
+
+    private static String locationRejectionReason(Location location, long nowNanos) {
+        return location == null ? "unavailable"
+                : WeatherLocationSelection.rejectionReason(
+                        location.getElapsedRealtimeNanos(), nowNanos);
+    }
+
+    private static String locationWaitRejections(LocationSnapshot snapshot) {
+        Location[] candidates = snapshot.candidateLocations;
+        if (candidates == null) return "unavailable";
+        return "callback=" + waitRejectionReason(candidates[0], snapshot.nowNanos)
+                + ",gps=" + waitRejectionReason(candidates[1], snapshot.nowNanos)
+                + ",network=" + waitRejectionReason(candidates[2], snapshot.nowNanos);
+    }
+
+    private static String waitRejectionReason(Location location, long nowNanos) {
+        return location == null ? "missing"
+                : WeatherLocationSelection.rejectionReason(
+                        location.getElapsedRealtimeNanos(), nowNanos);
     }
 
     private void updatePrerequisiteCallbacksLocked(PrerequisiteState state) {
@@ -706,7 +798,7 @@ public final class WeatherRuntime {
             }
         }
         emit("weather_geocoder_fallback", "ui_language", normalizedLanguage(language),
-                "latitude", latitude, "longitude", longitude, "reason", failureReason);
+                "reason", failureReason);
         return new City(fallback, fallback);
     }
 
@@ -825,10 +917,23 @@ public final class WeatherRuntime {
     private static final class LocationSnapshot {
         final boolean authorized;
         final Location value;
+        final String origin;
+        final String provider;
+        final boolean mock;
+        final long ageMs;
+        final long nowNanos;
+        final Location[] candidateLocations;
 
-        LocationSnapshot(boolean authorized, Location value) {
+        LocationSnapshot(boolean authorized, Location value, String origin, long nowNanos,
+                long selectedNanos, Location[] candidateLocations) {
             this.authorized = authorized;
             this.value = value;
+            this.origin = origin;
+            this.provider = value == null ? null : value.getProvider();
+            this.mock = value != null && value.isFromMockProvider();
+            this.ageMs = value == null ? -1L : (nowNanos - selectedNanos) / 1_000_000L;
+            this.nowNanos = nowNanos;
+            this.candidateLocations = candidateLocations;
         }
     }
 
