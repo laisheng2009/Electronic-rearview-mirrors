@@ -233,6 +233,10 @@ final class CameraHelperMain {
             turnController.configureAvas();
         }
 
+        public void configureCalls(boolean needed) {
+            turnController.configureCalls(needed);
+        }
+
         public void startAvasManual(String profileId) {
             turnController.startAvasManual(profileId);
         }

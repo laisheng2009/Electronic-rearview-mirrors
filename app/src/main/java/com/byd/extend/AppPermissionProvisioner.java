@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Process;
+import android.os.Build;
 import android.provider.Settings;
 import java.util.function.BooleanSupplier;
 import java.util.function.BiConsumer;
@@ -14,6 +15,12 @@ final class AppPermissionProvisioner {
 
     static boolean hasWriteSecureSettings(Context context) {
         return context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    static boolean hasBluetoothCallAccess(Context context) {
+        return context.checkSelfPermission(Build.VERSION.SDK_INT >= 31
+                ? Manifest.permission.BLUETOOTH_CONNECT : Manifest.permission.BLUETOOTH)
                 == PackageManager.PERMISSION_GRANTED;
     }
 
@@ -42,6 +49,14 @@ final class AppPermissionProvisioner {
                 () -> ensureAccessibility(app, user, reason, events));
         event(events, "app_permission_readback", "permission", "wss", "reason", reason,
                 "granted", wssGranted);
+        if (Build.VERSION.SDK_INT >= 31 && CallsRuntime.requiresBluetoothConnect(app)) {
+            if (!hasBluetoothCallAccess(app)) {
+                run(app, "pm grant --user " + user + " " + app.getPackageName()
+                        + " android.permission.BLUETOOTH_CONNECT", "bluetooth_calls", reason, events);
+            }
+            event(events, "app_permission_readback", "permission", "bluetooth_calls",
+                    "reason", reason, "granted", hasBluetoothCallAccess(app));
+        }
     }
 
     static boolean runProvisioning(BooleanSupplier hasWss, Runnable globalPolicy,

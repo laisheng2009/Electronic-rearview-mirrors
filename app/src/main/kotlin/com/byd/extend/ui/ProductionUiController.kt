@@ -18,6 +18,9 @@ import com.byd.extend.RearviewMirrorSettings
 import com.byd.extend.CameraButtonBindings
 import com.byd.extend.UpdateHintAppearance
 import com.byd.extend.ReverseCameraUiContract
+import com.byd.extend.CallsSettings
+import com.byd.extend.CallsRuntime
+import com.byd.extend.R
 
 /** Activity-owned effects. Compose never receives Binder, Surface, Bitmap or preferences. */
 interface ProductionUiBackend {
@@ -186,6 +189,31 @@ class ProductionUiController @JvmOverloads constructor(
                 typedBackendHandled = true
                 backend.onProductionAvasAction(action.action)
                 refreshAvasState()
+            }
+            is BydExtendUiAction.Calls -> {
+                typedBackendHandled = true
+                when (val change = action.action) {
+                    is CallsUiAction.SetEnabled -> {
+                        CallsSettings.setEnabled(preferences, change.profile, change.enabled)
+                        refreshCallsSettings()
+                    }
+                    is CallsUiAction.SaveDestination -> {
+                        if (CallsSettings.saveDestination(preferences, change.profile,
+                                change.name, change.number)) {
+                            refreshCallsSettings()
+                            clearCallsFeedback()
+                        } else {
+                            setCallsFeedback(R.string.calls_save_failed)
+                        }
+                    }
+                    is CallsUiAction.BeginContactSelection -> {
+                        val started = context?.let {
+                            CallsRuntime.beginContactSelection(it, change.profile)
+                        } == true
+                        if (!started) setCallsFeedback(R.string.calls_picker_start_failed)
+                        else clearCallsFeedback()
+                    }
+                }
             }
             is BydExtendUiAction.Navigate -> {
                 state = state.copy(activeTab = action.tab)
@@ -1070,6 +1098,7 @@ class ProductionUiController @JvmOverloads constructor(
     private fun allowedWhileLegacyBlocked(action: BydExtendUiAction): Boolean = when (action) {
         is BydExtendUiAction.AdbRecovery -> false
         is BydExtendUiAction.Avas -> false
+        is BydExtendUiAction.Calls -> true
         is BydExtendUiAction.Navigate -> action.tab == RootTab.Settings
         is BydExtendUiAction.SetLanguage, is BydExtendUiAction.SetTheme -> true
         is BydExtendUiAction.Select -> action.target is SelectionTarget.Simple &&
@@ -1103,13 +1132,44 @@ class ProductionUiController @JvmOverloads constructor(
         is BydExtendUiAction.PreviewNumber, is BydExtendUiAction.CommitNumber,
         is BydExtendUiAction.MoveProfile, is BydExtendUiAction.SetMirrorGeometry,
         is BydExtendUiAction.SetProfileGeometry, is BydExtendUiAction.LearnCameraButton,
-        is BydExtendUiAction.ResetCameraButton, is BydExtendUiAction.SetCameraButtonPress -> false
+        is BydExtendUiAction.ResetCameraButton, is BydExtendUiAction.SetCameraButtonPress,
+        is BydExtendUiAction.SetCameraButtonSource -> false
     }
 
     private fun handoverReason(language: UiLanguage) = UiStrings(language, context).text(
         "Керування заблоковано до завершення переходу налаштувань.",
         "Runtime controls are locked while settings transfer completes.",
         "设置传送完成前，运行控制已锁定。")
+
+    private fun refreshCallsSettings() {
+        fun read(profile: CallsSettings.Profile) = CallsSettings.read(preferences, profile).let {
+            CallsProfileUiState(it.enabled, it.name, it.number)
+        }
+        state = state.copy(signals = state.signals.copy(calls = state.signals.calls.copy(
+            sos = read(CallsSettings.Profile.Sos),
+            help = read(CallsSettings.Profile.Help),
+        )))
+    }
+
+    private fun setCallsFeedback(resourceId: Int) {
+        state = state.copy(signals = state.signals.copy(calls = state.signals.calls.copy(
+            feedback = StatusUiState(UiStrings(state.language, context).resource(resourceId),
+                StatusTone.Error, true),
+        )))
+    }
+
+    private fun clearCallsFeedback() {
+        val current = state.signals.calls.feedback
+        val strings = UiStrings(state.language, context)
+        val callErrors = setOf(
+            strings.resource(R.string.calls_save_failed),
+            strings.resource(R.string.calls_picker_start_failed),
+        )
+        if (current.visible && current.text in callErrors) {
+            state = state.copy(signals = state.signals.copy(calls = state.signals.calls.copy(
+                feedback = StatusUiState())))
+        }
+    }
 
     private fun applyLocalSelection(target: SelectionTarget, index: Int) {
         val simple = target as? SelectionTarget.Simple ?: return

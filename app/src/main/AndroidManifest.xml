@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- Development permission granted by an already-authorized shell; locally read back. -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
@@ -28,6 +30,8 @@
         <package android:name="com.byd.turnsignalguard.capture" />
         <package android:name="com.bydhud.app" />
         <package android:name="com.bydcollector.collector" />
+        <package android:name="com.byd.bluetoothcall" />
+        <package android:name="com.byd.xcall" />
         <intent>
             <action android:name="com.byd.apps.updatehint.COORDINATION" />
         </intent>

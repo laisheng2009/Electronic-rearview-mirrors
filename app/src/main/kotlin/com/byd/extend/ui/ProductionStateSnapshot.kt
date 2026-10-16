@@ -54,6 +54,13 @@ fun readProductionUiState(
     ),
 )
 
+private fun callsProfile(
+    preferences: SharedPreferences,
+    profile: CallsSettings.Profile,
+): CallsProfileUiState = CallsSettings.read(preferences, profile).let { destination ->
+    CallsProfileUiState(destination.enabled, destination.name, destination.number)
+}
+
 private fun readSignals(preferences: SharedPreferences) = SignalsUiState(
     category = enumPreference(preferences, UiSelectionPreferences.SIGNALS_CATEGORY,
         SignalsCategory.TurnSignals),
@@ -73,6 +80,10 @@ private fun readSignals(preferences: SharedPreferences) = SignalsUiState(
         enabled = preferences.getBoolean(WeatherRuntime.PREF_ENABLED, false),
         refreshMinutes = preferences.getInt(
             WeatherRuntime.PREF_INTERVAL_MINUTES, WeatherRuntime.DEFAULT_INTERVAL_MINUTES).toString(),
+    ),
+    calls = CallsUiState(
+        sos = callsProfile(preferences, CallsSettings.Profile.Sos),
+        help = callsProfile(preferences, CallsSettings.Profile.Help),
     ),
 )
 

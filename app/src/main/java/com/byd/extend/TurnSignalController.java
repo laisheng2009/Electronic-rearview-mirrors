@@ -80,6 +80,7 @@ final class TurnSignalController {
 
     private volatile boolean stopped;
     private volatile boolean healthy;
+    private volatile boolean rescueButtonsNeeded;
     private ReverseSteeringModelConfig.Selection steeringSelection;
     private ReverseSteeringModelConfig.Capture steeringCapture;
     private ReverseSteeringModelConfig steeringModel;
@@ -383,6 +384,19 @@ final class TurnSignalController {
                 return;
             }
             syncAvas(value);
+        });
+    }
+
+    void configureCalls(boolean needed) {
+        rescueButtonsNeeded = needed;
+        worker.execute(() -> {
+            if (stopped) return;
+            IBinder value = healthyHelper();
+            if (value == null && rescueButtonsNeeded) {
+                ensureRunning(LocalAdbClient.PromptMode.NEVER, false);
+                value = healthyHelper();
+            }
+            if (value != null) syncRescueConfig(value);
         });
     }
 
@@ -1727,6 +1741,7 @@ final class TurnSignalController {
             failPendingAvas(primaryError);
         }
         if (healthy && helper == value) {
+            syncRescueConfig(value);
             syncSteeringModel(value, true);
             syncAvas(value);
             if (pendingAvas.completeAttachSync()) reportAvasStatus(value);
@@ -2345,6 +2360,22 @@ final class TurnSignalController {
             data.writeInt(anyEnabled ? 1 : 0);
             requireTransact(value, TurnSignalShellProtocol.TX_CONFIGURE_PARKING_RADAR,
                     data, reply);
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    private void syncRescueConfig(IBinder value) {
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
+            data.writeInt(rescueButtonsNeeded ? 1 : 0);
+            requireTransact(value, TurnSignalShellProtocol.TX_CONFIGURE_RESCUE, data, reply);
+        } catch (Throwable failure) {
+            emit("rescue_transport", "connected", false, "session_id", "",
+                    "reason", "config_" + failure.getClass().getSimpleName());
         } finally {
             data.recycle();
             reply.recycle();

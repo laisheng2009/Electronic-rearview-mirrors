@@ -35,9 +35,11 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
     private SharedPreferences steeringPreferences;
     private String foregroundPackage = "";
     private AvasMicrophoneCapture microphone;
+    private CallsRuntime callsRuntime;
     private AvasConfig.Engine engineConfig = AvasConfig.Engine.defaults();
     private final SharedPreferences.OnSharedPreferenceChangeListener steeringPreferenceListener =
             (preferences, key) -> {
+                if (callsRuntime != null) callsRuntime.onPreferencesChanged(preferences, key);
                 if (AvasAudioLibrary.PREF_CONFIG.equals(key)) {
                     refreshEngineConfig(preferences);
                     if (!engineConfig.enabled && steeringGestures.learningAction()
@@ -222,12 +224,14 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
         microphone = new AvasMicrophoneCapture(this);
         steeringPreferences.registerOnSharedPreferenceChangeListener(steeringPreferenceListener);
         activeService = this;
+        callsRuntime = CallsRuntime.attachAndGet(this);
         publishConnection(true);
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
+        if (callsRuntime != null) callsRuntime.onAccessibilityEvent(event);
         if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             CharSequence packageName = event.getPackageName();
             String value = packageName == null ? "" : packageName.toString();
@@ -411,22 +415,51 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
     private static void addAssignment(List<CameraButtonGesturePolicy.Assignment> result,
             SharedPreferences preferences, CameraButtonBindings.Action action, long contextToken) {
         CameraButtonBindings.Binding binding = CameraButtonBindings.load(preferences, action);
-        if (binding.isAssigned()) {
+        if (binding.source == CameraButtonBindings.Source.AndroidKey && binding.isAssigned()) {
             result.add(new CameraButtonGesturePolicy.Assignment(action, binding, contextToken));
         }
     }
 
+    void dispatchRescueButtonAction(CameraButtonBindings.Action action,
+            CameraButtonBindings.Source source, CameraButtonBindings.Press press) {
+        if (action == null || source == null || source == CameraButtonBindings.Source.AndroidKey
+                || GuardRecovery.isUserShutdownActive(this)
+                || LegacySettingsImporter.blocksRuntime(this)) return;
+        SharedPreferences preferences = preferences();
+        CameraButtonBindings.Binding binding = CameraButtonBindings.load(preferences, action);
+        if (!binding.isAssigned() || binding.source != source || binding.press != press
+                || !CameraButtonBindings.supports(action, source, press)) return;
+        if (action == CameraButtonBindings.Action.AvasMicrophone) {
+            if (AvasMicrophoneSettings.enabled(preferences) && microphone != null) microphone.toggle();
+            return;
+        }
+        boolean mirrorEnabled = RearviewMirrorSettings.enabled(preferences);
+        if (!mirrorEnabled) return;
+        if (action == CameraButtonBindings.Action.MirrorSource) {
+            if (RearviewMirrorSettings.frontIntegrated(preferences))
+                CameraHelperService.requestMirrorButtonAction(this, true, false);
+        } else if (action == CameraButtonBindings.Action.MirrorVisibility) {
+            CameraHelperService.requestMirrorButtonAction(this, false, true);
+        }
+    }
+
     private static boolean isSteeringPreference(String key) {
-        return CameraButtonBindings.MICROPHONE_KEY_CODE.equals(key)
+        return key == null
+                || CameraButtonBindings.MICROPHONE_KEY_CODE.equals(key)
+                || CameraButtonBindings.MICROPHONE_PRESS.equals(key)
+                || CameraButtonBindings.MICROPHONE_SOURCE.equals(key)
                 || CameraButtonBindings.ENGINE_KEY_CODE.equals(key)
                 || CameraButtonBindings.ENGINE_PRESS.equals(key)
+                || CameraButtonBindings.ENGINE_SOURCE.equals(key)
                 || AvasAudioLibrary.PREF_CONFIG.equals(key)
                 || AvasMicrophoneSettings.ENABLED.equals(key)
                 || ReverseSteeringButtonPreferences.KEY_CODE.equals(key)
                 || CameraButtonBindings.MIRROR_SOURCE_KEY_CODE.equals(key)
                 || CameraButtonBindings.MIRROR_SOURCE_PRESS.equals(key)
+                || CameraButtonBindings.MIRROR_SOURCE_SOURCE.equals(key)
                 || CameraButtonBindings.MIRROR_VISIBILITY_KEY_CODE.equals(key)
                 || CameraButtonBindings.MIRROR_VISIBILITY_PRESS.equals(key)
+                || CameraButtonBindings.MIRROR_VISIBILITY_SOURCE.equals(key)
                 || RearviewMirrorSettings.PREF_ENABLED.equals(key)
                 || RearviewMirrorSettings.PREF_FRONT_INTEGRATED.equals(key);
     }
@@ -441,6 +474,7 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
     @Override
     public void onInterrupt() {
         if (microphone != null) microphone.stop(false);
+        if (callsRuntime != null) callsRuntime.onInterrupt();
         clearSteeringState();
         releaseRoutedMusicKeys();
     }
@@ -448,6 +482,8 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
     @Override
     public boolean onUnbind(android.content.Intent intent) {
         if (microphone != null) microphone.stop(false);
+        CallsRuntime.detach(this);
+        callsRuntime = null;
         releaseRoutedMusicKeys();
         publishDisconnectedIfActive();
         return super.onUnbind(intent);
@@ -456,6 +492,8 @@ public final class WeatherRefreshAccessibilityService extends AccessibilityServi
     @Override
     public void onDestroy() {
         if (microphone != null) microphone.stop(false);
+        CallsRuntime.detach(this);
+        callsRuntime = null;
         releaseRoutedMusicKeys();
         resetSteeringState();
         if (steeringPreferences != null) {

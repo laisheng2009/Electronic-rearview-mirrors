@@ -11,10 +11,11 @@ final class RequiredPermissions {
     final boolean notificationAccess;
     final boolean writeSecureSettings;
     final boolean microphone;
+    final boolean bluetoothCalls;
 
     private RequiredPermissions(boolean camera, boolean overlay, boolean accessibility,
             boolean install, boolean notificationAccess, boolean writeSecureSettings,
-            boolean microphone) {
+            boolean microphone, boolean bluetoothCalls) {
         this.camera = camera;
         this.overlay = overlay;
         this.accessibility = accessibility;
@@ -22,6 +23,7 @@ final class RequiredPermissions {
         this.notificationAccess = notificationAccess;
         this.writeSecureSettings = writeSecureSettings;
         this.microphone = microphone;
+        this.bluetoothCalls = bluetoothCalls;
     }
 
     static RequiredPermissions read(SharedPreferences preferences, boolean previewRequested,
@@ -38,9 +40,14 @@ final class RequiredPermissions {
         boolean hint = preferences.getBoolean(UpdateHintRuntime.PREF_ENABLED, true);
         boolean adbRecovery = preferences.getBoolean("adb_recovery_enabled", false);
         boolean adbReminder = adbRecovery && preferences.getBoolean("adb_reminder_enabled", true);
+        boolean calls = false;
+        for (CallsSettings.Profile profile : CallsSettings.Profile.values()) {
+            CallsSettings.Destination destination = CallsSettings.read(preferences, profile);
+            calls |= destination.enabled && !destination.number.isEmpty();
+        }
         // These three accesses are provisioned and read back independently of runtime switches.
         return new RequiredPermissions(camera, mirror || hint || adbReminder, true, installRequested,
-                true, true, AvasMicrophoneSettings.enabled(preferences));
+                true, true, AvasMicrophoneSettings.enabled(preferences), calls);
     }
 
     boolean satisfied(boolean cameraGranted, boolean overlayGranted,
@@ -66,11 +73,20 @@ final class RequiredPermissions {
             boolean accessibilityConnected, boolean installGranted,
             boolean notificationAccessGranted, boolean writeSecureSettingsGranted,
             boolean microphoneGranted) {
+        return satisfied(cameraGranted, overlayGranted, accessibilityConnected, installGranted,
+                notificationAccessGranted, writeSecureSettingsGranted, microphoneGranted, false);
+    }
+
+    boolean satisfied(boolean cameraGranted, boolean overlayGranted,
+            boolean accessibilityConnected, boolean installGranted,
+            boolean notificationAccessGranted, boolean writeSecureSettingsGranted,
+            boolean microphoneGranted, boolean bluetoothCallAccessGranted) {
         return (!camera || cameraGranted) && (!overlay || overlayGranted)
                 && (!accessibility || accessibilityConnected) && (!install || installGranted)
                 && (!notificationAccess || notificationAccessGranted)
                 && (!writeSecureSettings || writeSecureSettingsGranted)
-                && (!microphone || microphoneGranted);
+                && (!microphone || microphoneGranted)
+                && (!bluetoothCalls || bluetoothCallAccessGranted);
     }
 
 }

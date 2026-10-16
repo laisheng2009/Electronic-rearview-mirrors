@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Redacted shape from captures/bluetooth-contacts-ui-20261016/contact.xml. -->
+<hierarchy rotation="0">
+    <node class="android.widget.FrameLayout">
+        <node class="android.widget.LinearLayout">
+            <node resource-id="android:id/content" class="android.widget.FrameLayout">
+                <node resource-id="com.byd.bluetoothcall:id/contacts_detail_dialog"
+                    class="android.widget.RelativeLayout">
+                    <node resource-id="com.byd.bluetoothcall:id/contacts_detail_name"
+                        class="android.widget.TextView" text="Test contact" visible-to-user="true" />
+                    <node resource-id="com.byd.bluetoothcall:id/contacts_number_info"
+                        class="android.widget.ListView">
+                        <node resource-id="com.byd.bluetoothcall:id/contacts_detail_item"
+                            class="android.widget.RelativeLayout">
+                            <node resource-id="com.byd.bluetoothcall:id/contacts_detail_number"
+                                class="android.widget.TextView" text="+1 (202) 555-0100"
+                                visible-to-user="true" />
+                        </node>
+                        <node resource-id="com.byd.bluetoothcall:id/contacts_detail_item"
+                            class="android.widget.RelativeLayout">
+                            <node resource-id="com.byd.bluetoothcall:id/contacts_detail_number"
+                                class="android.widget.TextView" text="+1 (202) 555-0101"
+                                visible-to-user="true" />
+                        </node>
+                    </node>
+                </node>
+            </node>
+        </node>
+    </node>
+</hierarchy>

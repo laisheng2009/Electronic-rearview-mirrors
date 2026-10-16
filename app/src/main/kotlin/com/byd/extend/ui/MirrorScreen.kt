@@ -20,6 +20,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import com.byd.extend.CameraButtonBindings
+import com.byd.extend.R
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -202,6 +203,16 @@ internal fun MirrorBindingRow(
     showPress: Boolean = true,
     footer: @Composable ColumnScope.() -> Unit = {},
 ) {
+    val sources = CameraButtonBindings.sourcesFor(action).toList()
+    val sourceChoice = sources.size > 1
+    val sourceIndex = sources.indexOf(binding.source).coerceAtLeast(0)
+    val presses = CameraButtonBindings.pressesFor(action, binding.source).toList()
+    val pressIndex = presses.indexOf(binding.press).coerceAtLeast(0)
+    val rescueSource = binding.source != CameraButtonBindings.Source.AndroidKey
+    val sourceLabel = if (rescueSource) strings.resource(binding.source.labelResourceId)
+        else steeringButtonLabel(binding.keyCode, strings).ifBlank {
+            strings.resource(R.string.calls_button_not_selected)
+        }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(colors.panelAlt)
         .border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp)).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -209,33 +220,58 @@ internal fun MirrorBindingRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(title, color = if (enabled) colors.text else colors.muted.copy(alpha = .62f),
                 fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, modifier = Modifier.weight(1f))
-            if (showPress) ChoiceField("", listOf(strings.text("Одиночне", "Single", "单击"),
-                strings.text("Утримання", "Hold", "长按"), strings.text("Подвійне", "Double", "双击")),
-                binding.press.ordinal, { onAction(BydExtendUiAction.SetCameraButtonPress(action,
-                    CameraButtonBindings.Press.entries[it])) }, colors, Modifier.width(148.dp),
-                enabled = enabled, hudCompact = true)
+            if (showPress && !sourceChoice) ChoiceField("", presses.map { pressLabel(it, strings) },
+                pressIndex, { onAction(BydExtendUiAction.SetCameraButtonPress(action, presses[it])) },
+                colors, Modifier.width(148.dp), enabled = enabled, hudCompact = true)
         }
+        if (sourceChoice) ChoiceField(strings.resource(R.string.calls_binding_source),
+            sources.map { strings.resource(it.labelResourceId) }, sourceIndex,
+            { onAction(BydExtendUiAction.SetCameraButtonSource(action, sources[it])) },
+            colors, enabled = enabled)
+        if (showPress && sourceChoice) ChoiceField(strings.resource(R.string.calls_press_type),
+            presses.map { pressLabel(it, strings) }, pressIndex,
+            { onAction(BydExtendUiAction.SetCameraButtonPress(action, presses[it])) },
+            colors, enabled = enabled)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            ActionButton(strings.text("Вибрати кнопку…", "Select button…", "选择按键…"), colors,
-                Modifier.weight(1.15f), enabled = enabled, primary = true, height = 40.dp) {
-                onAction(BydExtendUiAction.LearnCameraButton(action))
+            if (!rescueSource) {
+                ActionButton(strings.text("Вибрати кнопку…", "Select button…", "选择按键…"), colors,
+                    Modifier.weight(1.15f), enabled = enabled, primary = true, height = 40.dp) {
+                    onAction(BydExtendUiAction.LearnCameraButton(action))
+                }
+            } else {
+                Box(Modifier.weight(1.15f).height(40.dp).clip(RoundedCornerShape(7.dp))
+                    .background(colors.field).border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp))
+                    .padding(horizontal = 8.dp), contentAlignment = Alignment.CenterStart) {
+                    Text(sourceLabel, color = if (enabled) colors.text else colors.muted,
+                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                }
             }
-            val label = steeringButtonLabel(binding.keyCode, strings)
-            Box(Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(7.dp)).background(colors.field)
-                .border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp)).padding(horizontal = 8.dp),
-                contentAlignment = Alignment.CenterStart) {
-                Text(label, color = if (enabled) colors.text else colors.muted, fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!rescueSource || showPress) {
+                val assignmentLabel = if (rescueSource) pressLabel(binding.press, strings)
+                    else sourceLabel
+                Box(Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(7.dp)).background(colors.field)
+                    .border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp)).padding(horizontal = 8.dp),
+                    contentAlignment = Alignment.CenterStart) {
+                    Text(assignmentLabel, color = if (enabled) colors.text else colors.muted, fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
             ActionButton("", colors, Modifier.size(40.dp).semantics {
                 contentDescription = strings.text("Скинути кнопку", "Reset button", "重置按键")
-            }, icon = Icons.Outlined.Refresh, enabled = enabled && binding.keyCode >= 0,
+            }, icon = Icons.Outlined.Refresh, enabled = enabled && binding.isAssigned(),
                 mainBackground = true, height = 40.dp) { onAction(BydExtendUiAction.ResetCameraButton(action)) }
         }
         footer()
     }
 }
+
+private fun pressLabel(press: CameraButtonBindings.Press, strings: UiStrings): String = strings.resource(when (press) {
+    CameraButtonBindings.Press.Single -> R.string.calls_press_single
+    CameraButtonBindings.Press.Double -> R.string.calls_press_double
+    CameraButtonBindings.Press.Hold -> R.string.calls_press_hold
+})
 
 /** One frame control used by every camera profile; the renderer keeps the frame outside image transforms. */
 @Composable

@@ -1138,6 +1138,7 @@ public final class CameraProbeActivity extends ComponentActivity
         }
         legacyRuntimeBlocked = LegacySettingsImporter.blocksRuntime(this);
         updateControls();
+        if (productionUi != null) productionUi.reload();
         refreshProductionHeader();
         if (!helperBound) startAndBindHelperService();
         activityResumed = true;
@@ -3610,15 +3611,45 @@ public final class CameraProbeActivity extends ComponentActivity
                 if (target == CameraButtonBindings.Action.AvasEngine) CameraHelperService.configureAvas(this);
                 productionUi.reload();
             }
+        } else if (action instanceof BydExtendUiAction.SetCameraButtonSource) {
+            BydExtendUiAction.SetCameraButtonSource change =
+                    (BydExtendUiAction.SetCameraButtonSource) action;
+            if (cameraButtonActionEnabled(change.getAction())) {
+                cancelReverseButtonLearning();
+                CameraButtonBindings.Binding before = CameraButtonBindings.load(
+                        preferences, change.getAction());
+                CameraButtonBindings.Press press = before.press;
+                if (!CameraButtonBindings.supports(change.getAction(), change.getSource(), press)) {
+                    press = CameraButtonBindings.Press.Single;
+                }
+                CameraButtonBindings.Binding candidate = new CameraButtonBindings.Binding(
+                        change.getSource(), before.keyCode, press);
+                if (CameraButtonBindings.hasRescueConflict(preferences, change.getAction(), candidate)) {
+                    Toast.makeText(this, runtimeText(R.string.calls_binding_conflict),
+                            Toast.LENGTH_LONG).show();
+                } else {
+                    CameraButtonBindings.save(preferences, change.getAction(), candidate);
+                    productionUi.reload();
+                }
+            }
         } else if (action instanceof BydExtendUiAction.SetCameraButtonPress) {
             BydExtendUiAction.SetCameraButtonPress change = (BydExtendUiAction.SetCameraButtonPress) action;
             if (cameraButtonActionEnabled(change.getAction())) {
                 cancelReverseButtonLearning();
                 CameraButtonBindings.Binding before = CameraButtonBindings.load(
                         preferences, change.getAction());
-                CameraButtonBindings.save(preferences, change.getAction(),
-                        new CameraButtonBindings.Binding(before.keyCode, change.getPress()));
-                productionUi.reload();
+                CameraButtonBindings.Binding candidate = new CameraButtonBindings.Binding(
+                        before.source, before.keyCode, change.getPress());
+                if (CameraButtonBindings.supports(change.getAction(), candidate.source,
+                        candidate.press)
+                        && CameraButtonBindings.hasRescueConflict(preferences, change.getAction(), candidate)) {
+                    Toast.makeText(this, runtimeText(R.string.calls_binding_conflict),
+                            Toast.LENGTH_LONG).show();
+                } else if (CameraButtonBindings.supports(change.getAction(), candidate.source,
+                        candidate.press)) {
+                    CameraButtonBindings.save(preferences, change.getAction(), candidate);
+                    productionUi.reload();
+                }
             }
         } else if (action instanceof BydExtendUiAction.SetProfileBorder) {
             saveProductionProfileBorder((BydExtendUiAction.SetProfileBorder) action);
@@ -5056,7 +5087,8 @@ public final class CameraProbeActivity extends ComponentActivity
                         android.os.Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls(),
                         AvasNotificationAccess.isGranted(this),
                         AppPermissionProvisioner.hasWriteSecureSettings(this),
-                        checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)));
+                        checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+                        AppPermissionProvisioner.hasBluetoothCallAccess(this))));
     }
 
     static HeaderUiState productionHeader(LocalAdbClient.AccessState.Status access,

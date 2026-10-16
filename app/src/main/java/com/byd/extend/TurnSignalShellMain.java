@@ -113,6 +113,7 @@ public final class TurnSignalShellMain {
         private final ReverseSteeringRuntime reverseSteeringRuntime;
         private final MusicVisualizerRuntime musicRuntime;
         private final ParkingRadarRuntime parkingRadarRuntime;
+        private final RescueButtonTelemetry rescueButtons;
         private final AvasRuntime avasRuntime;
         private final String avasInitializationError;
         private final PowerManager powerManager;
@@ -160,6 +161,7 @@ public final class TurnSignalShellMain {
             reverseSteeringRuntime = new ReverseSteeringRuntime(context, handler, this::emit);
             musicRuntime = new MusicVisualizerRuntime(context, handler, this::emit);
             parkingRadarRuntime = new ParkingRadarRuntime(context, handler, this::emit);
+            rescueButtons = new RescueButtonTelemetry(context, handler, this::emit);
             AvasRuntime createdAvas = null;
             String avasError = "";
             try {
@@ -191,6 +193,7 @@ public final class TurnSignalShellMain {
         }
 
         void stop() {
+            rescueButtons.configure(false);
             CameraRuntimeHost cameras = cameraRuntime;
             if (cameras != null) cameras.shutdown();
             handler.removeCallbacks(recoveryRunnable);
@@ -251,6 +254,14 @@ public final class TurnSignalShellMain {
                     int enabled = data.readInt();
                     if (enabled != 0 && enabled != 1) throw new IllegalArgumentException("invalid logging flag");
                     DiagnosticLogPolicy.configure(enabled == 1);
+                    reply.writeNoException();
+                    return true;
+                }
+                if (code == TurnSignalShellProtocol.TX_CONFIGURE_RESCUE) {
+                    int enabled = data.readInt();
+                    if ((enabled != 0 && enabled != 1) || data.dataAvail() != 0)
+                        throw new IllegalArgumentException("invalid rescue subscription flag");
+                    rescueButtons.configure(enabled == 1);
                     reply.writeNoException();
                     return true;
                 }
@@ -483,6 +494,7 @@ public final class TurnSignalShellMain {
                     return true;
                 }
                 if (code == TurnSignalShellProtocol.TX_SHUTDOWN) {
+                    rescueButtons.configure(false);
                     guardEnabled = false;
                     recoveryEnabled = false;
                     reply.writeNoException();
@@ -508,6 +520,7 @@ public final class TurnSignalShellMain {
                     return true;
                 }
                 if (code == TurnSignalShellProtocol.TX_SHUTDOWN_KEEPING_AVAS) {
+                    rescueButtons.configure(false);
                     guardEnabled = false;
                     recoveryEnabled = false;
                     reply.writeNoException();
@@ -542,6 +555,7 @@ public final class TurnSignalShellMain {
         private synchronized void registerCallback(IBinder value) throws RemoteException {
             if (value == null) throw new IllegalArgumentException("callback is null");
             if (callback != value) {
+                rescueButtons.configure(false);
                 IBinder.DeathRecipient recipient =
                         () -> handler.post(() -> clearCallback(value));
                 value.linkToDeath(recipient, 0);
@@ -576,6 +590,7 @@ public final class TurnSignalShellMain {
 
         private synchronized void clearCallback(IBinder value) {
             if (callback == value) {
+                rescueButtons.configure(false);
                 IBinder.DeathRecipient recipient = callbackDeathRecipient;
                 callback = null;
                 callbackDeathRecipient = null;

@@ -93,6 +93,8 @@ public final class CameraHelperService extends Service {
             "com.byd.extend.action.DIAGNOSTICS_CHANGED";
     private static final String ACTION_AVAS_CONFIGURE =
             "com.byd.extend.action.AVAS_CONFIGURE";
+    private static final String ACTION_CALLS_CONFIGURE =
+            "com.byd.extend.action.CALLS_CONFIGURE";
     private static final String ACTION_AVAS_START_MANUAL =
             "com.byd.extend.action.AVAS_START_MANUAL";
     private static final String ACTION_AVAS_STOP_MANUAL =
@@ -331,6 +333,11 @@ public final class CameraHelperService extends Service {
         if (activeHelper != null && activeHelper.isHealthy()) {
             activeHelper.noteMusicForegroundPackage(packageName);
         }
+    }
+
+    static void logCallsEvent(String stage, String details) {
+        CameraHelperService service = activeInstance;
+        if (service != null) service.lifecycle("calls_event", "stage", stage, "details", details);
     }
 
     static void logMusicKeyDecision(int key, String reason, String foreground) {
@@ -681,6 +688,18 @@ public final class CameraHelperService extends Service {
                 .setAction(ACTION_AVAS_CONFIGURE));
     }
 
+    static void configureCalls(Context context, boolean needed) {
+        CameraHelperService service = activeInstance;
+        if (!needed) {
+            if (service != null) service.postRuntime(() -> {
+                if (service.helper != null) service.helper.configureCalls(false);
+            });
+            return;
+        }
+        context.startService(new Intent(context, CameraHelperService.class)
+                .setAction(ACTION_CALLS_CONFIGURE));
+    }
+
     static void startAvasManual(Context context, String profileId) {
         if (!AvasConfig.PROFILE_IDS.contains(profileId)) return;
         context.startService(new Intent(context, CameraHelperService.class)
@@ -969,7 +988,7 @@ public final class CameraHelperService extends Service {
         }
         // Rights are provisioned independently; feature execution still observes runtime gates.
         if (ACTION_START.equals(action) || ACTION_ACTIVITY_OPEN.equals(action)
-                || ACTION_SETTINGS_RELOADED.equals(action)) {
+                || ACTION_SETTINGS_RELOADED.equals(action) || ACTION_CALLS_CONFIGURE.equals(action)) {
             provisionAppPermissions("service_entry");
         }
         if (!userShutdown && (shouldRecover || activityVisible
@@ -1027,6 +1046,9 @@ public final class CameraHelperService extends Service {
             cameraRuntime.preview(false);
         }
         ensureHelperStarted();
+        if (ACTION_CALLS_CONFIGURE.equals(action)) {
+            helper.configureCalls(CallsRuntime.requiresRescueSubscription(this));
+        }
         weatherRuntime.start();
         helper.setRecoveryEnabled(AvasRecoveryPolicy.legacyHelperRecoveryEnabled(
                 shouldRecover, avasRecoveryDaemon != null
@@ -1464,6 +1486,7 @@ public final class CameraHelperService extends Service {
         CameraHelperMain.DiscoveryResult discoveryResult = helper.discoverCameraWithResult();
         helper.startGuardRuntime();
         helper.configureAvas();
+        helper.configureCalls(CallsRuntime.requiresRescueSubscription(this));
 
         SharedPreferences settings = getSharedPreferences("settings", MODE_PRIVATE);
         RuntimeSettingsSnapshot.read(settings, anyParkingEnabled()).replay(helper);
@@ -1503,6 +1526,7 @@ public final class CameraHelperService extends Service {
             helper.configureLogging();
             RuntimeSettingsSnapshot.read(settings, anyParkingEnabled()).replay(helper);
             helper.configureAvas();
+            helper.configureCalls(CallsRuntime.requiresRescueSubscription(this));
         }
         cameraRuntime.settingsChanged("all");
         if (fullImport) {
@@ -1644,6 +1668,9 @@ public final class CameraHelperService extends Service {
 
     private void acceptHelperLine(String line) {
         if (line == null) return;
+        if (line.contains("\"rescue_button\"") || line.contains("\"rescue_transport\"")
+                || line.contains("\"helper_death\"") || line.contains("\"helper_ping_failed\""))
+            CallsRuntime.acceptRescueEvent(line);
         if (line.contains("avas_microphone_status") || line.contains("avas_status")
                 || line.contains("helper_ping_failed"))
             WeatherRefreshAccessibilityService.microphoneEvent(line);

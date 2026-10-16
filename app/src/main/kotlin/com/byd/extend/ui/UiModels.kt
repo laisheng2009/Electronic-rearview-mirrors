@@ -32,7 +32,7 @@ enum class DisplayTarget { Tablet, Cluster }
 enum class CalibrationStage { Original, Correction, Output }
 enum class ReverseSource { Rear, Front }
 enum class DiagnosticMode { Signals, Direct, Avm }
-enum class SignalsCategory { TurnSignals, Music, Weather, Avas, AdbRecovery }
+enum class SignalsCategory { TurnSignals, Music, Weather, Avas, AdbRecovery, Calls }
 enum class SettingsCategory { Permissions, CameraOutput, Logs }
 enum class SettingsOperation { AutoStart, Adb, Update, Logs, Compatibility, Preset, Import }
 enum class DialogKind { Background, Update, Shutdown, Progress, Message, ReverseButtonCapture }
@@ -467,6 +467,7 @@ data class SignalsUiState(
     val guard: GuardUiState = GuardUiState(),
     val music: MusicUiState = MusicUiState(),
     val weather: WeatherUiState = WeatherUiState(),
+    val calls: CallsUiState = CallsUiState(),
 )
 
 object AvasProfileIds {
@@ -743,6 +744,20 @@ data class SettingsUiState(
 )
 
 @Immutable
+data class CallsProfileUiState(
+    val enabled: Boolean = false,
+    val name: String = "",
+    val number: String = "",
+)
+
+@Immutable
+data class CallsUiState(
+    val sos: CallsProfileUiState = CallsProfileUiState(),
+    val help: CallsProfileUiState = CallsProfileUiState(),
+    val feedback: StatusUiState = StatusUiState(),
+)
+
+@Immutable
 data class DebugUiState(
     val mode: DiagnosticMode = DiagnosticMode.Signals,
     val manualSignalsAllowed: Boolean = false,
@@ -873,6 +888,10 @@ sealed interface BydExtendUiAction {
     @Immutable data class SetCameraButtonPress(
         val action: CameraButtonBindings.Action, val press: CameraButtonBindings.Press,
     ) : BydExtendUiAction
+    @Immutable data class SetCameraButtonSource(
+        val action: CameraButtonBindings.Action, val source: CameraButtonBindings.Source,
+    ) : BydExtendUiAction
+    @Immutable data class Calls(val action: CallsUiAction) : BydExtendUiAction
     @Immutable data class Navigate(val tab: RootTab) : BydExtendUiAction
     @Immutable data class SetLanguage(val language: UiLanguage) : BydExtendUiAction
     @Immutable data class SetTheme(val theme: UiTheme) : BydExtendUiAction
@@ -911,6 +930,18 @@ sealed interface BydExtendUiAction {
         val reverseElement: ReverseElement? = null,
         val mirrorFront: Boolean? = null,
     ) : BydExtendUiAction
+}
+
+sealed interface CallsUiAction {
+    @Immutable data class SetEnabled(
+        val profile: com.byd.extend.CallsSettings.Profile, val enabled: Boolean,
+    ) : CallsUiAction
+    @Immutable data class SaveDestination(
+        val profile: com.byd.extend.CallsSettings.Profile, val name: String, val number: String,
+    ) : CallsUiAction
+    @Immutable data class BeginContactSelection(
+        val profile: com.byd.extend.CallsSettings.Profile,
+    ) : CallsUiAction
 }
 
 /** Bind callbacks to the source that created them, not whichever source is selected later. */

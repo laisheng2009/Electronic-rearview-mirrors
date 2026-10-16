@@ -39,6 +39,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import com.byd.extend.ui.icons.BugReport
+import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.CheckCircle
 import com.byd.extend.ui.icons.DirectionsCar
 import com.byd.extend.ui.icons.Extension
@@ -302,7 +303,7 @@ internal fun BydExtendUiState.sidebarScrollKey(): String = when (activeTab) {
 internal fun BydExtendUiState.usesLazyMainViewport(): Boolean = when (activeTab) {
     RootTab.Blind, RootTab.Parking, RootTab.Reverse, RootTab.Mirror, RootTab.Settings -> true
     RootTab.Signals -> signals.category == SignalsCategory.Avas ||
-        signals.category == SignalsCategory.AdbRecovery
+        signals.category == SignalsCategory.AdbRecovery || signals.category == SignalsCategory.Calls
     RootTab.Debug -> false
 }
 
@@ -390,15 +391,20 @@ private fun SignalsScreen(
     onAction: (BydExtendUiAction) -> Unit,
     sidebarScroll: ScrollState,
 ) {
+    var editingCallsProfile by rememberSaveable {
+        mutableStateOf<com.byd.extend.CallsSettings.Profile?>(null)
+    }
     val categories = listOf(
         strings.text("Поворотники", "Turn signals", "转向灯"),
         strings.text("Музика та підсвітка", "Music and lighting", "音乐与氛围灯"),
         strings.text("Погода", "Weather", "天气"),
         strings.text("AVAS (зовнішній динамік)", "AVAS (external speaker)", "AVAS（车外扬声器）"),
         strings.text("Відновлення ADB", "ADB recovery", "ADB 恢复"),
+        strings.resource(R.string.calls_title),
     )
     val icons = listOf(IntegrationIcons.TurnSignals, Icons.Outlined.MusicNote,
-        IntegrationIcons.Weather, Icons.AutoMirrored.Outlined.VolumeUp, Icons.Outlined.Refresh)
+        IntegrationIcons.Weather, Icons.AutoMirrored.Outlined.VolumeUp, Icons.Outlined.Refresh,
+        Icons.Outlined.Call)
     ScreenSurface(colors, scroll = false) {
         PageTitle(strings.tabs[0], strings.text("Виберіть інтеграцію для налаштування",
             "Choose an integration to configure", "选择要配置的集成功能"), colors)
@@ -517,9 +523,24 @@ private fun SignalsScreen(
                             onAction(BydExtendUiAction.AdbRecovery(it))
                         }
                     }
+                    SignalsCategory.Calls -> LazyForm(
+                        Modifier.fillMaxSize(), LocalPrimaryLazyList.current) {
+                        CallsIntegrationSettings(state.calls, strings, colors, onAction,
+                            onEditDestination = { editingCallsProfile = it })
+                    }
                 }
             }
         }
+    }
+    editingCallsProfile?.let { profile ->
+        val value = if (profile == com.byd.extend.CallsSettings.Profile.Sos)
+            state.calls.sos else state.calls.help
+        CallsDestinationDialog(profile, value, strings, colors,
+            onSave = { name, number ->
+                onAction(BydExtendUiAction.Calls(CallsUiAction.SaveDestination(profile, name, number)))
+                editingCallsProfile = null
+            },
+            onDismiss = { editingCallsProfile = null })
     }
 }
 
