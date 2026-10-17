@@ -32,7 +32,7 @@ enum class DisplayTarget { Tablet, Cluster }
 enum class CalibrationStage { Original, Correction, Output }
 enum class ReverseSource { Rear, Front }
 enum class DiagnosticMode { Signals, Direct, Avm }
-enum class SignalsCategory { TurnSignals, Music, Weather, Avas, AdbRecovery, Calls }
+enum class SignalsCategory { TurnSignals, Music, Weather, Avas, AdbRecovery, Calls, Motion }
 enum class SettingsCategory { Permissions, CameraOutput, Logs }
 enum class SettingsOperation { AutoStart, Adb, Update, Logs, Compatibility, Preset, Import }
 enum class DialogKind { Background, Update, Shutdown, Progress, Message, ReverseButtonCapture }

@@ -52,6 +52,7 @@ import com.byd.extend.ui.icons.Stop
 import com.byd.extend.ui.icons.Videocam
 import com.byd.extend.ui.icons.Visibility
 import com.byd.extend.ui.icons.VolumeUp
+import com.byd.extend.ui.motion.MotionIntegrationScreen
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.LinearProgressIndicator
@@ -401,10 +402,11 @@ private fun SignalsScreen(
         strings.text("AVAS (зовнішній динамік)", "AVAS (external speaker)", "AVAS（车外扬声器）"),
         strings.text("Відновлення ADB", "ADB recovery", "ADB 恢复"),
         strings.resource(R.string.calls_title),
+        strings.resource(R.string.motion_title),
     )
     val icons = listOf(IntegrationIcons.TurnSignals, Icons.Outlined.MusicNote,
         IntegrationIcons.Weather, Icons.AutoMirrored.Outlined.VolumeUp, Icons.Outlined.Refresh,
-        Icons.Outlined.Call)
+        Icons.Outlined.Call, Icons.Outlined.Videocam)
     ScreenSurface(colors, scroll = false) {
         PageTitle(strings.tabs[0], strings.text("Виберіть інтеграцію для налаштування",
             "Choose an integration to configure", "选择要配置的集成功能"), colors)
@@ -527,6 +529,10 @@ private fun SignalsScreen(
                         Modifier.fillMaxSize(), LocalPrimaryLazyList.current) {
                         CallsIntegrationSettings(state.calls, strings, colors, onAction,
                             onEditDestination = { editingCallsProfile = it })
+                    }
+                    SignalsCategory.Motion -> Column(Modifier.fillMaxSize()
+                        .verticalScroll(LocalPrimaryScroll.current)) {
+                        MotionIntegrationScreen(colors, strings)
                     }
                 }
             }

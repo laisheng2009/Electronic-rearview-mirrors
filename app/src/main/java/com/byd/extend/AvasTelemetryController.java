@@ -36,6 +36,7 @@ final class AvasTelemetryController implements AutoCloseable {
         void onProfile(String profile);
         default void onPowerOffObserved() {}
         default void onRawPower(int power, boolean baseline) {}
+        default void onRawLock(int lock, boolean baseline) {}
         void onSuppressed(String profile, String powerProfile, long deltaMs);
         void log(String kind, Object... fields);
     }
@@ -174,6 +175,7 @@ final class AvasTelemetryController implements AutoCloseable {
             if (sequence <= listenerArrivals.lockApplied) return;
             listenerArrivals.lockApplied = sequence;
             lock = value;
+            sink.onRawLock(value, !initialized);
             if (value != 1 && value != 2) {
                 invalidCallback(receivedMs);
                 return;
@@ -240,6 +242,7 @@ final class AvasTelemetryController implements AutoCloseable {
                 && lockBefore == before.lockApplied;
         // Engine Power is independent of Lock readiness, and precedes OFF event enqueueing.
         if (applyPower) publishRawPower(snapshot.power, silent);
+        if (applyLock) sink.onRawLock(snapshot.lock, silent || !initialized);
         if (!applyPower || !applyLock) {
             sink.log("avas_telemetry_snapshot_raced", "source", source,
                     "power_discarded", !applyPower, "lock_discarded", !applyLock);
@@ -383,6 +386,7 @@ final class AvasTelemetryController implements AutoCloseable {
         power = -1;
         lock = -1;
         policy.reset();
+        sink.onRawLock(-1, true);
     }
 
     private void publishRawPower(int value, boolean silent) {

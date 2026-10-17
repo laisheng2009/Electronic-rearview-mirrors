@@ -1281,6 +1281,79 @@ final class CameraHelperMain {
                     ? null : new ReflectivePersistentCameraPort(camera);
         }
 
+        synchronized void attachMotionDetector(Surface surface) throws Exception {
+            if (surface == null || !surface.isValid()) throw new IllegalArgumentException("motion Surface missing");
+            if (persistentSession.motionDetectionSurface != null) {
+                surface.release();
+                throw new IllegalStateException("motion detector already attached");
+            }
+            if (camera != null && !persistentPanoProducer || unconfirmedOneShotOwner) {
+                surface.release();
+                throw new IllegalStateException("camera owner busy");
+            }
+            persistentSession.motionDetectionSurface = surface;
+            persistentSession.motionDetectionWanted = true;
+            try {
+                if (persistentPanoProducer) {
+                    requireMotionDimensions(camera);
+                    persistentSession.attachMotionInput(persistentPort());
+                } else {
+                    int id = panoCameraId();
+                    if (id < 0) throw new IllegalStateException("pano_h unavailable");
+                    String opened = openPersistentProducer(persistentSession.motionGroup,
+                            new Surface[0], new int[0], 1, "motion_monitor", false, false,
+                            null, "motion_open", id, false, 0, null);
+                    if (!persistentPanoProducer) throw new IllegalStateException(opened);
+                }
+                emit("motion_camera_attached", "preview_index", 4123, "producer_epoch", producerEpoch);
+            } catch (Exception failure) {
+                if (persistentPanoProducer) tearDownPersistentProducer("motion_attach_failed", failure);
+                else persistentSession.clearMotionInput();
+                throw failure;
+            }
+        }
+
+        synchronized void detachMotionDetector() throws Exception {
+            if (persistentSession.motionDetectionSurface == null) return;
+            persistentSession.motionDetectionWanted = false;
+            if (closePersistentProducerIfIdle("motion_detector_idle") != null) return;
+            try {
+                if (persistentSession.motionDetectionAttached && persistentPort() != null
+                        && !persistentPort().remove(persistentSession.motionDetectionSurface, 4123))
+                    throw new IllegalStateException("motion rmPreviewSurface returned false");
+                persistentSession.clearMotionInput();
+                emit("motion_camera_detached", "producer_epoch", producerEpoch);
+            } catch (Exception failure) {
+                tearDownPersistentProducer("motion_detach_failed", failure);
+                throw failure;
+            }
+        }
+
+        synchronized void attachMotionRecording(Surface[] surfaces, int requestId) throws Exception {
+            if (!persistentPanoProducer || !persistentSession.motionDetectionWanted) {
+                releaseSurfaces(surfaces);
+                throw new IllegalStateException("motion camera session unavailable");
+            }
+            String result = attachPersistentGroup(persistentSession.motionGroup, surfaces,
+                    new int[]{4, 1, 2, 3}, requestId, "motion_recording", false, false,
+                    null, "motion_recording_attach", false);
+            if (!persistentSession.motionGroup.has()) throw new IllegalStateException(result);
+        }
+
+        synchronized void detachMotionRecording() {
+            if (persistentSession.motionGroup.has()) closePersistentGroup(
+                    persistentSession.motionGroup, "motion_recording_stop",
+                    persistentSession.motionGroup.requestId);
+        }
+
+        private static void requireMotionDimensions(Object target) throws Exception {
+            Class<?> type = target.getClass();
+            int width = (Integer) type.getMethod("getPreviewWidth").invoke(target);
+            int height = (Integer) type.getMethod("getPreviewHeight").invoke(target);
+            if (width != 7680 || height != 1300)
+                throw new IllegalStateException("unverified motion source " + width + "x" + height);
+        }
+
         private void updateSourceDemand(String owner, DemandUpdate update) {
             try {
                 update.run();
@@ -2077,6 +2150,7 @@ final class CameraHelperMain {
             try {
                 Class<?> avm = Class.forName("android.hardware.AVMCamera");
                 opened = openAvmCamera(avm, requestedCameraId);
+                if (persistentSession.motionDetectionWanted) requireMotionDimensions(opened);
                 Class<?> callbackType = Class.forName("android.hardware.AVMCamera$IEventCallback");
                 Object callbackProxy = Proxy.newProxyInstance(
                         callbackType.getClassLoader(), new Class<?>[]{callbackType}, eventHandler(opened));
@@ -3069,6 +3143,9 @@ final class CameraHelperMain {
             final ConsumerGroup parkingGroup = new ConsumerGroup(CAMERA_OWNER_PARKING);
             final ConsumerGroup mirrorGroup = new ConsumerGroup(CAMERA_OWNER_MIRROR);
             final ConsumerGroup reverseGroup = new ConsumerGroup(CAMERA_OWNER_REVERSE);
+            final ConsumerGroup motionGroup = new ConsumerGroup("motion_recording");
+            Surface motionDetectionSurface;
+            boolean motionDetectionWanted, motionDetectionAttached;
             private final IdentityHashMap<Surface, DetachedConsumerIdentity>
                     detachedConsumerIdentities = new IdentityHashMap<>();
             final Surface[] sourceSurfaces = new Surface[5];
@@ -3142,6 +3219,7 @@ final class CameraHelperMain {
                 try {
                     int demanded = sourceDemandMask | retainedSourceDemandMask();
                     ensureSources(port, indexesFromMask(demanded));
+                    attachMotionInput(port);
                     if (!port.start()) {
                         throw new IllegalStateException("startPreview returned false");
                     }
@@ -3191,6 +3269,7 @@ final class CameraHelperMain {
                 parkingGroup.clear();
                 mirrorGroup.clear();
                 reverseGroup.clear();
+                motionGroup.clear();
                 clearSources();
                 producerOpen = false;
                 activeProducerEpoch = 0;
@@ -3631,7 +3710,7 @@ final class CameraHelperMain {
                     first = mergeFailure(first, error);
                 }
                 for (ConsumerGroup group : new ConsumerGroup[]{activityGroup, overlayGroup,
-                        parkingGroup, mirrorGroup, reverseGroup}) {
+                        parkingGroup, mirrorGroup, reverseGroup, motionGroup}) {
                     try {
                         releaseAndClear(group);
                     } catch (Throwable error) {
@@ -3738,6 +3817,7 @@ final class CameraHelperMain {
                 if (parkingGroup.has()) result.add(parkingGroup.snapshot());
                 if (mirrorGroup.has()) result.add(mirrorGroup.snapshot());
                 if (reverseGroup.has()) result.add(reverseGroup.snapshot());
+                if (motionGroup.has()) result.add(motionGroup.snapshot());
                 return result.toArray(new ConsumerGroup.Snapshot[0]);
             }
 
@@ -4054,6 +4134,7 @@ final class CameraHelperMain {
                 if (contains(parkingGroup.surfaces, target)) return parkingGroup;
                 if (contains(mirrorGroup.surfaces, target)) return mirrorGroup;
                 if (contains(reverseGroup.surfaces, target)) return reverseGroup;
+                if (contains(motionGroup.surfaces, target)) return motionGroup;
                 return null;
             }
 
@@ -4262,7 +4343,7 @@ final class CameraHelperMain {
                 int mask = blindStandbyDemandMask | mirrorDemandMask
                         | reverseWarmLease.sourceMask();
                 for (ConsumerGroup group : new ConsumerGroup[]{
-                        activityGroup, overlayGroup, parkingGroup, mirrorGroup, reverseGroup}) {
+                        activityGroup, overlayGroup, parkingGroup, mirrorGroup, reverseGroup, motionGroup}) {
                     if (group.has()) mask |= group.sourceDemandMask;
                 }
                 return mask;
@@ -4274,7 +4355,8 @@ final class CameraHelperMain {
 
             boolean hasConsumers() {
                 return activityGroup.has() || overlayGroup.has() || parkingGroup.has()
-                        || mirrorGroup.has() || reverseGroup.has();
+                        || mirrorGroup.has() || reverseGroup.has() || motionGroup.has()
+                        || motionDetectionWanted;
             }
 
             private void reconcileIfOpen(PersistentCameraPort port) throws Exception {
@@ -4292,7 +4374,7 @@ final class CameraHelperMain {
                 int required = retainedSourceDemandMask();
                 ensureSources(port, indexesFromMask(required));
                 for (ConsumerGroup group : new ConsumerGroup[]{
-                        activityGroup, overlayGroup, parkingGroup, mirrorGroup, reverseGroup}) {
+                        activityGroup, overlayGroup, parkingGroup, mirrorGroup, reverseGroup, motionGroup}) {
                     if (!group.has() || !group.attached) continue;
                     for (int i = 0; i < group.surfaces.length; i++) {
                         int index = group.indexes[i];
@@ -4363,6 +4445,13 @@ final class CameraHelperMain {
 
             private Throwable detachSources(PersistentCameraPort port) {
                 Throwable first = null;
+                if (motionDetectionAttached && motionDetectionSurface != null) {
+                    try {
+                        if (!port.remove(motionDetectionSurface, 4123))
+                            first = new IllegalStateException("motion input detach failed");
+                        else motionDetectionAttached = false;
+                    } catch (Throwable error) { first = mergeFailure(first, error); }
+                }
                 for (int index = 0; index < sourceAttached.length; index++) {
                     if (!sourceAttached[index]) continue;
                     try {
@@ -4383,6 +4472,21 @@ final class CameraHelperMain {
             private void clearSources() {
                 Arrays.fill(sourceSurfaces, null);
                 Arrays.fill(sourceAttached, false);
+                clearMotionInput();
+            }
+
+            void attachMotionInput(PersistentCameraPort port) throws Exception {
+                if (!motionDetectionWanted || motionDetectionAttached) return;
+                motionDetectionAttached = true;
+                if (!port.add(motionDetectionSurface, 4123))
+                    throw new IllegalStateException("motion addPreviewSurface returned false");
+            }
+
+            void clearMotionInput() {
+                if (motionDetectionSurface != null) motionDetectionSurface.release();
+                motionDetectionSurface = null;
+                motionDetectionWanted = false;
+                motionDetectionAttached = false;
             }
         }
 

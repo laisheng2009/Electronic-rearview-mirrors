@@ -17,6 +17,8 @@ final class CameraRuntimeHost {
     static final int ATTACH = 1, SETTINGS = 2, VISIBILITY = 3, PREVIEW = 4,
             TOGGLE_REVERSE = 5, ACK_SETTINGS = 6, STOP = 7, STATUS = 8, DETACH = 9,
             PANO = 10, POWER = 11, NAV_VOLUME = 12;
+    static final int MOTION_ATTACH = 13, MOTION_DETACH = 14, MOTION_AUTHORIZE = 15,
+            MOTION_RECORD_ATTACH = 16, MOTION_RECORD_DETACH = 17;
     static final String CALLBACK = "com.byd.extend.ICameraRuntimeClient";
     static final int POWER_QUICKBOOT = 1, POWER_SCREEN_OFF = 2, POWER_SCREEN_ON = 3,
             POWER_USER_PRESENT = 4;
@@ -37,6 +39,9 @@ final class CameraRuntimeHost {
     private boolean preview;
     private IBinder linkedClient;
     private IBinder.DeathRecipient clientDeath;
+    private String motionSession;
+    private IBinder motionWorker;
+    private IBinder.DeathRecipient motionDeath;
     private final Runnable discoveryRetry = this::retryCameraDiscovery;
     private IBinder cameraEndpointFor(IBinder owner) { return new Binder() {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
@@ -69,6 +74,9 @@ final class CameraRuntimeHost {
 
     int transact(Parcel data, Parcel reply) throws Exception {
         int operation = data.readInt();
+        if (operation >= MOTION_ATTACH && operation <= MOTION_RECORD_DETACH)
+            return transactMotion(operation, data, reply);
+        if (Binder.getCallingUid() != appUid) throw new SecurityException("camera app caller required");
         IBinder owner = operation == ATTACH ? null : data.readStrongBinder();
         // Decode on the Binder thread; a Parcel must never outlive its transaction.
         Bundle settings = operation == ATTACH || operation == SETTINGS || operation == ACK_SETTINGS
@@ -145,6 +153,76 @@ final class CameraRuntimeHost {
         return operation;
     }
 
+    private int transactMotion(int operation, Parcel data, Parcel reply) throws Exception {
+        boolean workerCall = operation == MOTION_ATTACH || operation == MOTION_DETACH;
+        if (Binder.getCallingUid() != (workerCall ? 2000 : appUid))
+            throw new SecurityException("motion caller denied");
+        String session = data.readString();
+        IBinder worker = operation <= MOTION_AUTHORIZE ? data.readStrongBinder() : null;
+        android.view.Surface detector = operation == MOTION_ATTACH
+                ? data.readTypedObject(android.view.Surface.CREATOR) : null;
+        android.view.Surface[] recording = operation == MOTION_RECORD_ATTACH
+                ? data.createTypedArray(android.view.Surface.CREATOR) : null;
+        int requestId = operation == MOTION_RECORD_ATTACH ? data.readInt() : 0;
+        boolean[] consumed = {false};
+        try {
+            if (session == null || session.length() < 16 || session.length() > 80 || data.dataAvail() != 0)
+                throw new IllegalArgumentException("invalid motion session");
+            call(() -> {
+                if (lifetime.stopped() || !lifetime.started())
+                    throw new IllegalStateException("camera runtime not attached");
+                if (operation == MOTION_AUTHORIZE) {
+                    if (lifetime.client() == null || !lifetime.client().isBinderAlive()
+                            || worker == null || !worker.isBinderAlive())
+                        throw new IllegalStateException("motion owner unavailable");
+                    if (!session.equals(motionSession) || worker != motionWorker) clearMotion();
+                    motionSession = session;
+                    if (motionWorker == null) {
+                        motionWorker = worker;
+                        motionDeath = () -> handler.post(() -> {
+                            if (motionWorker == worker) clearMotion();
+                        });
+                        worker.linkToDeath(motionDeath, 0);
+                    }
+                } else {
+                    if (!session.equals(motionSession) || motionWorker == null
+                            || !motionWorker.isBinderAlive() || workerCall && worker != motionWorker)
+                        throw new SecurityException("motion session expired");
+                    if (operation == MOTION_ATTACH) {
+                        consumed[0] = true;
+                        helper.attachMotionDetector(detector);
+                    } else if (operation == MOTION_DETACH) helper.detachMotionDetector();
+                    else if (operation == MOTION_RECORD_ATTACH) {
+                        if (recording == null || recording.length != 4 || requestId <= 0)
+                            throw new IllegalArgumentException("four motion surfaces required");
+                        consumed[0] = true;
+                        helper.attachMotionRecording(recording, requestId);
+                    } else helper.detachMotionRecording();
+                }
+                return null;
+            });
+            reply.writeNoException();
+            reply.writeInt(1);
+            return operation;
+        } finally {
+            if (!consumed[0]) {
+                if (detector != null) detector.release();
+                if (recording != null) for (android.view.Surface surface : recording)
+                    if (surface != null) surface.release();
+            }
+        }
+    }
+
+    private void clearMotion() {
+        if (motionWorker != null && motionDeath != null) motionWorker.unlinkToDeath(motionDeath, 0);
+        motionWorker = null;
+        motionDeath = null;
+        motionSession = null;
+        helper.detachMotionRecording();
+        try { helper.detachMotionDetector(); }
+        catch (Exception error) { event("motion_detach_error", "error", error.toString()); }
+    }
+
     private void initialize() {
         BlindSpotOverlayController.migrateOverlayPreferences(context.settings);
         blind = new BlindSpotOverlayController(context, handler, this::event);
@@ -189,6 +267,7 @@ final class CameraRuntimeHost {
 
     private void clientDied(IBinder expected) {
         if (!lifetime.detach(expected)) return;
+        clearMotion();
         unlinkClient();
         // Only app-owned preview surfaces are gone; all background consumers stay attached.
         helper.closeCameraForOwner(CameraHelperMain.CAMERA_OWNER_ACTIVITY, "ui_process_died");
@@ -330,6 +409,7 @@ final class CameraRuntimeHost {
 
     private void stopOnHandler() {
         lifetime.shutdown(() -> {
+            clearMotion();
             unlinkClient();
             handler.removeCallbacks(discoveryRetry);
             if (reverse != null) reverse.shutdown();

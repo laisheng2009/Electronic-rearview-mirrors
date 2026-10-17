@@ -277,11 +277,10 @@ private fun UpdateHintColorPicker(
             }
             CompositionLocalProvider(LocalCompactControls provides true) {
                 listOf(16 to "R", 8 to "G", 0 to "B").forEach { (shift, label) ->
-                    NumericSetting(label, ((picked ushr shift) and 255).toString(), "", colors,
-                        { value -> update((picked and (255 shl shift).inv()) or
-                            ((value.toFloatOrNull()?.toInt() ?: 0).coerceIn(0, 255) shl shift)) },
-                        range = 0f..255f, adjustable = true, slider = true,
-                        identity = "hint-color-$label-$initial")
+                    ColorChannelSetting(label, (picked ushr shift) and 255, colors, strings,
+                        "hint-color-$label-$initial") { value ->
+                        update((picked and (255 shl shift).inv()) or (value shl shift))
+                    }
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {

@@ -217,6 +217,28 @@ final class CameraRuntimeClient {
         if (pano != null) pano.reportStatus();
     }
 
+    synchronized boolean motionCommand(int operation, String session, IBinder worker,
+            android.view.Surface[] surfaces, int requestId) {
+        if (!connect()) return false;
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
+            data.writeInt(operation);
+            data.writeString(session);
+            if (operation == CameraRuntimeHost.MOTION_AUTHORIZE) data.writeStrongBinder(worker);
+            if (operation == CameraRuntimeHost.MOTION_RECORD_ATTACH) {
+                data.writeTypedArray(surfaces, 0);
+                data.writeInt(requestId);
+            }
+            if (!shell.transact(TurnSignalShellProtocol.TX_CAMERA_RUNTIME, data, reply, 0)) return false;
+            reply.readException();
+            return reply.readInt() == 1;
+        } catch (Exception error) {
+            failure("motion_camera_command_failed", error);
+            return false;
+        } finally { data.recycle(); reply.recycle(); }
+    }
+
     private synchronized void platformAttached() {
         if (detached || shell == null) return;
         if (cluster == null)

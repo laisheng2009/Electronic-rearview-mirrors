@@ -214,7 +214,8 @@ public final class TurnSignalShellMain {
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
-            if (!TurnSignalShellProtocol.isCallerAllowed(Binder.getCallingUid(), appUid)) {
+            if (!TurnSignalShellProtocol.isCallerAllowed(Binder.getCallingUid(), appUid)
+                    && !(Binder.getCallingUid() == 2000 && code == TurnSignalShellProtocol.TX_CAMERA_RUNTIME)) {
                 if (reply != null) reply.writeException(new SecurityException("caller uid denied"));
                 return true;
             }

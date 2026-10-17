@@ -43,6 +43,9 @@ final class DiagnosticLogExporter {
                     "system/bydextend_camera.log",
                     "tail -c 1048576 /data/local/tmp/bydextend_camera.log 2>/dev/null"),
             new CollectorSpec(
+                    "system/bydextend_motion.log",
+                    "tail -c 1048576 " + MotionDetectorProtocol.LOG_PATH + " 2>/dev/null"),
+            new CollectorSpec(
                     "system/logcat-all.txt",
                     "logcat -b all -v threadtime -d 2>/dev/null", true),
             new CollectorSpec(

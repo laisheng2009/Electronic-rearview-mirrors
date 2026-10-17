@@ -4,6 +4,8 @@
 
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -40,6 +42,7 @@
 
     <application
         android:allowBackup="false"
+        android:requestLegacyExternalStorage="true"
         android:hasCode="true"
         android:icon="@drawable/byd_extend_launcher_padded"
         android:roundIcon="@drawable/byd_extend_launcher_padded"
@@ -51,6 +54,13 @@
             android:name="com.byd.extend.CameraProbeActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape" />
+
+        <activity
+            android:name="com.byd.extend.ui.motion.MotionFullscreenActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
             android:screenOrientation="sensorLandscape" />
 
         <!-- Preserve the launcher component already pinned by Extend 0.53.0 users. -->
@@ -67,7 +77,7 @@
         <service
             android:name="com.byd.extend.CameraHelperService"
             android:exported="false"
-            android:foregroundServiceType="location"
+            android:foregroundServiceType="location|microphone"
             android:stopWithTask="false" />
 
         <service

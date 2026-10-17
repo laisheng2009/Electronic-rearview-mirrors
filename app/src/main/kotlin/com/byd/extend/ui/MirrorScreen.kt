@@ -286,7 +286,7 @@ internal fun CameraBorderControls(
         0f..16f, adjustable = true, slider = true, identity = identity to "border")
     Text(strings.text("0 — без рамки", "0 removes the border", "0 表示无边框"),
         color = colors.muted, fontSize = 12.sp)
-    MirrorBorderColorLine(colors, strings, state.borderArgb) { pickingColor = true }
+    MirrorBorderColorLine(colors, strings, state.borderArgb, onPick = { pickingColor = true })
     if (pickingColor) MirrorBorderColorPicker(colors, strings, state.borderArgb,
         onDismiss = { pickingColor = false },
         onSelect = { color ->
@@ -296,15 +296,16 @@ internal fun CameraBorderControls(
 }
 
 @Composable
-private fun MirrorBorderColorLine(
+internal fun MirrorBorderColorLine(
     colors: UiPalette,
     strings: UiStrings,
     argb: Int,
     onPick: () -> Unit,
+    title: String = strings.text("Колір рамки", "Border color", "边框颜色"),
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(strings.text("Колір рамки", "Border color", "边框颜色"), color = colors.text,
+        Text(title, color = colors.text,
             fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
         Box(Modifier.size(52.dp, 44.dp).clip(RoundedCornerShape(7.dp))
             .background(colors.field).border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp)),
@@ -313,18 +314,19 @@ private fun MirrorBorderColorLine(
                 .border(1.dp, colors.borderStrong, RoundedCornerShape(4.dp)))
         }
         ActionButton("", colors, Modifier.size(44.dp).semantics {
-            contentDescription = strings.text("Колір рамки", "Border color", "边框颜色")
+            contentDescription = title
         }, icon = Icons.Outlined.Palette, onClick = onPick)
     }
 }
 
 @Composable
-private fun MirrorBorderColorPicker(
+internal fun MirrorBorderColorPicker(
     colors: UiPalette,
     strings: UiStrings,
     initial: Int,
     onDismiss: () -> Unit,
     onSelect: (Int) -> Unit,
+    title: String = strings.text("Колір рамки", "Border color", "边框颜色"),
 ) {
     fun hex(value: Int) = "%06X".format(java.util.Locale.ROOT, value and 0xFFFFFF)
     var picked by remember(initial) { mutableIntStateOf(initial or 0xFF000000.toInt()) }
@@ -353,7 +355,7 @@ private fun MirrorBorderColorPicker(
             .background(colors.surface).border(1.dp, colors.borderStrong, RoundedCornerShape(8.dp))
             .verticalScroll(rememberScrollState()).padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(strings.text("Колір рамки", "Border color", "边框颜色"), color = colors.text,
+            Text(title, color = colors.text,
                 fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Box(Modifier.size(48.dp).background(Color(picked), RoundedCornerShape(7.dp))
@@ -396,11 +398,10 @@ private fun MirrorBorderColorPicker(
             }
             CompositionLocalProvider(LocalCompactControls provides true) {
                 listOf(16 to "R", 8 to "G", 0 to "B").forEach { (shift, label) ->
-                    NumericSetting(label, ((picked ushr shift) and 255).toString(), "", colors,
-                        { value -> update((picked and (255 shl shift).inv()) or
-                            (value.toFloat().toInt().coerceIn(0, 255) shl shift)) },
-                        range = 0f..255f, adjustable = true, slider = true,
-                        identity = "mirror-color-$label-${initial}")
+                    ColorChannelSetting(label, (picked ushr shift) and 255, colors, strings,
+                        "mirror-color-$label-$initial") { value ->
+                        update((picked and (255 shl shift).inv()) or (value shl shift))
+                    }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {

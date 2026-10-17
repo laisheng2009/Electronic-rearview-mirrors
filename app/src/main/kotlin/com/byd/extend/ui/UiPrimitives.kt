@@ -84,6 +84,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
@@ -667,6 +668,7 @@ internal fun ChoiceField(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     hudCompact: Boolean = false,
+    optionFonts: List<FontFamily>? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
@@ -696,7 +698,8 @@ internal fun ChoiceField(
                 contentAlignment = Alignment.Center) {
                 Text(choices.getOrElse(safeSelected) { "—" }, color = if (hudCompact && !enabled) colors.muted.copy(alpha = .62f) else selectedContent, fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp))
+                    overflow = TextOverflow.Ellipsis, fontFamily = optionFonts?.getOrNull(safeSelected),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp))
                 if (hudCompact) Text("▾", color = if (enabled) selectedContent else colors.muted.copy(alpha = .62f),
                     fontSize = 18.sp, modifier = Modifier.align(Alignment.CenterEnd))
                 else Icon(Icons.Outlined.ExpandMore, null, tint = selectedContent.copy(alpha = .78f),
@@ -723,6 +726,7 @@ internal fun ChoiceField(
                             contentAlignment = Alignment.Center) {
                             Text(option, color = if (index == safeSelected) selectedContent else colors.text,
                                 fontSize = 14.sp,
+                                fontFamily = optionFonts?.getOrNull(index),
                                 fontWeight = if (index == safeSelected) FontWeight.SemiBold else FontWeight.Normal,
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
@@ -961,6 +965,35 @@ internal fun normalizeSliderValue(value: Float, range: ClosedFloatingPointRange<
     value.roundToInt().toFloat().coerceIn(range)
 
 internal fun sliderText(value: Float): String = value.roundToInt().toString()
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ColorChannelSetting(
+    label: String,
+    value: Int,
+    colors: UiPalette,
+    strings: UiStrings,
+    identity: Any,
+    onChange: (Int) -> Unit,
+) {
+    val channel = value.coerceIn(0, 255)
+    Column(Modifier.fillMaxWidth()) {
+        NumericSetting(label, channel.toString(), "", colors,
+            { raw -> raw.toIntOrNull()?.let { onChange(it.coerceIn(0, 255)) } },
+            range = 0f..255f, adjustable = true, compactSuffix = true, inputWidth = 52.dp,
+            identity = identity)
+        val sliderColors = SliderDefaults.colors(
+            thumbColor = if (colors.dark) Color(0xFFD9ECFF) else Color.White,
+            activeTrackColor = colors.accent, inactiveTrackColor = colors.borderStrong)
+        Slider(channel.toFloat(), { onChange(it.roundToInt().coerceIn(0, 255)) },
+            valueRange = 0f..255f, colors = sliderColors,
+            track = { SliderDefaults.Track(it, colors = sliderColors, drawStopIndicator = null) },
+            modifier = Modifier.fillMaxWidth().height(32.dp).semantics {
+                contentDescription = strings.format(
+                    "%1\$s • повзунок", "%1\$s • slider", "%1\$s • 滑块", label)
+            })
+    }
+}
 
 @Composable
 private fun NumberStep(symbol: String, title: String, colors: UiPalette, enabled: Boolean, onClick: () -> Unit) {

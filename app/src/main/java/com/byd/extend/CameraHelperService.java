@@ -233,6 +233,7 @@ public final class CameraHelperService extends Service {
             GuardRecovery.heartbeat(CameraHelperService.this);
             CameraHelperMain.HelperBinder activeHelper = helper;
             if (activeHelper != null) activeHelper.configureAvas();
+            if (motionRuntime != null) motionRuntime.refresh();
             reconcileAvasRecovery(false, "service_heartbeat");
             runtimeHandler.postDelayed(this, 30_000);
         }
@@ -259,6 +260,7 @@ public final class CameraHelperService extends Service {
     private volatile CameraHelperMain.HelperBinder helper;
     private volatile boolean helperRuntimeStarted;
     private CameraRuntimeClient cameraRuntime;
+    private MotionRuntime motionRuntime;
     private WeatherRuntime weatherRuntime;
     private boolean controllersInitialized;
     private boolean foreground;
@@ -1433,6 +1435,7 @@ public final class CameraHelperService extends Service {
         boolean recover = GuardRecovery.shouldRecover(this);
         boolean explicitShutdown = GuardRecovery.isUserShutdownActive(this);
         lifecycle("service_destroy", "recover", recover);
+        if (motionRuntime != null) { motionRuntime.close(); motionRuntime = null; }
         setAvasWakeLock(false, "service_teardown");
         if (avasRecoveryDaemon != null) {
             SharedPreferences settings = getSharedPreferences("settings", MODE_PRIVATE);
@@ -1485,6 +1488,9 @@ public final class CameraHelperService extends Service {
         helperRuntimeStarted = true;
         CameraHelperMain.DiscoveryResult discoveryResult = helper.discoverCameraWithResult();
         helper.startGuardRuntime();
+        if (motionRuntime == null)
+            motionRuntime = new MotionRuntime(this, cameraRuntime, this::acceptHelperLine);
+        else motionRuntime.refresh();
         helper.configureAvas();
         helper.configureCalls(CallsRuntime.requiresRescueSubscription(this));
 
@@ -1501,6 +1507,7 @@ public final class CameraHelperService extends Service {
         runtimeHandler.removeCallbacks(heartbeat);
         runtimeHandler.removeCallbacks(resumeOverlay);
         runtimeHandler.removeCallbacks(retryCameraDiscovery);
+        if (motionRuntime != null) { motionRuntime.close(); motionRuntime = null; }
         if (terminateShells && cameraRuntime != null) cameraRuntime.shutdown();
         if (weatherRuntime != null) weatherRuntime.shutdown();
         if (helper != null) helper.shutdown(terminateShells);
@@ -1550,7 +1557,7 @@ public final class CameraHelperService extends Service {
                 && AvasRecoveryPolicy.daemonRequired(
                 GuardRecovery.shouldRecover(this),
                 GuardRecovery.isUserShutdownActive(this),
-                AvasNotificationAccess.hasEnabledAvasAudio(settings));
+                AvasNotificationAccess.hasEnabledAvasAudio(settings) || MotionConfig.read(this).anyEnabled());
     }
 
     private boolean logcatRecordingRequested(SharedPreferences settings) {
@@ -1675,6 +1682,7 @@ public final class CameraHelperService extends Service {
                 || line.contains("helper_ping_failed"))
             WeatherRefreshAccessibilityService.microphoneEvent(line);
         postRuntime(() -> {
+            if (motionRuntime != null) motionRuntime.acceptCameraEvent(line);
             if (cameraRuntime != null) cameraRuntime.acceptPlatformEvent(line);
             if (cameraRuntime != null && line.contains("\"helper_ping\"")) {
                 try {
