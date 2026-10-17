@@ -94,4 +94,15 @@
     <string name="motion_player_fullscreen">"На весь экран"</string>
     <string name="motion_player_windowed">"Выйти из полноэкранного режима"</string>
     <string name="motion_player_error">"Не удалось воспроизвести эту запись."</string>
+    <string name="motion_storage_ready">"Готово"</string>
+    <string name="motion_storage_numbers_unknown">"Ёмкость и использование недоступны."</string>
+    <string name="motion_storage_unallocated">"Нераспределённое"</string>
+    <string name="motion_record_permission_denied">"Запись выключена: нужен доступ к хранилищу. Попробуйте включить снова. Если запрос не появится, разрешите доступ в системных настройках приложения."</string>
+    <string name="motion_camera_unavailable">"Видеопоток камеры недоступен."</string>
+    <string name="motion_archive_days_hint">"Точки отмечают дни с доступными записями. Выберите день или просмотрите весь месяц."</string>
+    <string name="motion_archive_month">"Весь месяц"</string>
+    <string name="motion_archive_prev_year">"Предыдущий год"</string>
+    <string name="motion_archive_next_year">"Следующий год"</string>
+    <string name="motion_archive_prev_month">"Предыдущий месяц"</string>
+    <string name="motion_archive_next_month">"Следующий месяц"</string>
 </resources>

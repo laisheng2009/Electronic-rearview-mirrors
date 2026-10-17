@@ -94,4 +94,15 @@
     <string name="motion_player_fullscreen">"Full screen"</string>
     <string name="motion_player_windowed">"Exit full screen"</string>
     <string name="motion_player_error">"This recording could not be played."</string>
+    <string name="motion_storage_ready">"Ready"</string>
+    <string name="motion_storage_numbers_unknown">"Capacity and usage are unavailable."</string>
+    <string name="motion_storage_unallocated">"Unallocated"</string>
+    <string name="motion_record_permission_denied">"Recording remains off: storage access is required. Try enabling again. If no request appears, allow storage access in the system app settings."</string>
+    <string name="motion_camera_unavailable">"Camera feed unavailable."</string>
+    <string name="motion_archive_days_hint">"Dots mark days with available recordings. Choose a day or browse the whole month."</string>
+    <string name="motion_archive_month">"Whole month"</string>
+    <string name="motion_archive_prev_year">"Previous year"</string>
+    <string name="motion_archive_next_year">"Next year"</string>
+    <string name="motion_archive_prev_month">"Previous month"</string>
+    <string name="motion_archive_next_month">"Next month"</string>
 </resources>

@@ -94,7 +94,11 @@ import com.byd.extend.ui.UiStrings
 import com.byd.extend.ui.palette
 
 @Composable
-internal fun MotionIntegrationScreen(colors: UiPalette, strings: UiStrings) {
+internal fun MotionIntegrationScreen(
+    colors: UiPalette,
+    strings: UiStrings,
+    cameraHost: @Composable (com.byd.extend.ui.CameraHostSlot) -> Unit,
+) {
     val context = LocalContext.current
     val store = remember(context) { MotionTemplateStore(context) }
     val config = remember(context) { MotionConfig.read(context) }
@@ -164,7 +168,9 @@ internal fun MotionIntegrationScreen(colors: UiPalette, strings: UiStrings) {
                 Text(strings.motionText(R.string.motion_reference_notice), color = colors.muted, fontSize = 12.sp)
             }
         }
-        MotionRecordingScreen(colors, strings)
+        CompositionLocalProvider(LocalMotionCameraHost provides cameraHost) {
+            MotionRecordingScreen(colors, strings)
+        }
     }
     if (dialog == 1 || dialog == 2) MotionLibraryDialog(dialog == 1, library, store, colors, strings,
         onClose = { dialog = 0 }, onUse = { if (persist(library.copy(activeId = it.id))) dialog = 0 },

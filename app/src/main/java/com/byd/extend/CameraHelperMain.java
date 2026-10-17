@@ -50,6 +50,8 @@ final class CameraHelperMain {
     static final int TX_UPDATE_VISUALS = IBinder.FIRST_CALL_TRANSACTION + 10;
     static final int TX_UPDATE_REVERSE_VISIBILITY = IBinder.FIRST_CALL_TRANSACTION + 11;
     static final int TX_OPEN_REVERSE_PREVIEW_TARGETED = IBinder.FIRST_CALL_TRANSACTION + 12;
+    static final int TX_OPEN_MOTION_PREVIEW = IBinder.FIRST_CALL_TRANSACTION + 13;
+    static final int TX_CLOSE_MOTION_PREVIEW = IBinder.FIRST_CALL_TRANSACTION + 14;
     static final int CB_EVENT = IBinder.FIRST_CALL_TRANSACTION;
     static final int ADB_AUTH_MODE_AUTO_ONCE = 0;
     static final int ADB_AUTH_MODE_FORCE = 1;
@@ -463,6 +465,27 @@ final class CameraHelperMain {
                     String result = openReversePreview(
                             requested.panoOutput, requested.directSurfaces,
                             requested.directIndexes, requestId);
+                    reply.writeNoException();
+                    reply.writeString(result);
+                    return true;
+                }
+                if (code == TX_OPEN_MOTION_PREVIEW) {
+                    Surface requestedSurface = CameraGpuOutput.readSurface(data, callerUid);
+                    int direction = data.readInt();
+                    int requestId = data.readInt();
+                    requireActivityRequestId(requestId);
+                    String result = openMotionCompositionPreview(
+                            requestedSurface, direction, requestId);
+                    reply.writeNoException();
+                    reply.writeString(result);
+                    return true;
+                }
+                if (code == TX_CLOSE_MOTION_PREVIEW) {
+                    int direction = data.readInt();
+                    int requestId = data.readInt();
+                    requireActivityRequestId(requestId);
+                    String result = closeMotionCompositionPreview(
+                            direction, requestId, "motion_preview_closed");
                     reply.writeNoException();
                     reply.writeString(result);
                     return true;
@@ -1287,7 +1310,7 @@ final class CameraHelperMain {
                 surface.release();
                 throw new IllegalStateException("motion detector already attached");
             }
-            if (camera != null && !persistentPanoProducer || unconfirmedOneShotOwner) {
+            if ((camera != null && !persistentPanoProducer) || unconfirmedOneShotOwner) {
                 surface.release();
                 throw new IllegalStateException("camera owner busy");
             }
@@ -1344,6 +1367,70 @@ final class CameraHelperMain {
             if (persistentSession.motionGroup.has()) closePersistentGroup(
                     persistentSession.motionGroup, "motion_recording_stop",
                     persistentSession.motionGroup.requestId);
+        }
+
+        private synchronized String openMotionCompositionPreview(
+                Surface surface, int direction, int requestId) {
+            final int sourceIndex;
+            final ConsumerGroup group;
+            try {
+                sourceIndex = MotionDirectionIcon.sourceIndexFor(direction);
+                group = persistentSession.motionPreviewGroup(direction);
+            } catch (IllegalArgumentException invalidDirection) {
+                releaseSurfaces(new Surface[]{surface});
+                throw invalidDirection;
+            }
+            if (surface == null || !surface.isValid()) {
+                releaseSurfaces(new Surface[]{surface});
+                throw new IllegalArgumentException("motion preview Surface missing");
+            }
+            // Do not take over an unrelated one-shot owner to start this passive tile.
+            if (camera != null && !persistentPanoProducer || unconfirmedOneShotOwner) {
+                releaseSurfaces(new Surface[]{surface});
+                return result("camera_error", "camera owner busy", -1, "pano_h");
+            }
+            if (group.has()) {
+                if (group.requestId == requestId) {
+                    releaseSurfaces(new Surface[]{surface});
+                    return result("camera_opened", null, activeCameraId, "pano_h");
+                }
+                closePersistentGroup(group, "motion_preview_replaced", group.requestId);
+                if (group.has()) {
+                    releaseSurfaces(new Surface[]{surface});
+                    return result("camera_error", "previous motion preview still attached",
+                            activeCameraId, "pano_h");
+                }
+            }
+            String opened = attachPersistentGroup(group, new Surface[]{surface},
+                    new int[]{sourceIndex}, requestId, "motion_composition_preview", false,
+                    false, null, "motion_preview_attach", false);
+            if (!group.has()) return opened;
+            emit("motion_preview_attached", "direction", direction,
+                    "preview_index", sourceIndex, "request_id", requestId,
+                    "producer_epoch", producerEpoch);
+            return opened;
+        }
+
+        private synchronized String closeMotionCompositionPreview(
+                int direction, int requestId, String reason) {
+            ConsumerGroup group = persistentSession.motionPreviewGroup(direction);
+            if (!group.has()) return result("already_closed", null);
+            if (group.requestId != requestId) {
+                return result("camera_close_ignored", null, activeCameraId, "pano_h");
+            }
+            String closed = closePersistentGroup(group, reason, requestId);
+            emit("motion_preview_detached", "direction", direction,
+                    "request_id", requestId, "producer_epoch", producerEpoch);
+            return closed;
+        }
+
+        /** Binder-owner death cleanup detaches only the four editor surfaces. */
+        synchronized void detachMotionCompositionPreviews() {
+            for (int direction = 0; direction < 4; direction++) {
+                ConsumerGroup group = persistentSession.motionPreviewGroup(direction);
+                if (group.has()) closeMotionCompositionPreview(
+                        direction, group.requestId, "motion_preview_client_died");
+            }
         }
 
         private static void requireMotionDimensions(Object target) throws Exception {
@@ -3144,6 +3231,12 @@ final class CameraHelperMain {
             final ConsumerGroup mirrorGroup = new ConsumerGroup(CAMERA_OWNER_MIRROR);
             final ConsumerGroup reverseGroup = new ConsumerGroup(CAMERA_OWNER_REVERSE);
             final ConsumerGroup motionGroup = new ConsumerGroup("motion_recording");
+            final ConsumerGroup[] motionPreviewGroups = {
+                    new ConsumerGroup("motion_preview_front"),
+                    new ConsumerGroup("motion_preview_rear"),
+                    new ConsumerGroup("motion_preview_left"),
+                    new ConsumerGroup("motion_preview_right")
+            };
             Surface motionDetectionSurface;
             boolean motionDetectionWanted, motionDetectionAttached;
             private final IdentityHashMap<Surface, DetachedConsumerIdentity>
@@ -3161,6 +3254,27 @@ final class CameraHelperMain {
             int mirrorDemandMask;
             final CameraSourceDemand.ReverseWarmLease reverseWarmLease =
                     new CameraSourceDemand.ReverseWarmLease();
+
+            ConsumerGroup motionPreviewGroup(int direction) {
+                if (direction < 0 || direction >= motionPreviewGroups.length) {
+                    throw new IllegalArgumentException(
+                            "Motion direction must be in range 0..3");
+                }
+                return motionPreviewGroups[direction];
+            }
+
+            private ConsumerGroup[] consumerGroups() {
+                ConsumerGroup[] groups = new ConsumerGroup[6 + motionPreviewGroups.length];
+                groups[0] = activityGroup;
+                groups[1] = overlayGroup;
+                groups[2] = parkingGroup;
+                groups[3] = mirrorGroup;
+                groups[4] = reverseGroup;
+                groups[5] = motionGroup;
+                System.arraycopy(motionPreviewGroups, 0, groups, 6,
+                        motionPreviewGroups.length);
+                return groups;
+            }
 
             void startProducer(
                     PersistentCameraPort port, PersistentSurfaceFanout requestedFanout,
@@ -3264,12 +3378,7 @@ final class CameraHelperMain {
             private void clearFailedOpenState() {
                 failedOpenStopAttempted = false;
                 failedOpenStopFailure = null;
-                activityGroup.clear();
-                overlayGroup.clear();
-                parkingGroup.clear();
-                mirrorGroup.clear();
-                reverseGroup.clear();
-                motionGroup.clear();
+                for (ConsumerGroup group : consumerGroups()) group.clear();
                 clearSources();
                 producerOpen = false;
                 activeProducerEpoch = 0;
@@ -3709,8 +3818,7 @@ final class CameraHelperMain {
                 } catch (Throwable error) {
                     first = mergeFailure(first, error);
                 }
-                for (ConsumerGroup group : new ConsumerGroup[]{activityGroup, overlayGroup,
-                        parkingGroup, mirrorGroup, reverseGroup, motionGroup}) {
+                for (ConsumerGroup group : consumerGroups()) {
                     try {
                         releaseAndClear(group);
                     } catch (Throwable error) {
@@ -3812,12 +3920,9 @@ final class CameraHelperMain {
 
             private ConsumerGroup.Snapshot[] activeSnapshots() {
                 ArrayDeque<ConsumerGroup.Snapshot> result = new ArrayDeque<>();
-                if (activityGroup.has()) result.add(activityGroup.snapshot());
-                if (overlayGroup.has()) result.add(overlayGroup.snapshot());
-                if (parkingGroup.has()) result.add(parkingGroup.snapshot());
-                if (mirrorGroup.has()) result.add(mirrorGroup.snapshot());
-                if (reverseGroup.has()) result.add(reverseGroup.snapshot());
-                if (motionGroup.has()) result.add(motionGroup.snapshot());
+                for (ConsumerGroup group : consumerGroups()) {
+                    if (group.has()) result.add(group.snapshot());
+                }
                 return result.toArray(new ConsumerGroup.Snapshot[0]);
             }
 
@@ -3880,11 +3985,16 @@ final class CameraHelperMain {
                 }
                 if (reverseGroup.has()) {
                     return restoreGroups(
-                            port, new ConsumerGroup[]{parkingGroup, mirrorGroup},
+                            port, new ConsumerGroup[]{parkingGroup, mirrorGroup,
+                                    motionGroup, motionPreviewGroups[0], motionPreviewGroups[1],
+                                    motionPreviewGroups[2], motionPreviewGroups[3]},
                             events, shellClose, cameraId, epoch);
                 }
                 return restoreGroups(
-                        port, new ConsumerGroup[]{overlayGroup, parkingGroup, activityGroup, mirrorGroup},
+                        port, new ConsumerGroup[]{overlayGroup, parkingGroup, activityGroup,
+                                mirrorGroup, motionGroup, motionPreviewGroups[0],
+                                motionPreviewGroups[1], motionPreviewGroups[2],
+                                motionPreviewGroups[3]},
                         events, shellClose, cameraId, epoch);
             }
 
@@ -4129,12 +4239,9 @@ final class CameraHelperMain {
             }
 
             private ConsumerGroup groupContaining(Surface target) {
-                if (contains(activityGroup.surfaces, target)) return activityGroup;
-                if (contains(overlayGroup.surfaces, target)) return overlayGroup;
-                if (contains(parkingGroup.surfaces, target)) return parkingGroup;
-                if (contains(mirrorGroup.surfaces, target)) return mirrorGroup;
-                if (contains(reverseGroup.surfaces, target)) return reverseGroup;
-                if (contains(motionGroup.surfaces, target)) return motionGroup;
+                for (ConsumerGroup group : consumerGroups()) {
+                    if (contains(group.surfaces, target)) return group;
+                }
                 return null;
             }
 
@@ -4342,8 +4449,7 @@ final class CameraHelperMain {
             int retainedSourceDemandMask() {
                 int mask = blindStandbyDemandMask | mirrorDemandMask
                         | reverseWarmLease.sourceMask();
-                for (ConsumerGroup group : new ConsumerGroup[]{
-                        activityGroup, overlayGroup, parkingGroup, mirrorGroup, reverseGroup, motionGroup}) {
+                for (ConsumerGroup group : consumerGroups()) {
                     if (group.has()) mask |= group.sourceDemandMask;
                 }
                 return mask;
@@ -4354,9 +4460,8 @@ final class CameraHelperMain {
             }
 
             boolean hasConsumers() {
-                return activityGroup.has() || overlayGroup.has() || parkingGroup.has()
-                        || mirrorGroup.has() || reverseGroup.has() || motionGroup.has()
-                        || motionDetectionWanted;
+                for (ConsumerGroup group : consumerGroups()) if (group.has()) return true;
+                return motionDetectionWanted;
             }
 
             private void reconcileIfOpen(PersistentCameraPort port) throws Exception {
@@ -4373,8 +4478,7 @@ final class CameraHelperMain {
                 if (isIdle()) return;
                 int required = retainedSourceDemandMask();
                 ensureSources(port, indexesFromMask(required));
-                for (ConsumerGroup group : new ConsumerGroup[]{
-                        activityGroup, overlayGroup, parkingGroup, mirrorGroup, reverseGroup, motionGroup}) {
+                for (ConsumerGroup group : consumerGroups()) {
                     if (!group.has() || !group.attached) continue;
                     for (int i = 0; i < group.surfaces.length; i++) {
                         int index = group.indexes[i];

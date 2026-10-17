@@ -28,8 +28,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -42,6 +44,7 @@ public final class MotionStorage {
     private final Context context;
     private final ContentResolver resolver;
     private final StorageManager manager;
+    private final Map<String, String> reportedVolumeMappings = new HashMap<>();
 
     public static final class Volume {
         public final String id;
@@ -123,12 +126,10 @@ public final class MotionStorage {
                 boolean readOnly = Environment.MEDIA_MOUNTED_READ_ONLY.equals(state);
                 File appDir = findAppFilesDirectory(appFiles, volume);
                 File root = volumeRoot(volume, appDir);
-                String mediaName = Build.VERSION.SDK_INT >= 29
-                        ? (primary ? MediaStore.VOLUME_EXTERNAL_PRIMARY : volume.getUuid())
-                        : null;
-                if (Build.VERSION.SDK_INT >= 29 && (mediaName == null || !mediaVolumes.contains(mediaName))) {
-                    mediaName = null;
-                }
+                String candidate = Build.VERSION.SDK_INT >= 30 ? volume.getMediaStoreVolumeName()
+                        : Build.VERSION.SDK_INT == 29
+                        ? MotionVolumeMapping.legacyName(primary, volume.getUuid()) : null;
+                String mediaName = MotionVolumeMapping.indexedName(candidate, mediaVolumes);
                 long total = -1;
                 long free = -1;
                 File statPath = Build.VERSION.SDK_INT >= 30 ? volume.getDirectory() : appDir;
@@ -143,6 +144,8 @@ public final class MotionStorage {
                 }
                 String id = primary ? "primary" : volume.getUuid();
                 if (id == null) continue;
+                if (Build.VERSION.SDK_INT >= 29) reportVolumeMapping(id, volume.getUuid(),
+                        state, candidate, mediaName);
                 result.add(new Volume(id, primary ? "Tablet" : (removable ? "SD" : volume.getDescription(context)),
                         primary, removable, mounted, readOnly, total, free, mediaName, appDir, root));
             }
@@ -151,6 +154,15 @@ public final class MotionStorage {
         }
         result.sort(Comparator.comparing((Volume volume) -> !volume.primary).thenComparing(volume -> volume.id));
         return Collections.unmodifiableList(result);
+    }
+
+    private synchronized void reportVolumeMapping(String id, String uuid, String state,
+            String candidate, String mediaName) {
+        String detail = "uuid=" + uuid + " state=" + state + " candidate=" + candidate
+                + " media_store=" + mediaName + " reason="
+                + (mediaName != null ? "indexed" : candidate == null ? "no_name" : "not_indexed");
+        if (!detail.equals(reportedVolumeMappings.put(id, detail)))
+            Log.i(TAG, "volume_mapping id=" + id + " " + detail);
     }
 
     public boolean oemMediaPermissionGranted() {
@@ -194,7 +206,7 @@ public final class MotionStorage {
     List<OwnedMedia> ownedMedia(Volume volume) throws IOException {
         if (!volume.mounted) return Collections.emptyList();
         if (Build.VERSION.SDK_INT >= 29) {
-            if (volume.mediaStoreName == null) return Collections.emptyList();
+            if (volume.mediaStoreName == null) throw new IOException("Motion MediaStore volume is not indexed");
             Uri collection = MediaStore.Video.Media.getContentUri(volume.mediaStoreName);
             String[] columns = {MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME,
                     MediaStore.MediaColumns.SIZE, MediaStore.Video.Media.DURATION,
@@ -603,6 +615,10 @@ public final class MotionStorage {
         IOException failure = null;
         for (Volume volume : attempts) {
             try {
+                if (volume.totalBytes <= 0 || volume.freeBytes < 0)
+                    throw new IOException("motion_free_space_unavailable");
+                if (queryOwnedBytes(volume) < 0)
+                    throw new IOException("motion_archive_accounting_unavailable");
                 if (oemCleanupEnabled(config)) {
                     CleanupResult cleanup = cleanOemNormalToLimit(volume.id,
                             config.oemLimitGb * MotionStoragePolicy.GB);

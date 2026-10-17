@@ -5,14 +5,18 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Build
+import android.os.LocaleList
 import android.util.Log
+import android.view.ContextThemeWrapper
 import android.widget.MediaController
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -35,13 +39,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
@@ -49,11 +50,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
@@ -68,9 +71,11 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.byd.extend.MotionConfig
+import com.byd.extend.MotionDirectionIcon
 import com.byd.extend.MotionMediaLibrary
 import com.byd.extend.MotionRuntime
 import com.byd.extend.AppLanguage
@@ -98,6 +103,7 @@ import java.time.LocalDateTime
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
 import java.time.temporal.WeekFields
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -165,7 +171,8 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
             context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED)
     }
     var confirmOemCleanup by rememberSaveable { mutableStateOf(false) }
-    var pendingOemEnable by remember { mutableStateOf(false) }
+    var pendingRecordingEnable by rememberSaveable { mutableStateOf(false) }
+    var pendingOemEnable by rememberSaveable { mutableStateOf(false) }
 
     fun save(next: RecordingOptions) {
         options = next
@@ -182,25 +189,78 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
         if (granted) save(options.copy(audio = true))
         else Toast.makeText(context, strings.motionText(R.string.motion_audio_permission_denied), Toast.LENGTH_LONG).show()
     }
-    val storagePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        storageReadGranted = granted
-        if (granted) refreshKey++
-        else Toast.makeText(context, strings.motionText(R.string.motion_storage_unreadable), Toast.LENGTH_LONG).show()
+    fun refreshStoragePermissions(): Pair<Boolean, Boolean> {
+        val read = Build.VERSION.SDK_INT < 23 || ContextCompat.checkSelfPermission(
+            context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        val write = Build.VERSION.SDK_INT < 23 || ContextCompat.checkSelfPermission(
+            context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        storageReadGranted = read
+        storageWriteGranted = write
+        return read to write
     }
-    val oemStoragePermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-        storageReadGranted = grants[Manifest.permission.READ_EXTERNAL_STORAGE] == true ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        storageWriteGranted = grants[Manifest.permission.WRITE_EXTERNAL_STORAGE] == true ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    val recordingStoragePermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val (read, write) = refreshStoragePermissions()
+        refreshKey++
+        if (pendingRecordingEnable) {
+            pendingRecordingEnable = false
+            if (motionStoragePermissionsGranted(motionStoragePermissionNeeds(Build.VERSION.SDK_INT), read, write)) {
+                save(options.copy(enabled = true))
+            } else Toast.makeText(context, strings.motionText(R.string.motion_record_permission_denied), Toast.LENGTH_LONG).show()
+        }
+    }
+    val oemStoragePermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val (read, write) = refreshStoragePermissions()
         refreshKey++
         if (pendingOemEnable) {
             pendingOemEnable = false
-            if (storageReadGranted && storageWriteGranted) save(options.copy(oemCleanup = true))
+            if (read && write) save(options.copy(oemCleanup = true))
             else Toast.makeText(context, strings.motionText(R.string.motion_oem_permission_denied), Toast.LENGTH_LONG).show()
         }
     }
 
+    fun setRecordingEnabled(enabled: Boolean) {
+        if (!enabled) {
+            pendingRecordingEnable = false
+            save(options.copy(enabled = false))
+            return
+        }
+        val needs = motionStoragePermissionNeeds(Build.VERSION.SDK_INT)
+        val (read, write) = refreshStoragePermissions()
+        if (motionStoragePermissionsGranted(needs, read, write)) {
+            save(options.copy(enabled = true))
+        } else {
+            pendingRecordingEnable = true
+            val missing = buildList {
+                if (needs.read && !read) add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                if (needs.write && !write) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+            recordingStoragePermissions.launch(missing.toTypedArray())
+        }
+    }
+
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val latestOptions by rememberUpdatedState(options)
+    DisposableEffect(lifecycle, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val (read, write) = refreshStoragePermissions()
+                refreshKey++
+                val current = latestOptions
+                val recordingDenied = current.enabled && !motionStoragePermissionsGranted(
+                    motionStoragePermissionNeeds(Build.VERSION.SDK_INT), read, write)
+                val oemDenied = current.oemCleanup && (!read || !write)
+                if (recordingDenied || oemDenied) {
+                    save(current.copy(enabled = if (recordingDenied) false else current.enabled,
+                        oemCleanup = if (oemDenied) false else current.oemCleanup))
+                    val message = if (recordingDenied) R.string.motion_record_permission_denied
+                        else R.string.motion_oem_permission_denied
+                    Toast.makeText(context, strings.motionText(message), Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
     LaunchedEffect(lifecycle, options, refreshKey, mediaLibrary) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
@@ -221,7 +281,7 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
 
     Section(strings.motionText(R.string.motion_video_title), colors) {
         SwitchLine(strings.motionText(R.string.motion_video_enable), strings.motionText(R.string.motion_video_preview),
-            options.enabled, { save(options.copy(enabled = it)) }, colors)
+            options.enabled, ::setRecordingEnabled, colors)
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 RecordingNumber(strings.motionText(R.string.motion_before), options.before,
@@ -272,28 +332,13 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
         SwitchLine(strings.motionText(R.string.motion_fallback, backup), strings.motionText(R.string.motion_fallback_hint),
             options.fallback, { save(options.copy(fallback = it)) }, colors)
         Text(strings.motionText(R.string.motion_storage_hint), color = colors.muted, fontSize = 13.sp)
-        if (stats == null) Text(strings.motionText(R.string.motion_storage_loading), color = colors.muted, fontSize = 13.sp)
-        else {
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                MotionStorageCard(Modifier.weight(1f), strings.motionText(R.string.motion_storage_internal), stats?.primary,
-                    options.internalLimit, options.internalKeepFree, options.internalFreeGb,
-                    options.enabled && (!options.sd || options.fallback), options.oemCleanup, colors, strings,
-                    onLimit = { save(options.copy(internalLimit = it)) },
-                    onKeep = { save(options.copy(internalKeepFree = it)) },
-                    onFree = { save(options.copy(internalFreeGb = it)) })
-                MotionStorageCard(Modifier.weight(1f), strings.motionText(R.string.motion_storage_sd), stats?.secondary,
-                    options.sdLimit, options.sdKeepFree, options.sdFreeGb,
-                    options.enabled && (options.sd || options.fallback), options.oemCleanup, colors, strings,
-                    onLimit = { save(options.copy(sdLimit = it)) },
-                    onKeep = { save(options.copy(sdKeepFree = it)) },
-                    onFree = { save(options.copy(sdFreeGb = it)) })
-            }
-            val oemUnknown = stats?.volumes?.any { it.oemRecorderBytes < 0 } == true
-            if (oemUnknown && !storageReadGranted && Build.VERSION.SDK_INT >= 23) {
-                ActionButton(strings.motionText(R.string.motion_storage_permission), colors = colors,
-                    modifier = Modifier.fillMaxWidth()) { storagePermission.launch(Manifest.permission.READ_EXTERNAL_STORAGE) }
-            }
-        }
+        MotionStorageCards(stats, options, colors, strings,
+            onInternalLimit = { save(options.copy(internalLimit = it)) },
+            onInternalKeep = { save(options.copy(internalKeepFree = it)) },
+            onInternalFree = { save(options.copy(internalFreeGb = it)) },
+            onSdLimit = { save(options.copy(sdLimit = it)) },
+            onSdKeep = { save(options.copy(sdKeepFree = it)) },
+            onSdFree = { save(options.copy(sdFreeGb = it)) })
         SwitchLine(strings.motionText(R.string.motion_oem_cleanup), strings.motionText(R.string.motion_oem_cleanup_hint),
             options.oemCleanup, { enabled ->
                 if (enabled) confirmOemCleanup = true else save(options.copy(oemCleanup = false))
@@ -301,16 +346,9 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
         val oemMaxGb = stats?.volumes.orEmpty().filter { it.mounted && it.capacityBytes > 0 }
             .maxOfOrNull { (it.capacityBytes / MOTION_GB).toInt().coerceAtLeast(1) }
         RecordingLimit(strings.motionText(R.string.motion_oem_quota), options.oemQuota, oemMaxGb,
-            strings.motionText(R.string.motion_gb), colors, strings, oemMaxGb != null,
-            { save(options.copy(oemQuota = it)) })
+            strings.motionText(R.string.motion_gb), colors, strings, enabled = true, identity = "motion-oem-limit",
+            onChange = { save(options.copy(oemQuota = it)) })
         Text(strings.motionText(R.string.motion_oem_cleanup_unavailable), color = colors.muted, fontSize = 12.sp)
-        if (options.oemCleanup && (!storageReadGranted || !storageWriteGranted) && Build.VERSION.SDK_INT >= 23) {
-            ActionButton(strings.motionText(R.string.motion_oem_storage_permission), colors = colors,
-                modifier = Modifier.fillMaxWidth()) {
-                oemStoragePermissions.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE))
-            }
-        }
     }
 
     Section(strings.motionText(R.string.motion_archive), colors) {
@@ -353,79 +391,143 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
 @Composable
 private fun RecordingNumber(title: String, value: Int, suffix: String, colors: UiPalette,
     enabled: Boolean = true, onChange: (Int) -> Unit) {
-    NumericSetting(title, value.toString(), suffix, colors, { raw -> raw.toIntOrNull()?.let(onChange) },
-        1f..30f, enabled = enabled, adjustable = true, slider = true,
-        identity = "motion-recording-$title")
-}
-
-@Composable
-private fun MotionStorageCard(
-    modifier: Modifier,
-    title: String,
-    volume: MotionMediaLibrary.VolumeStats?,
-    limit: Int,
-    keepFree: Boolean,
-    freeGb: Int,
-    active: Boolean,
-    oemActive: Boolean,
-    colors: UiPalette,
-    strings: UiStrings,
-    onLimit: (Int) -> Unit,
-    onKeep: (Boolean) -> Unit,
-    onFree: (Int) -> Unit,
-) {
-    Column(modifier.border(1.dp, colors.borderStrong, RoundedCornerShape(8.dp)).padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(title, color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        if (volume == null || !volume.mounted || volume.capacityBytes <= 0) {
-            Text(strings.motionText(R.string.motion_storage_missing), color = colors.muted, fontSize = 13.sp)
-        } else {
-            if (volume.readOnly) Text(strings.motionText(R.string.motion_storage_readonly), color = colors.yellow, fontSize = 12.sp)
-            MotionStorageBar(volume, active, oemActive, colors, strings)
-        }
-        val maxGb = volume?.capacityBytes?.takeIf { it > 0 }?.div(MOTION_GB)?.toInt()?.coerceAtLeast(1)
-        RecordingLimit(strings.motionText(R.string.motion_quota), limit, maxGb,
-            strings.motionText(R.string.motion_gb), colors, strings, volume?.mounted == true, onLimit)
-        SwitchLine(strings.motionText(R.string.motion_keep_free), strings.motionText(R.string.motion_keep_free_hint),
-            keepFree, onKeep, colors)
-        RecordingLimit(strings.motionText(R.string.motion_free_amount), freeGb, maxGb,
-            strings.motionText(R.string.motion_gb), colors, strings, volume?.mounted == true, onFree)
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, color = if (enabled) colors.text else colors.muted, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        NumericSetting(title, value.toString(), suffix, colors, { raw -> raw.toIntOrNull()?.let(onChange) },
+            1f..30f, enabled = enabled, adjustable = true, slider = true, showLabel = false,
+            identity = "motion-recording-$title")
     }
 }
 
 @Composable
+private fun MotionStorageCards(
+    stats: MotionMediaLibrary.Stats?,
+    options: RecordingOptions,
+    colors: UiPalette,
+    strings: UiStrings,
+    onInternalLimit: (Int) -> Unit,
+    onInternalKeep: (Boolean) -> Unit,
+    onInternalFree: (Int) -> Unit,
+    onSdLimit: (Int) -> Unit,
+    onSdKeep: (Boolean) -> Unit,
+    onSdFree: (Int) -> Unit,
+) {
+    val internal = stats?.primary
+    val sd = stats?.secondary
+    val internalMax = internal?.capacityBytes?.takeIf { it > 0 }?.div(MOTION_GB)?.toInt()?.coerceAtLeast(1)
+    val sdMax = sd?.capacityBytes?.takeIf { it > 0 }?.div(MOTION_GB)?.toInt()?.coerceAtLeast(1)
+    val surfaceShape = RoundedCornerShape(8.dp)
+    Box(Modifier.fillMaxWidth()) {
+        Row(Modifier.matchParentSize(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            repeat(2) {
+                Box(Modifier.weight(1f).fillMaxHeight().clip(surfaceShape).background(colors.surface)
+                    .border(1.dp, colors.borderStrong, surfaceShape))
+            }
+        }
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            StoragePairRow({
+                Text(strings.motionText(R.string.motion_storage_internal), color = colors.text, fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold)
+            }, {
+                Text(strings.motionText(R.string.motion_storage_sd), color = colors.text, fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold)
+            })
+            StoragePairRow({ MotionStorageStatus(internal, stats != null, colors, strings) },
+                { MotionStorageStatus(sd, stats != null, colors, strings) })
+            StoragePairRow({ MotionStorageSummary(internal, colors, strings) },
+                { MotionStorageSummary(sd, colors, strings) })
+            StoragePairRow({ MotionStorageBar(internal, options.enabled && (!options.sd || options.fallback),
+                options.oemCleanup, colors) }, { MotionStorageBar(sd, options.enabled && (options.sd || options.fallback),
+                options.oemCleanup, colors) })
+            StoragePairRow({ MotionStorageLegend(internal, colors, strings) },
+                { MotionStorageLegend(sd, colors, strings) })
+            StoragePairRow({ RecordingLimit(strings.motionText(R.string.motion_quota), options.internalLimit, internalMax,
+                strings.motionText(R.string.motion_gb), colors, strings, enabled = true, identity = "motion-tablet-limit",
+                onChange = onInternalLimit) },
+                { RecordingLimit(strings.motionText(R.string.motion_quota), options.sdLimit, sdMax,
+                    strings.motionText(R.string.motion_gb), colors, strings, enabled = true, identity = "motion-sd-limit",
+                    onChange = onSdLimit) })
+            StoragePairRow({ SwitchLine(strings.motionText(R.string.motion_keep_free), strings.motionText(R.string.motion_keep_free_hint),
+                options.internalKeepFree, onInternalKeep, colors) }, { SwitchLine(strings.motionText(R.string.motion_keep_free),
+                strings.motionText(R.string.motion_keep_free_hint), options.sdKeepFree, onSdKeep, colors) })
+            StoragePairRow({ RecordingLimit(strings.motionText(R.string.motion_free_amount), options.internalFreeGb, internalMax,
+                strings.motionText(R.string.motion_gb), colors, strings, enabled = true, identity = "motion-tablet-keep-free",
+                onChange = onInternalFree) },
+                { RecordingLimit(strings.motionText(R.string.motion_free_amount), options.sdFreeGb, sdMax,
+                    strings.motionText(R.string.motion_gb), colors, strings, enabled = true, identity = "motion-sd-keep-free",
+                    onChange = onSdFree) })
+        }
+    }
+}
+
+@Composable
+private fun StoragePairRow(left: @Composable ColumnScope.() -> Unit,
+    right: @Composable ColumnScope.() -> Unit) {
+    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(6.dp), content = left)
+        Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(6.dp), content = right)
+    }
+}
+
+@Composable
+private fun MotionStorageStatus(volume: MotionMediaLibrary.VolumeStats?, statsAvailable: Boolean,
+    colors: UiPalette, strings: UiStrings) {
+    val status = when {
+        !statsAvailable -> R.string.motion_storage_loading
+        volume == null || !volume.mounted -> R.string.motion_storage_missing
+        volume.capacityBytes <= 0 -> R.string.motion_storage_no_data
+        else -> R.string.motion_storage_ready
+    }
+    Text(strings.motionText(status), color = colors.muted, fontSize = 13.sp)
+    if (volume?.mounted == true && volume.readOnly) {
+        Text(strings.motionText(R.string.motion_storage_readonly), color = colors.yellow, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun MotionStorageSummary(volume: MotionMediaLibrary.VolumeStats?, colors: UiPalette, strings: UiStrings) {
+    fun gb(value: Long) = String.format(Locale.US, "%.1f", value.toDouble() / MOTION_GB)
+    val capacity = volume?.capacityBytes?.takeIf { it > 0 }
+    if (volume == null || capacity == null) {
+        Text(strings.motionText(R.string.motion_storage_numbers_unknown), color = colors.muted, fontSize = 13.sp)
+        return
+    }
+    val own = volume.ownBytes.takeIf { it >= 0 }
+    val oem = volume.oemRecorderBytes.takeIf { it >= 0 }
+    val other = volume.otherBytes.takeIf { it >= 0 }
+    val free = volume.freeBytes.takeIf { it >= 0 }?.let(::gb) ?: "—"
+    val usedKnown = own != null && oem != null && other != null
+    val knownRecording = listOfNotNull(own, oem).sum()
+    val message = if (usedKnown) R.string.motion_storage_numbers else R.string.motion_storage_numbers_partial
+    val used = if (usedKnown) gb(knownRecording + other!!) else if (own != null || oem != null) gb(knownRecording) else "—"
+    Text(strings.motionText(message, used, free, gb(capacity)), color = colors.muted, fontSize = 13.sp)
+}
+
+@Composable
 private fun RecordingLimit(title: String, value: Int, maximum: Int?, suffix: String,
-    colors: UiPalette, strings: UiStrings, enabled: Boolean, onChange: (Int) -> Unit) {
+    colors: UiPalette, strings: UiStrings, enabled: Boolean, identity: Any, onChange: (Int) -> Unit) {
     val upper = (maximum ?: 9999).coerceAtLeast(1)
-    NumericSetting(title, value.coerceAtMost(upper).toString(), suffix, colors,
-        { onChange(it.toFloatOrNull()?.toInt()?.coerceIn(1, upper) ?: value) },
-        1f..upper.toFloat(), enabled = enabled, adjustable = true, slider = maximum != null,
-        identity = "motion-storage-$title")
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, color = if (enabled) colors.text else colors.muted, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        NumericSetting(title, value.coerceAtMost(upper).toString(), suffix, colors,
+            { onChange(it.toFloatOrNull()?.toInt()?.coerceIn(1, upper) ?: value) },
+            1f..upper.toFloat(), enabled = enabled, adjustable = true, slider = true, showLabel = false,
+            identity = identity)
+    }
     if (maximum == null) Text(strings.motionText(R.string.motion_storage_unknown_limit), color = colors.muted, fontSize = 12.sp)
 }
 
 @Composable
 private fun MotionStorageBar(
-    volume: MotionMediaLibrary.VolumeStats,
+    volume: MotionMediaLibrary.VolumeStats?,
     active: Boolean,
     oemActive: Boolean,
     colors: UiPalette,
-    strings: UiStrings,
 ) {
-    val capacity = volume.capacityBytes.coerceAtLeast(0)
-    fun gb(value: Long) = String.format(Locale.US, "%.1f", value.toDouble() / MOTION_GB)
-    val oemKnown = volume.oemRecorderBytes >= 0
-    val usageKnown = oemKnown && volume.otherBytes >= 0
-    val knownUsed = (volume.otherBytes.coerceAtLeast(0) + volume.ownBytes.coerceAtLeast(0) +
-        if (oemKnown) volume.oemRecorderBytes else 0L).coerceAtMost(capacity)
-    Text(if (capacity > 0) strings.motionText(
-        if (usageKnown) R.string.motion_storage_numbers else R.string.motion_storage_numbers_partial,
-        gb(knownUsed), gb(volume.freeBytes.coerceAtLeast(0)), gb(capacity))
-        else strings.motionText(R.string.motion_storage_no_data),
-        color = colors.muted, fontSize = 13.sp)
+    val capacity = volume?.capacityBytes?.takeIf { it > 0 } ?: 0L
     Canvas(Modifier.fillMaxWidth().height(18.dp).clip(RoundedCornerShape(5.dp))
         .border(1.dp, colors.borderStrong, RoundedCornerShape(5.dp))) {
-        if (capacity <= 0) return@Canvas
+        if (volume == null || capacity <= 0) return@Canvas
         var x = 0f
         fun width(bytes: Long): Float = (size.width * (bytes.coerceAtLeast(0).toDouble() / capacity)).toFloat()
             .coerceAtMost(size.width - x)
@@ -435,45 +537,70 @@ private fun MotionStorageBar(
             if (hatch) motionHatch(color, x, x + segmentWidth) else drawRect(color, Offset(x, 0f), Size(segmentWidth, size.height))
             x += segmentWidth
         }
-        segment(volume.otherBytes, MotionOtherData)
-        if (oemKnown) {
+        if (volume.otherBytes >= 0) segment(volume.otherBytes, MotionOtherData)
+        if (volume.oemRecorderBytes >= 0) {
             segment(volume.oemRecorderBytes, MotionOemData)
-            if (oemActive) segment(volume.oemAllowanceBytes, MotionOemData, true)
+            if (oemActive && volume.oemAllowanceBytes >= 0) segment(volume.oemAllowanceBytes, MotionOemData, true)
         }
-        segment(volume.ownBytes, colors.yellow)
-        if (active) segment(volume.ownAllowanceBytes, colors.yellow, true)
-        segment(volume.unallocatedBytes, Color.Transparent)
+        if (volume.ownBytes >= 0) segment(volume.ownBytes, colors.yellow)
+        if (active && volume.ownAllowanceBytes >= 0) segment(volume.ownAllowanceBytes, colors.yellow, true)
+        if (volume.unallocatedBytes >= 0) segment(volume.unallocatedBytes, Color.Transparent)
     }
-    val labels = listOf(R.string.motion_storage_other, R.string.motion_storage_oem, R.string.motion_storage_own)
-    val legendColors = listOf(MotionOtherData, MotionOemData, colors.yellow)
-    val usedValues = listOf(volume.otherBytes.takeIf { it >= 0 },
-        volume.oemRecorderBytes.takeIf { it >= 0 }, volume.ownBytes.takeIf { it >= 0 })
-    val allowanceValues = listOf(null, volume.oemAllowanceBytes.takeIf { oemKnown && oemActive },
-        volume.ownAllowanceBytes.takeIf { active })
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        labels.forEachIndexed { index, label -> Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-            Canvas(Modifier.size(12.dp).border(1.dp, colors.borderStrong, RoundedCornerShape(2.dp))) {
-                drawRect(legendColors[index])
-            }
-            Spacer(Modifier.width(4.dp)); Text(strings.motionText(label), color = colors.muted, fontSize = 11.sp)
-        } }
-    }
-    listOf(usedValues, allowanceValues).forEachIndexed { row, values ->
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            values.forEachIndexed { index, bytes -> Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                Canvas(Modifier.size(12.dp).border(1.dp, colors.borderStrong, RoundedCornerShape(2.dp))) {
-                    if (row == 0) drawRect(legendColors[index])
-                    else if (bytes != null) motionHatch(legendColors[index], 0f, size.width)
+}
+
+@Composable
+private fun MotionStorageLegend(volume: MotionMediaLibrary.VolumeStats?, colors: UiPalette, strings: UiStrings) {
+    fun gb(value: Long) = String.format(Locale.US, "%.1f", value.toDouble() / MOTION_GB)
+    val labels = listOf(R.string.motion_storage_other, R.string.motion_storage_oem,
+        R.string.motion_storage_own, R.string.motion_storage_unallocated)
+    val legendColors = listOf(MotionOtherData, MotionOemData, colors.yellow, Color.Transparent)
+    val usedValues = listOf(volume?.otherBytes, volume?.oemRecorderBytes, volume?.ownBytes)
+    val growthValues = listOf(volume?.oemAllowanceBytes, volume?.ownAllowanceBytes)
+    val growthColors = listOf(MotionOemData, colors.yellow)
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        labels.chunked(2).forEach { pair ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                pair.forEach { label ->
+                    val color = legendColors[labels.indexOf(label)]
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        Canvas(Modifier.size(12.dp).border(1.dp, colors.borderStrong, RoundedCornerShape(2.dp))) {
+                            if (label != R.string.motion_storage_unallocated) drawRect(color)
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Text(strings.motionText(label), color = colors.muted, fontSize = 11.sp, maxLines = 2)
+                    }
                 }
-                Spacer(Modifier.width(4.dp))
-                Text(strings.motionText(if (row == 0) R.string.motion_storage_used_value else R.string.motion_storage_free_value,
-                    bytes?.let(::gb) ?: "—"), color = colors.muted, fontSize = 11.sp, maxLines = 2)
-            } }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            usedValues.forEachIndexed { index, bytes ->
+                StorageAmount(Modifier.weight(1f), bytes?.takeIf { it >= 0 }, legendColors[index], false, colors, strings) { gb(it) }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            growthValues.forEachIndexed { index, bytes ->
+                StorageAmount(Modifier.weight(1f), bytes?.takeIf { it >= 0 }, growthColors[index], true, colors, strings) { gb(it) }
+            }
+        }
+        Text(strings.motionText(R.string.motion_storage_unallocated_value,
+            volume?.unallocatedBytes?.takeIf { it >= 0 }?.let(::gb) ?: "—"), color = colors.muted, fontSize = 11.sp)
+        if (volume == null || volume.oemRecorderBytes < 0) {
+            Text(strings.motionText(R.string.motion_oem_bytes_unknown), color = colors.muted, fontSize = 12.sp)
         }
     }
-    Text(strings.motionText(R.string.motion_storage_unallocated_value,
-        if (usageKnown) gb(volume.unallocatedBytes) else "—"), color = colors.muted, fontSize = 11.sp)
-    if (!oemKnown) Text(strings.motionText(R.string.motion_oem_bytes_unknown), color = colors.muted, fontSize = 12.sp)
+}
+
+@Composable
+private fun StorageAmount(modifier: Modifier, bytes: Long?, color: Color, hatched: Boolean,
+    colors: UiPalette, strings: UiStrings, format: (Long) -> String) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Canvas(Modifier.size(12.dp).border(1.dp, colors.borderStrong, RoundedCornerShape(2.dp))) {
+            if (hatched) motionHatch(color, 0f, size.width) else if (color != Color.Transparent) drawRect(color)
+        }
+        Spacer(Modifier.width(4.dp))
+        Text(strings.motionText(if (hatched) R.string.motion_storage_free_value else R.string.motion_storage_used_value,
+            bytes?.let(format) ?: "—"), color = colors.muted, fontSize = 11.sp, maxLines = 2)
+    }
 }
 
 private val MotionOtherData = Color(0xFF3A3D42)
@@ -502,6 +629,11 @@ private fun MotionArchiveDialog(
     val context = LocalContext.current
     val locale = motionLocale(context)
     val zone = ZoneId.systemDefault()
+    val pickerContext = remember(context, locale) {
+        ContextThemeWrapper(context, context.theme).apply {
+            applyOverrideConfiguration(Configuration().apply { setLocales(LocaleList(locale)) })
+        }
+    }
     var month by remember { mutableStateOf(YearMonth.now()) }
     var selectedDate by remember { mutableStateOf<LocalDate?>(null) }
     var rangeFrom by remember { mutableStateOf<LocalDateTime?>(null) }
@@ -520,11 +652,17 @@ private fun MotionArchiveDialog(
     var deleteResult by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<List<MotionMediaLibrary.Entry>?>(null) }
     var pendingDeletePermission by remember { mutableStateOf<List<MotionMediaLibrary.Entry>?>(null) }
-    val rangeValid = rangeFrom != null && rangeTo != null && rangeFrom!!.isBefore(rangeTo!!)
     val rangeIncomplete = (rangeFrom == null) != (rangeTo == null)
-    val rangeInvalid = rangeFrom != null && rangeTo != null && !rangeFrom!!.isBefore(rangeTo!!)
+    val rangeBounds = if (rangeFrom != null && rangeTo != null) motionArchiveTimeRange(rangeFrom!!, rangeTo!!, zone) else null
+    val rangeInvalid = rangeFrom != null && rangeTo != null && rangeBounds == null
     val rangeFormatter = remember(locale, zone) {
         DateTimeFormatter.ofPattern("d MMM yyyy · HH:mm", locale)
+    }
+    val dayFormatter = remember(locale) { DateTimeFormatter.ofPattern("d MMM yyyy", locale) }
+    var datePicker by remember { mutableStateOf<DatePickerDialog?>(null) }
+    var timePicker by remember { mutableStateOf<TimePickerDialog?>(null) }
+    DisposableEffect(Unit) {
+        onDispose { datePicker?.dismiss(); timePicker?.dismiss() }
     }
 
     val legacyDeletePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -535,27 +673,21 @@ private fun MotionArchiveDialog(
             strings.motionText(R.string.motion_archive_delete_permission), Toast.LENGTH_LONG).show()
     }
 
-    val firstOfMonth = month.atDay(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    val firstOfNextMonth = month.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    val filterStart = if (rangeValid) rangeFrom!!.atZone(zone).toInstant().toEpochMilli()
-        else selectedDate?.atStartOfDay(zone)?.toInstant()?.toEpochMilli() ?: firstOfMonth
-    val filterEnd = if (rangeValid) rangeTo!!.atZone(zone).toInstant().toEpochMilli()
-        else selectedDate?.plusDays(1)?.atStartOfDay(zone)?.toInstant()?.toEpochMilli() ?: firstOfNextMonth
-
     fun showRangePicker(isStart: Boolean) {
         val fallback = if (isStart) {
             selectedDate?.atStartOfDay() ?: month.atDay(1).atStartOfDay()
         } else {
-            selectedDate?.plusDays(1)?.atStartOfDay() ?: LocalDateTime.now().withSecond(0).withNano(0)
+            selectedDate?.plusDays(1)?.atStartOfDay() ?: month.plusMonths(1).atDay(1).atStartOfDay()
         }
         val initial = (if (isStart) rangeFrom else rangeTo) ?: fallback
-        DatePickerDialog(context, { _, year, monthIndex, day ->
+        datePicker = DatePickerDialog(pickerContext, { _, year, monthIndex, day ->
             val date = LocalDate.of(year, monthIndex + 1, day)
-            TimePickerDialog(context, { _, hour, minute ->
+            timePicker = TimePickerDialog(pickerContext, { _, hour, minute ->
                 val chosen = date.atTime(hour, minute)
+                selectedDate = null
                 if (isStart) rangeFrom = chosen else rangeTo = chosen
-            }, initial.hour, initial.minute, true).show()
-        }, initial.year, initial.monthValue - 1, initial.dayOfMonth).show()
+            }, initial.hour, initial.minute, true).also { it.show() }
+        }, initial.year, initial.monthValue - 1, initial.dayOfMonth).also { it.show() }
     }
     LaunchedEffect(library) {
         try {
@@ -574,12 +706,12 @@ private fun MotionArchiveDialog(
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { loadFailed = true }
     }
-    LaunchedEffect(month, volumeId, sort, rangeFrom, rangeTo, refreshKey) {
+    LaunchedEffect(month, volumeId, sort, refreshKey) {
+        val bounds = motionArchiveBounds(month, null, null, null, zone) ?: return@LaunchedEffect
         try {
             monthDays = withContext(Dispatchers.IO) {
                 library.queryDays(MotionMediaLibrary.Query(
-                    if (rangeValid) rangeFrom!!.atZone(zone).toInstant().toEpochMilli() else firstOfMonth,
-                    if (rangeValid) rangeTo!!.atZone(zone).toInstant().toEpochMilli() else firstOfNextMonth,
+                    bounds.startMillis, bounds.endMillis,
                     volumeId, if (sort == 0) MotionMediaLibrary.Sort.NEWEST_FIRST else MotionMediaLibrary.Sort.OLDEST_FIRST))
             }
         } catch (cancelled: CancellationException) { throw cancelled }
@@ -587,9 +719,16 @@ private fun MotionArchiveDialog(
     }
     LaunchedEffect(month, selectedDate, rangeFrom, rangeTo, volumeId, sort, refreshKey) {
         loading = true
+        val bounds = motionArchiveBounds(month, selectedDate, rangeFrom, rangeTo, zone)
+        if (bounds == null) {
+            entries = emptyList()
+            selectedForDelete = emptySet()
+            loading = false
+            return@LaunchedEffect
+        }
         try {
             entries = withContext(Dispatchers.IO) {
-                library.query(MotionMediaLibrary.Query(filterStart, filterEnd, volumeId,
+                library.query(MotionMediaLibrary.Query(bounds.startMillis, bounds.endMillis, volumeId,
                     if (sort == 0) MotionMediaLibrary.Sort.NEWEST_FIRST else MotionMediaLibrary.Sort.OLDEST_FIRST))
             }
             selectedForDelete = selectedForDelete.intersect(entries.filter(::canDelete).map { it.contentUri.toString() }.toSet())
@@ -616,7 +755,7 @@ private fun MotionArchiveDialog(
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.fillMaxSize(.97f).clip(RoundedCornerShape(10.dp)).background(colors.surface)
             .border(1.dp, colors.borderStrong, RoundedCornerShape(10.dp)).padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(strings.motionText(R.string.motion_archive), color = colors.text, fontSize = 22.sp,
@@ -625,91 +764,119 @@ private fun MotionArchiveDialog(
                 }
                 ActionButton(strings.motionText(R.string.motion_close), colors = colors, onClick = onClose)
             }
-            val volumeChoices: List<Pair<String?, String>> = listOf(null to strings.motionText(R.string.motion_archive_all)) +
-                (stats?.volumes.orEmpty().map { it.id to it.label })
-            Segmented(volumeChoices.map { it.second }, volumeChoices.indexOfFirst { it.first == volumeId }.coerceAtLeast(0),
-                colors, Modifier.fillMaxWidth()) { volumeId = volumeChoices[it].first }
-            Segmented(listOf(strings.motionText(R.string.motion_archive_newest), strings.motionText(R.string.motion_archive_oldest)),
-                sort, colors, Modifier.fillMaxWidth()) { sort = it }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton("${strings.motionText(R.string.motion_archive_from)}: ${rangeFrom?.format(rangeFormatter)
-                    ?: strings.motionText(R.string.motion_archive_choose)}", colors = colors,
-                    modifier = Modifier.weight(1f)) { showRangePicker(true) }
-                ActionButton("${strings.motionText(R.string.motion_archive_to)}: ${rangeTo?.format(rangeFormatter)
-                    ?: strings.motionText(R.string.motion_archive_choose)}", colors = colors,
-                    modifier = Modifier.weight(1f)) { showRangePicker(false) }
-                if (rangeFrom != null || rangeTo != null) ActionButton(
-                    strings.motionText(R.string.motion_archive_clear_range), colors = colors) {
-                    rangeFrom = null
-                    rangeTo = null
-                }
-            }
-            if (rangeIncomplete) Text(strings.motionText(R.string.motion_archive_range_incomplete),
-                color = colors.yellow, fontSize = 12.sp)
-            if (rangeInvalid) Text(strings.motionText(R.string.motion_archive_range_invalid),
-                color = colors.yellow, fontSize = 12.sp)
-            CalendarPicker(month, selectedDate, monthDays, locale, colors, strings,
-                onMonth = { month = it; selectedDate = null }, onDate = { selectedDate = it })
-            if (selectedDate != null) {
-                val day = monthDays.firstOrNull { it.date == selectedDate }
-                if (day != null) Text(strings.motionText(R.string.motion_archive_events,
-                    day.entryCount, day.yellowEvents, day.redEvents), color = colors.muted, fontSize = 13.sp)
-            }
-            val mounted = stats?.volumes?.any { it.mounted } == true
-            if (!mounted && !loadFailed) Text(strings.motionText(R.string.motion_archive_no_storage),
-                color = colors.yellow, fontSize = 14.sp)
-            if (loadFailed) Text(strings.motionText(R.string.motion_storage_unreadable), color = colors.yellow, fontSize = 14.sp)
-            if (selectedForDelete.isNotEmpty()) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(strings.motionText(R.string.motion_archive_protected), Modifier.weight(1f), color = colors.muted, fontSize = 12.sp)
-                    ActionButton(strings.motionText(R.string.motion_delete), Icons.Outlined.Delete, colors,
-                        destructive = true) { confirmDelete = true }
-                }
-            }
-            if (entries.isEmpty()) {
-                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Text(if (loading) strings.motionText(R.string.motion_storage_loading)
-                        else strings.motionText(R.string.motion_archive_empty), color = colors.muted, fontSize = 15.sp)
-                }
-            } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(entries, key = { it.contentUri.toString() }) { entry ->
-                    MotionArchiveRow(entry, selectedForDelete.contains(entry.contentUri.toString()), colors, strings,
-                        onPlay = {
-                            if (entry.available) playerEntry = entry
-                            else Toast.makeText(context, strings.motionText(R.string.motion_archive_unavailable), Toast.LENGTH_SHORT).show()
-                        }, onToggleDelete = {
-                            val id = entry.contentUri.toString()
-                            selectedForDelete = if (id in selectedForDelete) selectedForDelete - id else selectedForDelete + id
-                        }, locale = locale, zone = zone)
-                }
-            }
-            if (confirmDelete) {
-                val chosen = entries.filter { it.contentUri.toString() in selectedForDelete && canDelete(it) }
-                Dialog(onDismissRequest = { confirmDelete = false }) {
-                    Column(Modifier.fillMaxWidth(.85f).clip(RoundedCornerShape(10.dp)).background(colors.surface)
-                        .border(1.dp, colors.borderStrong, RoundedCornerShape(10.dp)).padding(18.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(strings.motionText(R.string.motion_archive_delete_confirm, chosen.size),
-                            color = colors.text, fontSize = 17.sp)
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            ActionButton(strings.motionText(R.string.motion_delete), colors = colors,
-                                modifier = Modifier.weight(1f), destructive = true) {
-                                confirmDelete = false
-                                if (chosen.isNotEmpty()) {
-                                    if (Build.VERSION.SDK_INT < 29 && ContextCompat.checkSelfPermission(
-                                            context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                                        pendingDeletePermission = chosen
-                                        legacyDeletePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                                    } else pendingDelete = chosen
+            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
+                val calendarWidth = minOf(280.dp, maxWidth / 3)
+                Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Column(Modifier.width(calendarWidth).fillMaxHeight().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CalendarPicker(month, selectedDate, monthDays.map { it.date }.toSet(), locale, colors, strings,
+                            onMonth = { month = it; selectedDate = null; rangeFrom = null; rangeTo = null },
+                            onDate = { selectedDate = it; rangeFrom = null; rangeTo = null })
+                        Text(strings.motionText(R.string.motion_archive_days_hint), color = colors.muted, fontSize = 12.sp)
+                        ActionButton(strings.motionText(R.string.motion_archive_month), colors = colors,
+                            modifier = Modifier.fillMaxWidth()) { selectedDate = null; rangeFrom = null; rangeTo = null }
+                        ActionButton("${strings.motionText(R.string.motion_archive_from)}: ${rangeFrom?.format(rangeFormatter) ?: "—"}",
+                            colors = colors, modifier = Modifier.fillMaxWidth(), maxLines = 2) { showRangePicker(true) }
+                        ActionButton("${strings.motionText(R.string.motion_archive_to)}: ${rangeTo?.format(rangeFormatter) ?: "—"}",
+                            colors = colors, modifier = Modifier.fillMaxWidth(), maxLines = 2) { showRangePicker(false) }
+                        ActionButton(strings.motionText(R.string.motion_archive_clear_range), colors = colors,
+                            modifier = Modifier.fillMaxWidth(), enabled = rangeFrom != null || rangeTo != null) {
+                            rangeFrom = null; rangeTo = null
+                        }
+                        if (rangeIncomplete || rangeInvalid) Text(strings.motionText(
+                            if (rangeIncomplete) R.string.motion_archive_range_incomplete else R.string.motion_archive_range_invalid),
+                            color = colors.yellow, fontSize = 12.sp)
+                    }
+                    Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val volumeChoices: List<Pair<String?, String>> = listOf(null to strings.motionText(R.string.motion_archive_all)) +
+                            stats?.volumes.orEmpty().map { volume ->
+                                val label = when {
+                                    volume.primary -> strings.motionText(R.string.motion_storage_internal)
+                                    volume.removable -> strings.motionText(R.string.motion_storage_sd)
+                                    else -> volume.label
+                                }
+                                volume.id to label
+                            }
+                        Segmented(volumeChoices.map { it.second }, volumeChoices.indexOfFirst { it.first == volumeId }.coerceAtLeast(0),
+                            colors, Modifier.fillMaxWidth()) { volumeId = volumeChoices[it].first }
+                        Segmented(listOf(strings.motionText(R.string.motion_archive_newest), strings.motionText(R.string.motion_archive_oldest)),
+                            sort, colors, Modifier.fillMaxWidth()) { sort = it }
+                        val activeRange = rangeFrom != null || rangeTo != null
+                        val heading = when {
+                            rangeBounds != null -> "${rangeFrom!!.format(rangeFormatter)} — ${rangeTo!!.format(rangeFormatter)}"
+                            activeRange -> strings.motionText(if (rangeIncomplete) R.string.motion_archive_range_incomplete
+                                else R.string.motion_archive_range_invalid)
+                            selectedDate != null -> selectedDate!!.format(dayFormatter)
+                            else -> month.format(DateTimeFormatter.ofPattern("LLLL yyyy", locale))
+                        }
+                        Text(heading, color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        selectedDate?.let { date -> monthDays.firstOrNull { it.date == date }?.let { day ->
+                            Text(strings.motionText(R.string.motion_archive_events,
+                                day.entryCount, day.yellowEvents, day.redEvents), color = colors.muted, fontSize = 13.sp)
+                        } }
+                        val mounted = stats?.volumes?.any { it.mounted } == true
+                        if (!mounted && !loadFailed) Text(strings.motionText(R.string.motion_archive_no_storage),
+                            color = colors.yellow, fontSize = 14.sp)
+                        if (loadFailed) Text(strings.motionText(R.string.motion_storage_unreadable), color = colors.yellow, fontSize = 14.sp)
+                        deleteResult?.let { Text(it, color = colors.muted, fontSize = 12.sp) }
+                        if (selectedForDelete.isNotEmpty()) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(strings.motionText(R.string.motion_archive_protected), Modifier.weight(1f),
+                                    color = colors.muted, fontSize = 12.sp)
+                                ActionButton(strings.motionText(R.string.motion_delete), Icons.Outlined.Delete, colors,
+                                    destructive = true) { confirmDelete = true }
+                            }
+                        }
+                        if (entries.isEmpty()) {
+                            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                Text(when {
+                                    loading -> strings.motionText(R.string.motion_storage_loading)
+                                    rangeIncomplete -> strings.motionText(R.string.motion_archive_range_incomplete)
+                                    rangeInvalid -> strings.motionText(R.string.motion_archive_range_invalid)
+                                    else -> strings.motionText(R.string.motion_archive_empty)
+                                }, color = colors.muted, fontSize = 15.sp, textAlign = TextAlign.Center)
+                            }
+                        } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(entries, key = { it.contentUri.toString() }) { entry ->
+                                MotionArchiveRow(entry, selectedForDelete.contains(entry.contentUri.toString()), colors, strings,
+                                    onPlay = {
+                                        if (entry.available) playerEntry = entry
+                                        else Toast.makeText(context, strings.motionText(R.string.motion_archive_unavailable), Toast.LENGTH_SHORT).show()
+                                    }, onToggleDelete = {
+                                        val id = entry.contentUri.toString()
+                                        selectedForDelete = if (id in selectedForDelete) selectedForDelete - id else selectedForDelete + id
+                                    }, locale = locale, zone = zone)
+                            }
+                        }
+                        if (confirmDelete) {
+                            val chosen = entries.filter { it.contentUri.toString() in selectedForDelete && canDelete(it) }
+                            Dialog(onDismissRequest = { confirmDelete = false }) {
+                                Column(Modifier.fillMaxWidth(.85f).clip(RoundedCornerShape(10.dp)).background(colors.surface)
+                                    .border(1.dp, colors.borderStrong, RoundedCornerShape(10.dp)).padding(18.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Text(strings.motionText(R.string.motion_archive_delete_confirm, chosen.size),
+                                        color = colors.text, fontSize = 17.sp)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        ActionButton(strings.motionText(R.string.motion_delete), colors = colors,
+                                            modifier = Modifier.weight(1f), destructive = true) {
+                                            confirmDelete = false
+                                            if (chosen.isNotEmpty()) {
+                                                if (Build.VERSION.SDK_INT < 29 && ContextCompat.checkSelfPermission(
+                                                        context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                                                    pendingDeletePermission = chosen
+                                                    legacyDeletePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                                } else pendingDelete = chosen
+                                            }
+                                        }
+                                        ActionButton(strings.motionText(R.string.cancel), colors = colors,
+                                            modifier = Modifier.weight(1f)) { confirmDelete = false }
+                                    }
                                 }
                             }
-                            ActionButton(strings.motionText(R.string.cancel), colors = colors,
-                                modifier = Modifier.weight(1f)) { confirmDelete = false }
                         }
                     }
                 }
             }
-            deleteResult?.let { Text(it, color = colors.muted, fontSize = 12.sp) }
         }
     }
     playerEntry?.let { entry -> MotionPlayerDialog(entry, colors, strings, locale) { playerEntry = null } }
@@ -722,52 +889,59 @@ private fun canDelete(entry: MotionMediaLibrary.Entry) =
 @Composable
 private fun CalendarPicker(
     month: YearMonth,
-    selected: LocalDate?,
-    days: List<MotionMediaLibrary.Day>,
+    selectedDate: LocalDate?,
+    activeDays: Set<LocalDate>,
     locale: Locale,
     colors: UiPalette,
     strings: UiStrings,
     onMonth: (YearMonth) -> Unit,
     onDate: (LocalDate) -> Unit,
 ) {
-    val formatter = remember(locale) { DateTimeFormatter.ofPattern("LLLL yyyy", locale) }
-    val weekdayFormatter = remember(locale) { DateTimeFormatter.ofPattern("EEEEE", locale) }
     val firstDay = WeekFields.of(locale).firstDayOfWeek
-    val orderedWeek = (0..6).map { DayOfWeek.of((firstDay.value - 1 + it) % 7 + 1) }
-    val offset = (month.atDay(1).dayOfWeek.value - firstDay.value + 7) % 7
-    val cells = (List(offset) { null } + (1..month.lengthOfMonth()).map { month.atDay(it) }).chunked(7)
-    val counts = days.associateBy { it.date }
-    Section(strings.motionText(R.string.motion_date), colors) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            ActionButton("‹", colors = colors, modifier = Modifier.size(44.dp)) { onMonth(month.minusMonths(1)) }
-            Text(month.format(formatter), Modifier.weight(1f), color = colors.text, textAlign = TextAlign.Center,
-                fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-            ActionButton("›", colors = colors, modifier = Modifier.size(44.dp)) { onMonth(month.plusMonths(1)) }
+    val weeks = remember(month, firstDay) { motionCalendarWeeks(month, firstDay) }
+    val yearFormatter = remember(locale) { DateTimeFormatter.ofPattern("yyyy", locale) }
+    listOf(month.year.toString() to 12L, month.month.getDisplayName(TextStyle.FULL_STANDALONE, locale) to 1L)
+        .forEachIndexed { index, (heading, step) ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                ActionButton("‹", colors = colors, height = 40.dp, modifier = Modifier.width(40.dp)
+                    .semantics { contentDescription = strings.motionText(
+                        if (index == 0) R.string.motion_archive_prev_year else R.string.motion_archive_prev_month) }) {
+                    onMonth(month.minusMonths(step))
+                }
+                Text(if (index == 0) yearFormatter.format(month.atDay(1)) else heading,
+                    Modifier.weight(1f), color = colors.text, fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                ActionButton("›", colors = colors, height = 40.dp, modifier = Modifier.width(40.dp)
+                    .semantics { contentDescription = strings.motionText(
+                        if (index == 0) R.string.motion_archive_next_year else R.string.motion_archive_next_month) }) {
+                    onMonth(month.plusMonths(step))
+                }
+            }
         }
+    Row(Modifier.fillMaxWidth()) {
+        repeat(7) { offset ->
+            Text(DayOfWeek.of((firstDay.value - 1 + offset) % 7 + 1).getDisplayName(TextStyle.SHORT, locale),
+                Modifier.weight(1f), color = colors.muted, textAlign = TextAlign.Center, fontSize = 11.sp)
+        }
+    }
+    weeks.forEach { week ->
         Row(Modifier.fillMaxWidth()) {
-            orderedWeek.forEach { weekday -> Text(weekdayFormatter.format(weekday), Modifier.weight(1f),
-                color = colors.muted, textAlign = TextAlign.Center, fontSize = 12.sp) }
-        }
-        cells.forEach { week -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
             week.forEach { date ->
-                if (date == null) Spacer(Modifier.weight(1f).height(38.dp)) else {
-                    val day = counts[date]
-                    val chosen = date == selected
-                    Column(Modifier.weight(1f).height(38.dp).clip(RoundedCornerShape(5.dp))
-                        .background(if (chosen) colors.accent else Color.Transparent)
-                        .clickable(role = Role.Button) { onDate(date) }
-                        .semantics { contentDescription = "${date.format(DateTimeFormatter.ISO_LOCAL_DATE)} ${day?.entryCount ?: 0}" },
-                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Text(date.dayOfMonth.toString(), color = if (chosen) Color.White else colors.text, fontSize = 12.sp)
-                        if (day != null) Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                            if (day.yellowEvents > 0) Box(Modifier.size(4.dp).background(colors.yellow, RoundedCornerShape(4.dp)))
-                            if (day.redEvents > 0) Box(Modifier.size(4.dp).background(colors.red, RoundedCornerShape(4.dp)))
-                        }
+                val active = date != null && date in activeDays
+                val chosen = date != null && date == selectedDate
+                Column(Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(5.dp))
+                    .background(if (chosen) colors.accent else Color.Transparent)
+                    .then(if (date == null || !active) Modifier else Modifier.clickable(role = Role.Button) { onDate(date) }
+                        .semantics { contentDescription = date.format(DateTimeFormatter.ISO_LOCAL_DATE); selected = chosen }),
+                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    if (date != null) {
+                        Text(date.dayOfMonth.toString(), color = if (chosen) Color.White else if (active) colors.text
+                            else colors.muted.copy(alpha = .5f), fontSize = 13.sp)
+                        if (active) Box(Modifier.size(4.dp).background(colors.yellow, RoundedCornerShape(4.dp)))
                     }
                 }
             }
-            repeat((7 - week.size).coerceAtLeast(0)) { Spacer(Modifier.weight(1f).height(38.dp)) }
-        } }
+        }
     }
 }
 
@@ -997,9 +1171,16 @@ private fun MotionCompositionGrid(order: List<Int>, colors: UiPalette, strings: 
                                 }
                             }
                         }, contentAlignment = Alignment.Center) {
-                        Text(label, color = colors.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
-                            textAlign = TextAlign.Center)
-                        CameraDirectionIcon(source, colors, Modifier.align(Alignment.TopEnd).padding(8.dp).size(38.dp))
+                        BoxWithConstraints(Modifier.fillMaxSize()) {
+                            key(source) { MotionCameraTile(source, Modifier.fillMaxSize()) }
+                            Image(painterResource(MotionDirectionIcon.drawableFor(source)), contentDescription = null,
+                                modifier = Modifier.align(Alignment.TopStart)
+                                    .padding(top = maxHeight * .0083f, start = maxWidth * .0083f)
+                                    .size(maxWidth * .05f))
+                            Text(label, color = colors.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                                textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.BottomCenter)
+                                    .background(colors.surface.copy(alpha = .75f)).padding(horizontal = 8.dp, vertical = 2.dp))
+                        }
                     }
                 }
             }
@@ -1008,29 +1189,12 @@ private fun MotionCompositionGrid(order: List<Int>, colors: UiPalette, strings: 
 }
 
 @Composable
-private fun CameraDirectionIcon(camera: Int, colors: UiPalette, modifier: Modifier) {
-    Canvas(modifier) {
-        drawRoundRect(colors.muted, Offset(size.width * .34f, size.height * .22f),
-            Size(size.width * .32f, size.height * .56f), CornerRadius(size.width * .08f), style = Stroke(2.dp.toPx()))
-        val arrow = Path().apply {
-            val points = when (camera) {
-                0 -> listOf(Offset(.5f, 0f), Offset(.23f, .18f), Offset(.77f, .18f))
-                1 -> listOf(Offset(.5f, 1f), Offset(.23f, .82f), Offset(.77f, .82f))
-                2 -> listOf(Offset(0f, .5f), Offset(.28f, .24f), Offset(.28f, .76f))
-                else -> listOf(Offset(1f, .5f), Offset(.72f, .24f), Offset(.72f, .76f))
-            }
-            moveTo(points[0].x * size.width, points[0].y * size.height)
-            points.drop(1).forEach { lineTo(it.x * size.width, it.y * size.height) }; close()
-        }
-        drawPath(arrow, colors.yellow)
-    }
-}
-
-@Composable
 private fun ActionButton(text: String, icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     colors: UiPalette, modifier: Modifier = Modifier, primary: Boolean = false, destructive: Boolean = false,
-    enabled: Boolean = true, mainBackground: Boolean = false, onClick: () -> Unit) =
-    ProductionActionButton(text, colors, modifier, icon, primary, destructive, enabled, mainBackground, onClick = onClick)
+    enabled: Boolean = true, mainBackground: Boolean = false, height: androidx.compose.ui.unit.Dp = 44.dp,
+    maxLines: Int = 1, onClick: () -> Unit) =
+    ProductionActionButton(text, colors, modifier, icon, primary, destructive, enabled, mainBackground,
+        height = height, maxLines = maxLines, onClick = onClick)
 
 private fun UiStrings.motionText(id: Int, vararg args: Any): String {
     val value = resource(id)

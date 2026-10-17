@@ -1487,10 +1487,10 @@ public final class CameraHelperService extends Service {
         GuardRecovery.sessionStarted(this);
         helperRuntimeStarted = true;
         CameraHelperMain.DiscoveryResult discoveryResult = helper.discoverCameraWithResult();
-        helper.startGuardRuntime();
         if (motionRuntime == null)
             motionRuntime = new MotionRuntime(this, cameraRuntime, this::acceptHelperLine);
         else motionRuntime.refresh();
+        helper.startGuardRuntime();
         helper.configureAvas();
         helper.configureCalls(CallsRuntime.requiresRescueSubscription(this));
 

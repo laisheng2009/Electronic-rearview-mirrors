@@ -47,6 +47,11 @@ final class TurnSignalController {
     private final Consumer<String> shellEventSink;
     private final BiConsumer<String, Object[]> eventSink;
     private final SharedPreferences settings;
+    private final SharedPreferences.OnSharedPreferenceChangeListener motionTelemetrySettingsChanged =
+            (preferences, key) -> {
+                if ("motion_monitoring_enabled".equals(key))
+                    configureMotionTelemetry(preferences.getBoolean(key, false));
+            };
     private final AvasAudioLibrary avasLibrary;
     private final String apkMarker;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -135,6 +140,7 @@ final class TurnSignalController {
         this.shellEventSink = shellEventSink;
         this.eventSink = eventSink;
         settings = this.context.getSharedPreferences("settings", Context.MODE_PRIVATE);
+        settings.registerOnSharedPreferenceChangeListener(motionTelemetrySettingsChanged);
         avasLibrary = cameraRuntimeHost ? null : new AvasAudioLibrary(this.context, settings);
         apkMarker = currentApkMarker(this.context);
         if (!cameraRuntimeHost) migrateLegacyLatchState();
@@ -195,6 +201,7 @@ final class TurnSignalController {
             desiredAvasAudition = "";
             desiredAvasMicrophone = "";
         }
+        settings.unregisterOnSharedPreferenceChangeListener(motionTelemetrySettingsChanged);
         pendingAvas.clear();
         handler.removeCallbacks(pingRunnable);
         // Foreground RSA belongs to the process session, not this controller's lifetime.
@@ -385,6 +392,27 @@ final class TurnSignalController {
             }
             syncAvas(value);
         });
+    }
+
+    private void configureMotionTelemetry(boolean enabled) {
+        if (stopped || cameraRuntimeHost) return;
+        try {
+            worker.execute(() -> {
+                if (stopped) return;
+                IBinder value = helper;
+                if (!healthy || value == null || !value.isBinderAlive()) return;
+                try {
+                    transactMotionTelemetry(value, enabled);
+                } catch (Throwable failure) {
+                    clearHelper(value);
+                    healthy = false;
+                    primaryError = "motion_telemetry_config_failed: " + summary(failure);
+                    emit("helper_ping_failed", "error", primaryError);
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
+            // Shutdown owns the helper link after the worker begins draining.
+        }
     }
 
     void configureCalls(boolean needed) {
@@ -1718,6 +1746,8 @@ final class TurnSignalController {
                     TurnSignalShellProtocol.TX_CONFIGURE_LOGGING);
             transactAttach(value, GuardRecovery.shouldRecover(context));
             transactCallback(value);
+            transactMotionTelemetry(value,
+                    settings.getBoolean("motion_monitoring_enabled", false));
             transactConfig(value);
             transactMusicConfig(value,
                     settings.getBoolean("music_visualizer_enabled", false),
@@ -2114,6 +2144,20 @@ final class TurnSignalController {
             data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
             data.writeStrongBinder(callback);
             requireTransact(value, TurnSignalShellProtocol.TX_REGISTER_CALLBACK, data, reply);
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    private void transactMotionTelemetry(IBinder value, boolean enabled) throws Exception {
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
+            data.writeInt(enabled ? 1 : 0);
+            requireTransact(value, TurnSignalShellProtocol.TX_SET_MOTION_TELEMETRY,
+                    data, reply);
         } finally {
             data.recycle();
             reply.recycle();

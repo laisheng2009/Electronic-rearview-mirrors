@@ -377,6 +377,8 @@ final class CameraRuntimeClient {
                 || code == CameraHelperMain.TX_OPEN_STOCK_AVM || code == CameraHelperMain.TX_OPEN_DIRECT
                 || code == CameraHelperMain.TX_OPEN_REVERSE_PREVIEW
                 || code == CameraHelperMain.TX_OPEN_REVERSE_PREVIEW_TARGETED
+                || code == CameraHelperMain.TX_OPEN_MOTION_PREVIEW
+                || code == CameraHelperMain.TX_CLOSE_MOTION_PREVIEW
                 || code == CameraHelperMain.TX_UPDATE_VISUALS
                 || code == CameraHelperMain.TX_UPDATE_REVERSE_VISIBILITY;
     }

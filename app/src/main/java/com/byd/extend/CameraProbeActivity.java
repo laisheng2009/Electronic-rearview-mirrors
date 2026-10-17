@@ -113,6 +113,7 @@ import com.byd.extend.ui.MirrorBackendActionKind;
 import com.byd.extend.ui.MirrorGeometryUiState;
 import com.byd.extend.ui.MirrorUiState;
 import com.byd.extend.ui.CropUiState;
+import com.byd.extend.ui.motion.MotionCompositionPreviewView;
 
 import org.json.JSONObject;
 
@@ -136,7 +137,8 @@ import java.util.concurrent.Executors;
 
 public final class CameraProbeActivity extends ComponentActivity
         implements SurfaceHolder.Callback, BlindSpotCameraView.Callback,
-        ReverseCameraCompositionView.Callback, ProductionUiBackend {
+        ReverseCameraCompositionView.Callback, MotionCompositionPreviewView.Listener,
+        ProductionUiBackend {
     private static final String TAG = "BydExtend";
     private static final String OPEN_METEO_URL = "https://open-meteo.com/";
     private static final int CAMERA_PERMISSION_REQUEST = 10;
@@ -490,6 +492,30 @@ public final class CameraProbeActivity extends ComponentActivity
             new EnumMap<>(CameraHostKind.class);
     private final EnumMap<CameraHostKind, CameraHostSlot> productionCameraSlots =
             new EnumMap<>(CameraHostKind.class);
+    private final EnumMap<CameraHostKind, MotionPreviewOutput> motionPreviewOutputs =
+            new EnumMap<>(CameraHostKind.class);
+
+    private static final class MotionPreviewOutput {
+        final CameraHostKind kind;
+        final int direction;
+        final MotionCompositionPreviewView view;
+        final int requestId;
+        Surface surface;
+        boolean openQueued;
+        boolean opened;
+        boolean closeQueued;
+        boolean releaseSurfaceWhenClosed;
+
+        MotionPreviewOutput(CameraHostKind kind, int direction,
+                MotionCompositionPreviewView view, Surface surface, int requestId) {
+            this.kind = kind;
+            this.direction = direction;
+            this.view = view;
+            this.surface = surface;
+            this.requestId = requestId;
+        }
+    }
+
     /** Compose receives these roots; camera state always stays on the child owner views. */
     private FrameLayout productionPlacementHost;
     private CropMaskView productionPlacementCropMask;
@@ -1161,6 +1187,7 @@ public final class CameraProbeActivity extends ComponentActivity
         refreshProductionHeader();
         if (!helperBound) startAndBindHelperService();
         activityResumed = true;
+        openPendingMotionPreviews();
         enqueueHelperCallbackRegistration(helperCallbackRegistration.start());
         publishReverseOwnerPresence();
         ensureAutomaticPreviewInputs();
@@ -1195,6 +1222,7 @@ public final class CameraProbeActivity extends ComponentActivity
             armResumeAutoPreviewIfNeeded();
         }
         activityResumed = false;
+        closeMotionCompositionPreviews("activity_paused", false);
         reverseSteeringSample = ReverseSteeringSample.UNKNOWN;
         applyReverseSteering();
         publishReverseOwnerIneligible();
@@ -1212,6 +1240,7 @@ public final class CameraProbeActivity extends ComponentActivity
         if (hasFocus) {
             finishOverlaySettingsReturn();
             advanceStartupAuthorizationFlow();
+            openPendingMotionPreviews();
         } else {
             cancelPendingBackgroundStartSettings();
             cancelPendingForegroundAdbAuthorization();
@@ -1247,6 +1276,7 @@ public final class CameraProbeActivity extends ComponentActivity
             maybeOpenProductionPreview();
             maybeOpenCalibrationCamera();
             maybeOpenReversePreview();
+            openPendingMotionPreviews();
         } else if (requestCode == LOCATION_PERMISSION_REQUEST) {
             weatherLocationPermissionInFlight = false;
             boolean granted = false;
@@ -1313,6 +1343,7 @@ public final class CameraProbeActivity extends ComponentActivity
         retryStockDebug = false;
         cameraShellRecoveryPending = false;
         if (!shutdownRequested) {
+            closeMotionCompositionPreviews("activity_stopped", false);
             if (shouldIssueActivityStoppedClose(cameraTransition.pending())) {
                 activityClosePending = activityClosePending
                         || closeCamera("activity_stopped");
@@ -2549,6 +2580,7 @@ public final class CameraProbeActivity extends ComponentActivity
         CameraHelperService.reportAvasStatus(this);
         updateControls();
         maybeOpenProductionPreview();
+        openPendingMotionPreviews();
         enqueueHelperCallbackRegistration(registrationTarget);
     }
 
@@ -6488,6 +6520,202 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     @Override
+    public void onMotionPreviewSurfaceAvailable(
+            MotionCompositionPreviewView view, Surface surface) {
+        CameraHostKind kind = motionPreviewKind(view.getDirection());
+        if (productionCameraHosts.get(kind) != view || surface == null || !surface.isValid()) {
+            if (surface != null) surface.release();
+            return;
+        }
+        MotionPreviewOutput previous = motionPreviewOutputs.get(kind);
+        if (previous != null && previous.view == view && previous.surface == surface) return;
+        if (previous != null) releaseMotionPreviewOutput(previous, "motion_preview_surface_replaced");
+        MotionPreviewOutput output = new MotionPreviewOutput(
+                kind, view.getDirection(), view, surface, nextActivityCameraRequestId());
+        motionPreviewOutputs.put(kind, output);
+        view.showUnavailable();
+        requestCameraPermissionIfNeeded();
+        openPendingMotionPreviews();
+    }
+
+    @Override
+    public void onMotionPreviewSurfaceDestroyed(MotionCompositionPreviewView view) {
+        MotionPreviewOutput output = motionPreviewOutputs.get(motionPreviewKind(view.getDirection()));
+        if (output != null && output.view == view) {
+            releaseMotionPreviewOutput(output, "motion_preview_surface_destroyed");
+        }
+    }
+
+    private void openPendingMotionPreviews() {
+        if (!activityResumed || activityDestroyed || shutdownRequested || helper == null) return;
+        if (checkSelfPermission(Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            if (!motionPreviewOutputs.isEmpty()) requestCameraPermissionIfNeeded();
+            return;
+        }
+        if (!cameraDiscovered) return;
+        IBinder current = helper;
+        for (MotionPreviewOutput output : new ArrayList<>(motionPreviewOutputs.values())) {
+            if (output.opened || output.openQueued || output.closeQueued
+                    || output.releaseSurfaceWhenClosed || output.surface == null
+                    || !output.surface.isValid()
+                    || productionCameraHosts.get(output.kind) != output.view) continue;
+            output.openQueued = true;
+            output.view.showUnavailable();
+            ipcExecutor.execute(() -> transactOpenMotionPreview(current, output));
+        }
+    }
+
+    private void closeMotionCompositionPreviews(String reason, boolean releaseSurface) {
+        for (MotionPreviewOutput output : new ArrayList<>(motionPreviewOutputs.values())) {
+            closeMotionPreviewOutput(output, reason, releaseSurface);
+        }
+    }
+
+    private void releaseMotionPreviewOutput(MotionPreviewOutput output, String reason) {
+        output.releaseSurfaceWhenClosed = true;
+        motionPreviewOutputs.remove(output.kind, output);
+        closeMotionPreviewOutput(output, reason, true);
+    }
+
+    private void closeMotionPreviewOutput(
+            MotionPreviewOutput output, String reason, boolean releaseSurface) {
+        if (releaseSurface) output.releaseSurfaceWhenClosed = true;
+        output.view.showUnavailable();
+        if (output.closeQueued) return;
+        if (!output.opened && !output.openQueued) {
+            finishMotionPreviewClose(output);
+            return;
+        }
+        IBinder current = helper;
+        if (current == null) {
+            output.opened = false;
+            output.openQueued = false;
+            finishMotionPreviewClose(output);
+            return;
+        }
+        output.closeQueued = true;
+        output.opened = false;
+        output.openQueued = false;
+        ipcExecutor.execute(() -> transactCloseMotionPreview(current, output, reason));
+    }
+
+    private void finishMotionPreviewClose(MotionPreviewOutput output) {
+        output.closeQueued = false;
+        if (output.releaseSurfaceWhenClosed) {
+            if (output.surface != null) output.surface.release();
+            output.surface = null;
+        } else if (activityResumed && motionPreviewOutputs.get(output.kind) == output) {
+            openPendingMotionPreviews();
+        }
+    }
+
+    private void transactOpenMotionPreview(IBinder current, MotionPreviewOutput output) {
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(CameraHelperMain.DESCRIPTOR);
+            CameraGpuOutput.writeSurface(data, output.surface);
+            data.writeInt(output.direction);
+            data.writeInt(output.requestId);
+            requireTransaction(current, CameraHelperMain.TX_OPEN_MOTION_PREVIEW, data, reply);
+            String response = reply.readString();
+            JSONObject json = new JSONObject(response);
+            String kind = json.optString("kind");
+            boolean opened = "camera_opened".equals(kind);
+            record("motion_preview_open", "direction", output.direction,
+                    "request_id", output.requestId, "result", kind,
+                    "error", opened ? "" : json.optString("error"));
+            runOnUiThread(() -> {
+                output.openQueued = false;
+                if (output.closeQueued || output.releaseSurfaceWhenClosed
+                        || motionPreviewOutputs.get(output.kind) != output) return;
+                output.opened = opened;
+                if (!opened) output.view.showUnavailable();
+            });
+        } catch (Throwable error) {
+            record("motion_preview_open_error", "direction", output.direction,
+                    "request_id", output.requestId, "error", error.toString());
+            runOnUiThread(() -> {
+                output.openQueued = false;
+                output.opened = false;
+                output.view.showUnavailable();
+            });
+        } finally {
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    private void transactCloseMotionPreview(
+            IBinder current, MotionPreviewOutput output, String reason) {
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(CameraHelperMain.DESCRIPTOR);
+            data.writeInt(output.direction);
+            data.writeInt(output.requestId);
+            requireTransaction(current, CameraHelperMain.TX_CLOSE_MOTION_PREVIEW, data, reply);
+            String response = reply.readString();
+            String kind = new JSONObject(response).optString("kind");
+            boolean closed = "camera_closed".equals(kind) || "already_closed".equals(kind)
+                    || "camera_close_ignored".equals(kind);
+            record("motion_preview_close", "direction", output.direction,
+                    "request_id", output.requestId, "reason", reason,
+                    "result", kind, "closed", closed);
+            runOnUiThread(() -> {
+                if (closed) finishMotionPreviewClose(output);
+                else {
+                    output.closeQueued = false;
+                    if (!output.releaseSurfaceWhenClosed && activityResumed
+                            && motionPreviewOutputs.get(output.kind) == output) {
+                        openPendingMotionPreviews();
+                    }
+                }
+            });
+        } catch (Throwable error) {
+            record("motion_preview_close_error", "direction", output.direction,
+                    "request_id", output.requestId, "reason", reason,
+                    "error", error.toString());
+            runOnUiThread(() -> {
+                output.closeQueued = false;
+                if (activityResumed && !output.releaseSurfaceWhenClosed
+                        && motionPreviewOutputs.get(output.kind) == output) {
+                    openPendingMotionPreviews();
+                }
+            });
+        } finally {
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    private static boolean isMotionPreviewKind(CameraHostKind kind) {
+        return kind == CameraHostKind.MotionFrontPreview
+                || kind == CameraHostKind.MotionRearPreview
+                || kind == CameraHostKind.MotionLeftPreview
+                || kind == CameraHostKind.MotionRightPreview;
+    }
+
+    private static CameraHostKind motionPreviewKind(int direction) {
+        switch (direction) {
+            case 0: return CameraHostKind.MotionFrontPreview;
+            case 1: return CameraHostKind.MotionRearPreview;
+            case 2: return CameraHostKind.MotionLeftPreview;
+            case 3: return CameraHostKind.MotionRightPreview;
+            default: throw new IllegalArgumentException("Motion direction must be in range 0..3");
+        }
+    }
+
+    private static int motionPreviewDirection(CameraHostKind kind) {
+        if (kind == CameraHostKind.MotionFrontPreview) return 0;
+        if (kind == CameraHostKind.MotionRearPreview) return 1;
+        if (kind == CameraHostKind.MotionLeftPreview) return 2;
+        if (kind == CameraHostKind.MotionRightPreview) return 3;
+        throw new IllegalArgumentException("Not a Motion preview host: " + kind);
+    }
+
+    @Override
     public View obtainProductionCameraHost(CameraHostSlot slot) {
         CameraHostKind kind = slot.getKind();
         if (isProductionCalibrationKind(kind)) ensureProductionCalibrationHosts();
@@ -6501,7 +6729,10 @@ public final class CameraProbeActivity extends ComponentActivity
             return existing;
         }
         View created;
-        if (isProductionPlacementKind(kind)) created = createProductionPlacementHost();
+        if (isMotionPreviewKind(kind)) {
+            created = new MotionCompositionPreviewView(this, motionPreviewDirection(kind),
+                    runtimeText(R.string.motion_camera_unavailable), this);
+        } else if (isProductionPlacementKind(kind)) created = createProductionPlacementHost();
         else if (kind == CameraHostKind.ReverseComposition) {
             created = createProductionReverseHost();
         } else if (kind == CameraHostKind.Direct) {
@@ -6518,6 +6749,10 @@ public final class CameraProbeActivity extends ComponentActivity
     public void updateProductionCameraHost(View view, CameraHostSlot slot) {
         CameraHostSlot previousSlot = productionCameraSlots.get(slot.getKind());
         productionCameraSlots.put(slot.getKind(), slot);
+        if (isMotionPreviewKind(slot.getKind())) {
+            openPendingMotionPreviews();
+            return;
+        }
         CameraProfileId profile = slot.getProfile();
         if (isProductionCalibrationKind(slot.getKind()) && profile != null) {
             if (calibrationHostProfile != null
@@ -6599,6 +6834,15 @@ public final class CameraProbeActivity extends ComponentActivity
     @Override
     public void releaseProductionCameraHost(View view, CameraHostSlot slot) {
         if (productionCameraHosts.get(slot.getKind()) != view) return;
+        if (isMotionPreviewKind(slot.getKind())) {
+            MotionPreviewOutput output = motionPreviewOutputs.get(slot.getKind());
+            if (output != null && output.view == view) {
+                releaseMotionPreviewOutput(output, "motion_preview_host_released");
+            }
+            productionCameraHosts.remove(slot.getKind(), view);
+            productionCameraSlots.remove(slot.getKind());
+            return;
+        }
         if (isProductionCalibrationKind(slot.getKind())) {
             // Compose may release one conditional stage (notably Corrected when correction is
             // toggled off) while Output and Original still own the same camera input.  Keep the
@@ -6654,6 +6898,7 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     static boolean slotBelongsToTab(CameraHostSlot slot, int tab) {
+        if (isMotionPreviewKind(slot.getKind())) return tab == TAB_GUARD;
         if (slot.getProfile() instanceof CameraProfileId.Mirror) {
             return tab == TAB_REARVIEW_MIRROR;
         }
@@ -6701,6 +6946,10 @@ public final class CameraProbeActivity extends ComponentActivity
                 clearReverseFallbackState();
                 reverseCameraPreview.setCallback(null);
                 reverseCameraPreview.retirePreviewInputs();
+            } else if (isMotionPreviewKind(entry.getKey())) {
+                MotionPreviewOutput output = motionPreviewOutputs.get(entry.getKey());
+                if (output != null) releaseMotionPreviewOutput(
+                        output, "motion_preview_tab_released");
             }
         }
         if (tab == TAB_CAMERAS || tab == TAB_PARKING_CAMERAS || tab == TAB_REARVIEW_MIRROR) {
@@ -6732,6 +6981,8 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     private void releaseAllProductionCameraHosts() {
+        closeMotionCompositionPreviews("motion_preview_activity_destroyed", true);
+        motionPreviewOutputs.clear();
         retireDebugOutput();
         releaseProductionCalibrationHosts();
         if (cameraPreview != null) cameraPreview.retireCameraInput();
@@ -11327,6 +11578,7 @@ public final class CameraProbeActivity extends ComponentActivity
                     }
                 } else if ("camera_discovery".equals(kind)) {
                     cameraDiscovered = json.optBoolean("ok");
+                    if (cameraDiscovered) openPendingMotionPreviews();
                     String status = cameraDiscovered
                             ? "AVM camera ready"
                             : "Camera discovery failed: " + json.optString("error");

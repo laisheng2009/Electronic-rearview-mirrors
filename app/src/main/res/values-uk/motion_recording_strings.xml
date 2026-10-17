@@ -94,4 +94,15 @@
     <string name="motion_player_fullscreen">"На весь екран"</string>
     <string name="motion_player_windowed">"Вийти з повного екрана"</string>
     <string name="motion_player_error">"Не вдалося відтворити цей запис."</string>
+    <string name="motion_storage_ready">"Готово"</string>
+    <string name="motion_storage_numbers_unknown">"Місткість і використання недоступні."</string>
+    <string name="motion_storage_unallocated">"Нерозподілене"</string>
+    <string name="motion_record_permission_denied">"Запис вимкнено: потрібен доступ до сховища. Спробуйте ввімкнути знову. Якщо запит не з’явиться, дозвольте доступ у системних налаштуваннях застосунку."</string>
+    <string name="motion_camera_unavailable">"Відео з камери недоступне."</string>
+    <string name="motion_archive_days_hint">"Крапки позначають дні з доступними записами. Виберіть день або перегляньте весь місяць."</string>
+    <string name="motion_archive_month">"Увесь місяць"</string>
+    <string name="motion_archive_prev_year">"Попередній рік"</string>
+    <string name="motion_archive_next_year">"Наступний рік"</string>
+    <string name="motion_archive_prev_month">"Попередній місяць"</string>
+    <string name="motion_archive_next_month">"Наступний місяць"</string>
 </resources>

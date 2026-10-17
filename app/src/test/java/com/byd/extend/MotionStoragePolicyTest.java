@@ -5,6 +5,15 @@ import static org.junit.Assert.assertEquals;
 import org.junit.Test;
 
 public final class MotionStoragePolicyTest {
+    @Test public void twoGbArchiveLimitStillCapsGrowthWithOneGbKeptFree() {
+        MotionStoragePolicy.Parts parts = MotionStoragePolicy.calculate(
+                6_200_000_000L, 4_500_000_000L, 0, 2 * MotionStoragePolicy.GB, true,
+                MotionStoragePolicy.GB, 0, null);
+        assertEquals(2 * MotionStoragePolicy.GB, parts.allowance);
+        assertEquals(2_500_000_000L, parts.unallocated);
+        assertEquals(6_200_000_000L, parts.total());
+    }
+
     @Test public void splitsWritableSpaceByUnmetOwnAndRecorderLimits() {
         MotionStoragePolicy.Parts parts = MotionStoragePolicy.calculate(
                 100 * MotionStoragePolicy.GB, 20 * MotionStoragePolicy.GB,

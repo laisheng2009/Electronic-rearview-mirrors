@@ -333,9 +333,9 @@ public final class MotionMediaLibrary {
             long total = volume.totalBytes;
             long free = volume.freeBytes;
             long other = -1;
-            long ownAllowance = 0;
-            long oemAllowance = 0;
-            long unallocated = 0;
+            long ownAllowance = canRecordHere(volume, actual, selectedId) ? -1 : 0;
+            long oemAllowance = storage.oemCleanupEnabled(actual) ? -1 : 0;
+            long unallocated = -1;
             if (total >= 0 && free >= 0 && own >= 0 && oem >= 0) {
                 MotionStoragePolicy.Parts parts = MotionStoragePolicy.calculate(total, free, own,
                         limitBytes(volume, actual), canRecordHere(volume, actual, selectedId),
@@ -438,6 +438,8 @@ public final class MotionMediaLibrary {
             MotionStorage.Volume currentVolume = storage.findVolume(volumeId);
             if (currentVolume == null || !currentVolume.mounted || currentVolume.readOnly)
                 return new StorageDecision(false, -1, -1, "motion_volume_not_writable");
+            if (currentVolume.totalBytes <= 0 || currentVolume.freeBytes < 0)
+                return new StorageDecision(false, -1, -1, "motion_free_space_unavailable");
             long own = storage.queryOwnedBytes(currentVolume);
             if (own < 0) return new StorageDecision(false, -1, -1, "motion_archive_accounting_unavailable");
             if (baseOwnBytes >= 0 && activeBytes > 0)

@@ -965,7 +965,7 @@ internal fun BydExtendUiAction.forMirrorSource(front: Boolean): BydExtendUiActio
     else -> this
 }
 
-enum class CameraHostKind { Placement, CalibrationOriginal, CalibrationCorrected, CalibrationOutput, ReverseComposition, Mirror, Direct, Avm }
+enum class CameraHostKind { Placement, CalibrationOriginal, CalibrationCorrected, CalibrationOutput, ReverseComposition, Mirror, Direct, Avm, MotionFrontPreview, MotionRearPreview, MotionLeftPreview, MotionRightPreview }
 
 @Immutable
 data class CameraHostSlot @JvmOverloads constructor(

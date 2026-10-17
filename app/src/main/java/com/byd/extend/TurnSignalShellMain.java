@@ -266,6 +266,14 @@ public final class TurnSignalShellMain {
                     reply.writeNoException();
                     return true;
                 }
+                if (code == TurnSignalShellProtocol.TX_SET_MOTION_TELEMETRY) {
+                    int enabled = data.readInt();
+                    if ((enabled != 0 && enabled != 1) || data.dataAvail() != 0)
+                        throw new IllegalArgumentException("invalid Motion telemetry demand");
+                    requireAvasRuntime().setMotionTelemetryEnabled(enabled == 1);
+                    reply.writeNoException();
+                    return true;
+                }
                 if (code == TurnSignalShellProtocol.TX_PING) {
                     reply.writeNoException();
                     reply.writeInt(TurnSignalShellProtocol.VERSION);

@@ -268,6 +268,7 @@ final class CameraRuntimeHost {
     private void clientDied(IBinder expected) {
         if (!lifetime.detach(expected)) return;
         clearMotion();
+        helper.detachMotionCompositionPreviews();
         unlinkClient();
         // Only app-owned preview surfaces are gone; all background consumers stay attached.
         helper.closeCameraForOwner(CameraHelperMain.CAMERA_OWNER_ACTIVITY, "ui_process_died");

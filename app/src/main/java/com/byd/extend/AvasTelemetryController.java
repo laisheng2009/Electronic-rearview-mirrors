@@ -79,6 +79,12 @@ final class AvasTelemetryController implements AutoCloseable {
 
     void activate() { executor.execute(this::activateSerialized); }
     void deactivate() { executor.execute(this::deactivateSerialized); }
+    void activateForMotion() {
+        executor.execute(() -> {
+            if (active) readAndApply(true, "motion_request");
+            else activateSerialized();
+        });
+    }
     void eligibilityChanged(boolean onReady, boolean offReady) {
         executor.execute(() -> {
             policy.invalidateIneligible(onReady, offReady);
@@ -97,7 +103,6 @@ final class AvasTelemetryController implements AutoCloseable {
         telemetryHealthy = false;
         gapLogged = false;
         resetBaseline();
-        rawPowerSeen = false;
         trySubscribe();
         readAndApply(true, subscribed ? "initial" : "fallback_initial");
         scheduleNext(subscribed ? RECONCILE_MS : FALLBACK_MS);
@@ -383,6 +388,7 @@ final class AvasTelemetryController implements AutoCloseable {
 
     private void resetBaseline() {
         initialized = false;
+        rawPowerSeen = false;
         power = -1;
         lock = -1;
         policy.reset();

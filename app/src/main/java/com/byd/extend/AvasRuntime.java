@@ -54,6 +54,11 @@ final class AvasRuntime implements AutoCloseable {
     private volatile AvasAudioPlayer player;
     private boolean started;
     private volatile boolean closed;
+    private volatile boolean motionTelemetryEnabled;
+    private volatile int lastMotionPower = Integer.MIN_VALUE;
+    private volatile int lastMotionLock = Integer.MIN_VALUE;
+    private volatile long lastMotionPowerSentAt = Long.MIN_VALUE;
+    private volatile long lastMotionLockSentAt = Long.MIN_VALUE;
     private boolean configOwned;
     private final Set<String> pendingPrune = new HashSet<>();
     private volatile String activeAssetId = "";
@@ -127,6 +132,10 @@ final class AvasRuntime implements AutoCloseable {
                     }
                     @Override public void onRawPower(int power, boolean baseline) {
                         engine.onPower(power, baseline);
+                        publishMotionTelemetry("power", power, baseline);
+                    }
+                    @Override public void onRawLock(int lock, boolean baseline) {
+                        publishMotionTelemetry("lock", lock, baseline);
                     }
                     @Override public void onSuppressed(String profile, String powerProfile,
                             long deltaMs) {
@@ -189,6 +198,17 @@ final class AvasRuntime implements AutoCloseable {
         }
         updateTelemetry();
         reportStatus();
+    }
+
+    synchronized void setMotionTelemetryEnabled(boolean enabled) {
+        if (closed || !enabled && !motionTelemetryEnabled) return;
+        motionTelemetryEnabled = enabled;
+        lastMotionPower = lastMotionLock = Integer.MIN_VALUE;
+        lastMotionPowerSentAt = lastMotionLockSentAt = Long.MIN_VALUE;
+        event("motion_telemetry_demand", "enabled", enabled);
+        if (!started) return;
+        if (enabled) telemetryController.activateForMotion();
+        else updateTelemetry();
     }
 
     void installAsset(String assetId, ParcelFileDescriptor descriptor) throws IOException {
@@ -660,12 +680,40 @@ final class AvasRuntime implements AutoCloseable {
 
     private synchronized void updateTelemetry() {
         if (!started || closed) return;
-        boolean enabled = config.engine.enabled;
+        boolean enabled = motionTelemetryEnabled || config.engine.enabled;
         for (AvasConfig.Profile profile : config.profiles) enabled |= profile.enabled;
         MicrophoneSession microphone = microphoneSession;
         enabled |= microphone != null && !microphone.terminal();
         if (enabled) telemetryController.activate();
         else telemetryController.deactivate();
+    }
+
+    private void publishMotionTelemetry(String signal, int value, boolean baseline) {
+        if (!motionTelemetryEnabled) return;
+        long now = SystemClock.elapsedRealtime();
+        boolean resync;
+        if ("power".equals(signal)) {
+            resync = baseline || elapsedSince(lastMotionPowerSentAt, now)
+                    >= AvasTelemetryController.RECONCILE_MS;
+            if (value == lastMotionPower && !resync) return;
+            lastMotionPower = value;
+            lastMotionPowerSentAt = now;
+        } else {
+            resync = baseline || elapsedSince(lastMotionLockSentAt, now)
+                    >= AvasTelemetryController.RECONCILE_MS;
+            if (value == lastMotionLock && !resync) return;
+            lastMotionLock = value;
+            lastMotionLockSentAt = now;
+        }
+        try {
+            emit(new JSONObject().put("kind", "motion_vehicle_state")
+                    .put("signal", signal).put("value", value).put("baseline", resync));
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static long elapsedSince(long previous, long now) {
+        return previous == Long.MIN_VALUE || now < previous ? Long.MAX_VALUE : now - previous;
     }
 
     private void enqueueAutomatic(String profileId) {

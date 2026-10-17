@@ -94,4 +94,15 @@
     <string name="motion_player_fullscreen">"全屏"</string>
     <string name="motion_player_windowed">"退出全屏"</string>
     <string name="motion_player_error">"无法播放此录像。"</string>
+    <string name="motion_storage_ready">"就绪"</string>
+    <string name="motion_storage_numbers_unknown">"容量和用量不可用。"</string>
+    <string name="motion_storage_unallocated">"未分配"</string>
+    <string name="motion_record_permission_denied">"录像仍关闭：需要存储访问权限。请再次尝试启用。若未出现权限请求，请在系统的应用设置中允许存储访问。"</string>
+    <string name="motion_camera_unavailable">"摄像头画面不可用。"</string>
+    <string name="motion_archive_days_hint">"圆点表示有可用录像的日期。选择某一天或浏览整个月。"</string>
+    <string name="motion_archive_month">"整个月"</string>
+    <string name="motion_archive_prev_year">"上一年"</string>
+    <string name="motion_archive_next_year">"下一年"</string>
+    <string name="motion_archive_prev_month">"上个月"</string>
+    <string name="motion_archive_next_month">"下个月"</string>
 </resources>

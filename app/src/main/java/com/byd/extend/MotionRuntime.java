@@ -5,7 +5,6 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
-import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import com.byd.extend.ui.motion.MotionFullscreenActivity;
@@ -23,7 +22,6 @@ public final class MotionRuntime implements AutoCloseable {
     private final Consumer<String> events;
     private final HandlerThread thread = new HandlerThread("motion-runtime");
     private final Handler handler;
-    private final AvasTelemetryController telemetry;
     private final SharedPreferences screenPrefs, recordingPrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener changed = (prefs,key) -> refresh();
     private MotionConfig config;
@@ -32,8 +30,9 @@ public final class MotionRuntime implements AutoCloseable {
     private MotionGpuComposer composer;
     private String session;
     private PowerManager.WakeLock wakeLock;
-    private int power=-1, lock=-1, requestId, recordingGeneration;
-    private boolean telemetryActive, eligible, observing, warning, closed, stopping;
+    private final MotionTelemetryState vehicleState = new MotionTelemetryState();
+    private int requestId, recordingGeneration;
+    private boolean eligible, observing, warning, closed, stopping;
     private long suppressedUntil, lastDetectionLogMs;
     private int lastDetectionLevel;
     private final Runnable arm = this::startSession;
@@ -45,26 +44,6 @@ public final class MotionRuntime implements AutoCloseable {
         thread.start(); handler=new Handler(thread.getLooper());
         screenPrefs=context.getSharedPreferences(MotionConfig.SCREEN_PREFS,Context.MODE_PRIVATE);
         recordingPrefs=context.getSharedPreferences(MotionConfig.RECORDING_PREFS,Context.MODE_PRIVATE);
-        telemetry=new AvasTelemetryController(SystemClock::elapsedRealtime,
-                new AvasTelemetryController.Executor() {
-                    @Override public void execute(Runnable task) {
-                        if (Looper.myLooper()==handler.getLooper()) task.run();
-                        else handler.post(task);
-                    }
-                    @Override public AvasTelemetryController.Cancellable schedule(Runnable task,long delay) {
-                        handler.postDelayed(task,delay); return () -> handler.removeCallbacks(task);
-                    }
-                },new AvasVehicleTelemetryTransport(this.context),new AvasTelemetryController.Sink() {
-                    @Override public boolean powerOnSuppressionEligible() { return false; }
-                    @Override public boolean powerOffSuppressionEligible() { return false; }
-                    @Override public void onProfile(String ignored) { }
-                    @Override public void onSuppressed(String profile,String by,long delta) { }
-                    @Override public void onRawPower(int value,boolean baseline) {
-                        power=AvasEventPolicy.normalizedPower(value); evaluate();
-                    }
-                    @Override public void onRawLock(int value,boolean baseline) { lock=value; evaluate(); }
-                    @Override public void log(String kind,Object... fields) { event("motion_"+kind,fields); }
-                },new AvasEventPolicy());
         screenPrefs.registerOnSharedPreferenceChangeListener(changed);
         recordingPrefs.registerOnSharedPreferenceChangeListener(changed);
         active=this;
@@ -76,9 +55,8 @@ public final class MotionRuntime implements AutoCloseable {
         MotionConfig current=MotionConfig.read(context);
         context.getSharedPreferences("settings",Context.MODE_PRIVATE).edit()
                 .putBoolean("motion_monitoring_enabled",current.anyEnabled()).apply();
-        CameraHelperService.startPersistent(context,"motion_settings");
-        MotionRuntime runtime=active;
-        if(runtime!=null) runtime.refresh();
+        if(current.anyEnabled() && active==null)
+            CameraHelperService.startPersistent(context,"motion_bootstrap");
     }
 
     void refresh() {
@@ -91,11 +69,10 @@ public final class MotionRuntime implements AutoCloseable {
                     .putBoolean("motion_monitoring_enabled",config.anyEnabled()).apply();
             if(!config.anyEnabled()) {
                 eligible=false; handler.removeCallbacks(arm); finishWarning(false);
+                vehicleState.invalidate();
                 stopSession("settings_disabled");
-                if(telemetryActive) { telemetryActive=false; telemetry.deactivate(); }
                 return;
             }
-            if(!telemetryActive) { telemetryActive=true; telemetry.activate(); }
             if(modified && session!=null) { finishWarning(false); stopSession("settings_changed"); eligible=false; }
             if(session!=null && detector!=null && (detector.workerBinder()==null
                     || !detector.workerBinder().isBinderAlive())) {
@@ -106,7 +83,7 @@ public final class MotionRuntime implements AutoCloseable {
     }
 
     private boolean conditions() {
-        return !closed && config!=null && config.eligible(power,lock)
+        return !closed && config!=null && vehicleState.eligible(config)
                 && !GuardRecovery.isUserShutdownActive(context);
     }
 
@@ -118,10 +95,10 @@ public final class MotionRuntime implements AutoCloseable {
         handler.removeCallbacks(arm);
         if(next) {
             holdCpu(true);
-            event("motion_arming","power",power,"lock",lock,"delay_ms",2500);
+            event("motion_arming","power",vehicleState.power(),"lock",vehicleState.lock(),"delay_ms",2500);
             handler.postDelayed(arm,2500);
         } else {
-            event("motion_disarmed","power",power,"lock",lock);
+            event("motion_disarmed","power",vehicleState.power(),"lock",vehicleState.lock());
             finishWarning(false);
             if(detector!=null && session!=null) detector.setEligible(session,false);
             observing=false;
@@ -149,7 +126,7 @@ public final class MotionRuntime implements AutoCloseable {
         session=id; observing=false; suppressedUntil=0; lastDetectionLogMs=0; lastDetectionLevel=0;
         event("motion_session_started","boot_count",android.provider.Settings.Global.getInt(
                 context.getContentResolver(),android.provider.Settings.Global.BOOT_COUNT,-1),
-                "power",power,"lock",lock,"config",config.toJson());
+                "power",vehicleState.power(),"lock",vehicleState.lock(),"config",config.toJson());
         detector=new MotionDetectorClient(context);
         detector.start(id,new MotionDetectorClient.Listener() {
             @Override public void onPrepared(IBinder worker) { handler.post(() -> {
@@ -212,7 +189,7 @@ public final class MotionRuntime implements AutoCloseable {
             recorder.startBuffering(config);
             if(!recorder.isBuffering() || recorder.inputSurface()==null)
                 throw new IllegalStateException("hardware encoder input unavailable");
-            composer=new MotionGpuComposer(recorder.inputSurface(),recorder.width(),recorder.height(),
+            composer=new MotionGpuComposer(context,recorder.inputSurface(),recorder.width(),recorder.height(),
                     config.cameraOrder,error -> handler.post(() -> {
                         if(!current(id) || generation!=recordingGeneration) return;
                         event("motion_recording_error","stage","video_gpu","error",error);
@@ -257,8 +234,8 @@ public final class MotionRuntime implements AutoCloseable {
             detector.markUserTakeover(session);
         }
         if(!alreadyClosed) MotionFullscreenActivity.dismiss(context,session);
-        detector.finishWarning(session,!userAction && power==0);
-        event("motion_warning_finished","user",userAction,"restore_allowed",!userAction && power==0);
+        detector.finishWarning(session,!userAction && vehicleState.power()==0);
+        event("motion_warning_finished","user",userAction,"restore_allowed",!userAction && vehicleState.power()==0);
     }
 
     private void failed(String id,String stage,String detail) {
@@ -306,11 +283,56 @@ public final class MotionRuntime implements AutoCloseable {
     }
 
     void acceptCameraEvent(String line) {
-        if(line==null || !(line.contains("\"camera_producer_closed\"")
-                || line.contains("\"helper_death\"") || line.contains("\"helper_ping_failed\""))) return;
-        handler.post(() -> {
-            if(session!=null && !stopping) failed(session,"camera_session_lost",line);
-        });
+        if(line==null) return;
+        try {
+            JSONObject incoming = new JSONObject(line);
+            String kind = incoming.optString("kind");
+            if("motion_vehicle_state".equals(kind)) {
+                if(incoming.has("session_id")) return;
+                String signal = incoming.optString("signal");
+                int value = incoming.optInt("value", Integer.MIN_VALUE);
+                boolean baseline = incoming.optBoolean("baseline", false);
+                handler.post(() -> {
+                    if(closed || config==null || !config.anyEnabled()) return;
+                    boolean readyBefore = vehicleState.ready();
+                    int powerBefore = vehicleState.power();
+                    int lockBefore = vehicleState.lock();
+                    if("power".equals(signal)) vehicleState.power(value,baseline);
+                    else if("lock".equals(signal)) vehicleState.lock(value,baseline);
+                    else return;
+                    if(vehicleState.power()!=powerBefore || vehicleState.lock()!=lockBefore
+                            || readyBefore!=vehicleState.ready())
+                        event("motion_vehicle_state", "signal",signal,"value",value,
+                                "baseline",baseline,"ready",vehicleState.ready());
+                    evaluate();
+                });
+            } else if("helper_death".equals(kind) || "helper_ping_failed".equals(kind)) {
+                String detail = incoming.optString("error", kind);
+                handler.post(() -> invalidateAfterHelperLoss(kind, detail));
+            } else if("camera_producer_closed".equals(kind)) {
+                String reason = incoming.optString("reason", "unknown");
+                String error = incoming.optString("error", "");
+                handler.post(() -> {
+                    if(session==null || stopping) return;
+                    event("motion_camera_lost", "reason",reason,"error",error);
+                    failed(session,"camera_producer_closed",reason+ (error.isEmpty()?"":"; "+error));
+                });
+            }
+        } catch(Exception ignored) {
+            // Helper output is diagnostic input; malformed lines cannot affect Motion eligibility.
+        }
+    }
+
+    private void invalidateAfterHelperLoss(String kind,String detail) {
+        if(closed || config==null || !config.anyEnabled()) return;
+        vehicleState.invalidate();
+        eligible=false;
+        handler.removeCallbacks(arm);
+        event("motion_vehicle_state_invalidated", "reason",kind,"detail",detail);
+        if(session!=null && !stopping) {
+            finishWarning(false);
+            stopSession("helper_lost");
+        } else holdCpu(false);
     }
 
     private boolean current(String id) { return !closed && id!=null && id.equals(session); }
@@ -330,7 +352,7 @@ public final class MotionRuntime implements AutoCloseable {
         FutureTask<Void> task=new FutureTask<>(() -> {
             handler.removeCallbacksAndMessages(null);
             finishWarning(false); closed=true; eligible=false;
-            telemetry.close(); stopSession("runtime_stopped");
+            vehicleState.invalidate(); stopSession("runtime_stopped");
             if(active==this) active=null;
             return null;
         });

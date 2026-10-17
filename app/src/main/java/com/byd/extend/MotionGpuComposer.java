@@ -1,5 +1,8 @@
 package com.byd.extend;
 
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.SurfaceTexture;
 import android.opengl.EGL14;
 import android.opengl.EGLConfig;
@@ -7,6 +10,7 @@ import android.opengl.EGLContext;
 import android.opengl.EGLDisplay;
 import android.opengl.EGLExt;
 import android.opengl.EGLSurface;
+import android.opengl.GLUtils;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
 import android.os.Handler;
@@ -29,24 +33,28 @@ final class MotionGpuComposer implements AutoCloseable {
     private final boolean[] pending = new boolean[4], seen = new boolean[4];
     private final float[][] transforms = new float[4][16];
     private final int[] names = new int[4];
+    private final int[] iconTextures = new int[4];
     private final int width, height;
     private final int[] order;
     private final Consumer<String> errors;
+    private final Context appContext;
     private EGLDisplay display = EGL14.EGL_NO_DISPLAY;
     private EGLContext context = EGL14.EGL_NO_CONTEXT;
     private EGLSurface window = EGL14.EGL_NO_SURFACE;
     private int program, iconProgram, position, uv, matrix, sampler;
+    private int iconPosition, iconUv, iconSampler;
     private boolean queued, closed;
     private long lastFrameMs;
     private final FloatBuffer vertices = floats(-1,-1, 1,-1, -1,1, 1,1);
     private final FloatBuffer coordinates = floats(0,0, 1,0, 0,1, 1,1);
-    private final FloatBuffer icon = floats(0,.9f, -.65f,.1f, -.25f,.1f,
-            0,.9f, -.25f,.1f, .25f,.1f, 0,.9f, .25f,.1f, .65f,.1f,
-            -.25f,.1f, -.25f,-.9f, .25f,-.9f, -.25f,.1f, .25f,-.9f, .25f,.1f);
+    private final FloatBuffer iconVertices = floats(-1,-1, 1,-1, -1,1, 1,1);
+    // Android bitmaps upload top row at GL v=0; flip v to keep the OEM PNG upright.
+    private final FloatBuffer iconCoordinates = floats(0,1, 1,1, 0,0, 1,0);
     private final Runnable draw = this::render;
 
-    MotionGpuComposer(Surface encoder, int width, int height, int[] order, Consumer<String> errors)
-            throws Exception {
+    MotionGpuComposer(Context context, Surface encoder, int width, int height, int[] order,
+            Consumer<String> errors) throws Exception {
+        this.appContext = context.getApplicationContext();
         this.width = width; this.height = height; this.order = order.clone(); this.errors = errors;
         thread.start(); handler = new Handler(thread.getLooper());
         try { call(() -> initialize(encoder)); }
@@ -74,11 +82,16 @@ final class MotionGpuComposer implements AutoCloseable {
                 + "void main(){gl_Position=vec4(p,0.,1.);uv=(m*vec4(t,0.,1.)).xy;}",
                 "#extension GL_OES_EGL_image_external : require\nprecision mediump float;"
                 + "uniform samplerExternalOES s;varying vec2 uv;void main(){gl_FragColor=texture2D(s,uv);}");
-        iconProgram = link("attribute vec2 p;uniform float a;void main(){float c=cos(a);float s=sin(a);"
-                + "gl_Position=vec4(c*p.x-s*p.y,s*p.x+c*p.y,0.,1.);}",
-                "precision mediump float;void main(){gl_FragColor=vec4(1.,.85,.15,1.);}");
+        iconProgram = link("attribute vec2 p;attribute vec2 t;varying vec2 uv;"
+                + "void main(){gl_Position=vec4(p,0.,1.);uv=t;}",
+                "precision mediump float;uniform sampler2D s;varying vec2 uv;"
+                + "void main(){gl_FragColor=texture2D(s,uv);}");
         position=GLES20.glGetAttribLocation(program,"p"); uv=GLES20.glGetAttribLocation(program,"t");
         matrix=GLES20.glGetUniformLocation(program,"m"); sampler=GLES20.glGetUniformLocation(program,"s");
+        iconPosition=GLES20.glGetAttribLocation(iconProgram,"p");
+        iconUv=GLES20.glGetAttribLocation(iconProgram,"t");
+        iconSampler=GLES20.glGetUniformLocation(iconProgram,"s");
+        loadDirectionIcons();
         GLES20.glGenTextures(4,names,0);
         for(int i=0;i<4;i++) {
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,names[i]);
@@ -91,6 +104,33 @@ final class MotionGpuComposer implements AutoCloseable {
             inputs[i]=new Surface(textures[i]);
             final int index=i;
             textures[i].setOnFrameAvailableListener(ignored -> frame(index),handler);
+        }
+    }
+
+    private void loadDirectionIcons() {
+        GLES20.glGenTextures(iconTextures.length, iconTextures, 0);
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inScaled = false;
+        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        for (int direction = 0; direction < iconTextures.length; direction++) {
+            Bitmap bitmap = BitmapFactory.decodeResource(
+                    appContext.getResources(), MotionDirectionIcon.drawableFor(direction), options);
+            if (bitmap == null) throw new IllegalStateException(
+                    "Motion OEM direction icon unavailable: " + direction);
+            try {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, iconTextures[direction]);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D,
+                        GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D,
+                        GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D,
+                        GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D,
+                        GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0);
+            } finally {
+                bitmap.recycle();
+            }
         }
     }
 
@@ -130,16 +170,25 @@ final class MotionGpuComposer implements AutoCloseable {
                 GLES20.glVertexAttribPointer(uv,2,GLES20.GL_FLOAT,false,0,coordinates);
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP,0,4);
                 GLES20.glDisableVertexAttribArray(position); GLES20.glDisableVertexAttribArray(uv);
-                int size=Math.max(20,width/40);
-                GLES20.glViewport(x+8,y+height/2-size-8,size,size);
+                int cellWidth=width/2, cellHeight=height/2;
+                int size=Math.max(1,Math.round(cellWidth*.05f));
+                int inset=Math.max(0,Math.round(cellWidth*.0083f));
+                GLES20.glViewport(x+inset,y+cellHeight-size-inset,size,size);
                 GLES20.glUseProgram(iconProgram);
-                int p=GLES20.glGetAttribLocation(iconProgram,"p");
-                float angle=direction==0?0:direction==1?(float)Math.PI:
-                        direction==2?(float)Math.PI/2:-(float)Math.PI/2;
-                GLES20.glUniform1f(GLES20.glGetUniformLocation(iconProgram,"a"),angle);
-                icon.position(0); GLES20.glEnableVertexAttribArray(p);
-                GLES20.glVertexAttribPointer(p,2,GLES20.GL_FLOAT,false,0,icon);
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLES,0,15); GLES20.glDisableVertexAttribArray(p);
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,iconTextures[direction]);
+                GLES20.glUniform1i(iconSampler,0);
+                GLES20.glEnable(GLES20.GL_BLEND);
+                GLES20.glBlendFunc(GLES20.GL_ONE,GLES20.GL_ONE_MINUS_SRC_ALPHA);
+                iconVertices.position(0); iconCoordinates.position(0);
+                GLES20.glEnableVertexAttribArray(iconPosition);
+                GLES20.glEnableVertexAttribArray(iconUv);
+                GLES20.glVertexAttribPointer(iconPosition,2,GLES20.GL_FLOAT,false,0,iconVertices);
+                GLES20.glVertexAttribPointer(iconUv,2,GLES20.GL_FLOAT,false,0,iconCoordinates);
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP,0,4);
+                GLES20.glDisableVertexAttribArray(iconPosition);
+                GLES20.glDisableVertexAttribArray(iconUv);
+                GLES20.glDisable(GLES20.GL_BLEND);
             }
             long now=SystemClock.elapsedRealtimeNanos();
             EGLExt.eglPresentationTimeANDROID(display,window,now);
@@ -154,6 +203,14 @@ final class MotionGpuComposer implements AutoCloseable {
     @Override public void close() {
         try { call(() -> {
             closed=true; handler.removeCallbacksAndMessages(null);
+            if(display!=EGL14.EGL_NO_DISPLAY && context!=EGL14.EGL_NO_CONTEXT
+                    && window!=EGL14.EGL_NO_SURFACE) {
+                EGL14.eglMakeCurrent(display,window,window,context);
+                GLES20.glDeleteTextures(names.length,names,0);
+                GLES20.glDeleteTextures(iconTextures.length,iconTextures,0);
+                if(program!=0) GLES20.glDeleteProgram(program);
+                if(iconProgram!=0) GLES20.glDeleteProgram(iconProgram);
+            }
             for(int i=0;i<4;i++) {
                 if(textures[i]!=null) { textures[i].setOnFrameAvailableListener(null); textures[i].release(); }
                 if(inputs[i]!=null) inputs[i].release();

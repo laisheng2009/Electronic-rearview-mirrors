@@ -22,6 +22,7 @@ final class DiagnosticLogPolicy {
             "avas_telemetry_sample", "avas_telemetry_read", "avas_telemetry_callback",
             "avas_track_state", "avas_track_sample", "avas_track_timestamp", "avas_pcm_levels",
             "avas_play_call_timing", "avas_nav_source_get", "avas_nav_source_gate_timeline",
+            "motion_vehicle_state",
             "weather_location_detail"));
     // These detail records also drive runtime state. Keep their full IPC delivery with logging OFF.
     private static final Set<String> FUNCTIONAL_DETAIL = new HashSet<>(Arrays.asList(
