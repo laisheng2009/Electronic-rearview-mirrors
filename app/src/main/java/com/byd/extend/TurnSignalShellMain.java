@@ -136,6 +136,8 @@ public final class TurnSignalShellMain {
         private boolean avasCloseClaimed;
         private boolean nonAvasStopped;
         private volatile CameraRuntimeHost cameraRuntime;
+        private volatile boolean appMotionTelemetry;
+        private volatile boolean workerMotionTelemetry;
 
         ShellBinder(Context context, Handler handler, int appUid, int versionCode) {
             this(context, handler, appUid, versionCode, TurnSignalShellMain::terminateProcess);
@@ -215,7 +217,8 @@ public final class TurnSignalShellMain {
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
             if (!TurnSignalShellProtocol.isCallerAllowed(Binder.getCallingUid(), appUid)
-                    && !(Binder.getCallingUid() == 2000 && code == TurnSignalShellProtocol.TX_CAMERA_RUNTIME)) {
+                    && !(Binder.getCallingUid() == 2000 && (code == TurnSignalShellProtocol.TX_CAMERA_RUNTIME
+                    || code == TurnSignalShellProtocol.TX_SET_MOTION_TELEMETRY))) {
                 if (reply != null) reply.writeException(new SecurityException("caller uid denied"));
                 return true;
             }
@@ -241,7 +244,8 @@ public final class TurnSignalShellMain {
                         cameras = cameraRuntime;
                     }
                     int cameraOperation = cameras.transact(data, reply);
-                    if (cameraOperation == CameraRuntimeHost.ATTACH) handler.post(() -> {
+                    if (cameraOperation == CameraRuntimeHost.ATTACH
+                            || cameraOperation == CameraRuntimeHost.MOTION_BIND_WORKER) handler.post(() -> {
                         runtime.reportStatus(); warningRuntime.reportStatus();
                         reverseGearRuntime.reportStatus(); reverseSteeringRuntime.reportStatus();
                         emitPowerState("camera_runtime", false);
@@ -267,10 +271,20 @@ public final class TurnSignalShellMain {
                     return true;
                 }
                 if (code == TurnSignalShellProtocol.TX_SET_MOTION_TELEMETRY) {
+                    boolean workerCall = Binder.getCallingUid() == 2000;
+                    if (workerCall) {
+                        String session = data.readString();
+                        IBinder worker = data.readStrongBinder();
+                        CameraRuntimeHost cameras = cameraRuntime;
+                        if (cameras == null || !cameras.ownsMotionWorker(session, worker))
+                            throw new SecurityException("Motion telemetry owner mismatch");
+                    }
                     int enabled = data.readInt();
                     if ((enabled != 0 && enabled != 1) || data.dataAvail() != 0)
                         throw new IllegalArgumentException("invalid Motion telemetry demand");
-                    requireAvasRuntime().setMotionTelemetryEnabled(enabled == 1);
+                    if (workerCall) workerMotionTelemetry = enabled == 1;
+                    else appMotionTelemetry = enabled == 1;
+                    requireAvasRuntime().setMotionTelemetryEnabled(appMotionTelemetry || workerMotionTelemetry);
                     reply.writeNoException();
                     return true;
                 }
@@ -535,8 +549,11 @@ public final class TurnSignalShellMain {
                     reply.writeNoException();
                     handler.post(() -> {
                         CameraRuntimeHost cameras = cameraRuntime;
-                        if (cameras != null) cameras.shutdown();
-                        cameraRuntime = null;
+                        boolean keepMotion = cameras != null && cameras.hasMotionWorker();
+                        if (!keepMotion) {
+                            if (cameras != null) cameras.shutdown();
+                            cameraRuntime = null;
+                        }
                         nonAvasStopped = true;
                         if (avasRuntime != null) {
                             avasRuntime.stopAllAuditions();
@@ -549,7 +566,8 @@ public final class TurnSignalShellMain {
                         reverseSteeringRuntime.stop();
                         warningRuntime.stop();
                         runtime.stop();
-                        emit("shell_shutdown", "reason", "controller_detached_avas_retained");
+                        emit("shell_shutdown", "reason", "controller_detached_avas_retained",
+                                "motion_retained", keepMotion);
                     });
                     return true;
                 }
@@ -725,7 +743,15 @@ public final class TurnSignalShellMain {
 
         private void platformSignal(int operation, int value) {
             handler.post(() -> {
-                if (processTerminationRequested || nonAvasStopped) return;
+                if (operation == CameraRuntimeHost.MOTION_UNBIND_WORKER) {
+                    CameraRuntimeHost cameras = cameraRuntime;
+                    if (cameras == null || !cameras.hasMotionWorker()) {
+                        workerMotionTelemetry = false;
+                        if (avasRuntime != null) avasRuntime.setMotionTelemetryEnabled(appMotionTelemetry);
+                    }
+                    return;
+                }
+                if (processTerminationRequested || nonAvasStopped && !workerMotionTelemetry) return;
                 if (operation == CameraRuntimeHost.POWER) {
                     String action = value == CameraRuntimeHost.POWER_QUICKBOOT
                             ? "android.intent.action.QUICKBOOT_POWERON"

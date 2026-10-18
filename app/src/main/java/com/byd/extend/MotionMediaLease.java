@@ -25,7 +25,11 @@ final class MotionMediaLease implements Closeable {
     }
 
     static MotionMediaLease acquire(Context context, String uri) throws IOException {
-        File path = lockPath(context, uri);
+        return acquire(new File(context.getFilesDir(), "motion/leases"), uri);
+    }
+
+    static MotionMediaLease acquire(File leaseDirectory, String uri) throws IOException {
+        File path = lockPath(leaseDirectory, uri);
         File parent = path.getParentFile();
         if (parent == null || (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()))
             throw new IOException("Cannot create Motion recording lease directory");
@@ -47,7 +51,11 @@ final class MotionMediaLease implements Closeable {
     }
 
     static boolean isHeld(Context context, String uri) {
-        File path = lockPath(context, uri);
+        return isHeld(new File(context.getFilesDir(), "motion/leases"), uri);
+    }
+
+    static boolean isHeld(File leaseDirectory, String uri) {
+        File path = lockPath(leaseDirectory, uri);
         if (!path.exists()) return false;
         try (RandomAccessFile file = new RandomAccessFile(path, "rw"); FileChannel channel = file.getChannel()) {
             try {
@@ -64,7 +72,7 @@ final class MotionMediaLease implements Closeable {
         }
     }
 
-    private static File lockPath(Context context, String uri) {
+    private static File lockPath(File leaseDirectory, String uri) {
         String hash;
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(uri.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -74,7 +82,7 @@ final class MotionMediaLease implements Closeable {
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
         }
-        return new File(new File(context.getFilesDir(), "motion/leases"), hash + ".lock");
+        return new File(leaseDirectory, hash + ".lock");
     }
 
     @Override public void close() throws IOException {

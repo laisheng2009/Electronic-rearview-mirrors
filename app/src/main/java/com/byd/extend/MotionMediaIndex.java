@@ -7,6 +7,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -106,6 +107,7 @@ final class MotionMediaIndex {
     private static final Map<String, MotionMediaIndex> SHARED = new HashMap<>();
     private final File file;
     private final ArrayList<Record> records = new ArrayList<>();
+    private String legacyImportDigest;
 
     MotionMediaIndex(File file) throws IOException {
         this.file = file;
@@ -184,6 +186,78 @@ final class MotionMediaIndex {
         return true;
     }
 
+    synchronized boolean hasImportedLegacyDigest(String digest) {
+        return digest != null && digest.equals(legacyImportDigest);
+    }
+
+    /** Merges validated legacy rows without replacing worker-owned state or losing markers. */
+    synchronized void mergeLegacyRecords(List<Record> imported, String digest,
+            boolean fullyResolved) throws IOException {
+        boolean changed = false;
+        for (Record incoming : imported) {
+            if (incoming == null || incoming.uri == null || incoming.uri.isEmpty()) continue;
+            int index = indexOf(incoming.uri);
+            if (index < 0) {
+                records.add(incoming.copy());
+                changed = true;
+                continue;
+            }
+            Record existing = records.get(index);
+            if (incoming.protectedFile && !existing.protectedFile) {
+                existing.protectedFile = true;
+                changed = true;
+            }
+            for (Marker marker : incoming.markers) {
+                int markerIndex = markerIndex(existing.markers, marker.eventId, marker.level);
+                if (markerIndex < 0) {
+                    existing.markers.add(marker);
+                    changed = true;
+                } else {
+                    Marker current = existing.markers.get(markerIndex);
+                    Marker merged = current.merge(marker);
+                    if (!sameMarker(current, merged)) {
+                        existing.markers.set(markerIndex, merged);
+                        changed = true;
+                    }
+                }
+            }
+            existing.markers.sort(java.util.Comparator.comparingLong(item -> item.elapsedRealtimeMs));
+        }
+        if (fullyResolved && digest != null && !digest.equals(legacyImportDigest)) {
+            legacyImportDigest = digest;
+            changed = true;
+        }
+        if (changed) save();
+    }
+
+    static List<Record> parseLegacySnapshot(InputStream input, int maxBytes) throws IOException {
+        byte[] bytes = readBounded(input, maxBytes);
+        try {
+            JSONObject root = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            if (root.getInt("version") != VERSION) throw new IOException("Unsupported Motion index version");
+            JSONArray rows = root.getJSONArray("records");
+            ArrayList<Record> parsed = new ArrayList<>(rows.length());
+            for (int i = 0; i < rows.length(); i++) parsed.add(readRecord(rows.getJSONObject(i)));
+            return Collections.unmodifiableList(parsed);
+        } catch (JSONException e) {
+            throw new IOException("Invalid legacy Motion index", e);
+        }
+    }
+
+    private static byte[] readBounded(InputStream input, int maxBytes) throws IOException {
+        if (input == null || maxBytes <= 0) throw new IOException("Invalid Motion index input");
+        java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        int count;
+        while ((count = input.read(buffer)) != -1) {
+            if (count > maxBytes - total) throw new IOException("Legacy Motion index exceeds size limit");
+            output.write(buffer, 0, count);
+            total += count;
+        }
+        return output.toByteArray();
+    }
+
     private int indexOf(String uri) {
         for (int i = 0; i < records.size(); i++) {
             if (records.get(i).uri.equals(uri)) return i;
@@ -196,6 +270,7 @@ final class MotionMediaIndex {
         try {
             JSONObject root = new JSONObject(new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
             if (root.getInt("version") != VERSION) throw new IOException("Unsupported Motion index version");
+            legacyImportDigest = root.optString("legacyImportDigest", null);
             JSONArray rows = root.getJSONArray("records");
             for (int i = 0; i < rows.length(); i++) records.add(readRecord(rows.getJSONObject(i)));
         } catch (JSONException e) {
@@ -210,6 +285,7 @@ final class MotionMediaIndex {
             for (Record record : records) rows.put(writeRecord(record));
             root.put("version", VERSION);
             root.put("records", rows);
+            if (legacyImportDigest != null) root.put("legacyImportDigest", legacyImportDigest);
         } catch (JSONException e) {
             throw new IOException("Cannot encode Motion index", e);
         }
@@ -281,5 +357,20 @@ final class MotionMediaIndex {
                     item.optLong("endWallTimeMs", startWall), level));
         }
         return record;
+    }
+
+    private static int markerIndex(List<Marker> markers, String eventId, int level) {
+        for (int i = 0; i < markers.size(); i++) {
+            Marker marker = markers.get(i);
+            if (marker.level == level && marker.eventId.equals(eventId)) return i;
+        }
+        return -1;
+    }
+
+    private static boolean sameMarker(Marker left, Marker right) {
+        return left.elapsedRealtimeMs == right.elapsedRealtimeMs
+                && left.wallTimeMs == right.wallTimeMs
+                && left.endElapsedRealtimeMs == right.endElapsedRealtimeMs
+                && left.endWallTimeMs == right.endWallTimeMs;
     }
 }

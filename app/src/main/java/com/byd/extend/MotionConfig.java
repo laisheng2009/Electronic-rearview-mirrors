@@ -19,7 +19,7 @@ public final class MotionConfig {
         warningEnabled = json.optBoolean("warning", false);
         recordingEnabled = json.optBoolean("enabled", false);
         audioEnabled = json.optBoolean("audio", false);
-        lockCondition = bounded(json.optInt("lock", 0), 0, 2);
+        lockCondition = normalizeLockMode(json.optInt("lock", 1));
         beforeSeconds = bounded(json.optInt("before", 10), 1, 30);
         afterSeconds = bounded(json.optInt("after", 10), 1, 30);
         quality = bounded(json.optInt("quality", 1), 0, 2);
@@ -40,9 +40,10 @@ public final class MotionConfig {
         SharedPreferences screen = context.getSharedPreferences(SCREEN_PREFS, Context.MODE_PRIVATE);
         SharedPreferences recording = context.getSharedPreferences(RECORDING_PREFS, Context.MODE_PRIVATE);
         JSONObject json = new JSONObject(recording.getAll());
+        int lock = normalizeLockMode(screen.getInt("lock", 1));
         try {
             json.put("warning", screen.getBoolean("enabled", false));
-            json.put("lock", screen.getInt("lock", 0));
+            json.put("lock", lock);
         } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
         return new MotionConfig(json);
     }
@@ -52,11 +53,11 @@ public final class MotionConfig {
         return new MotionConfig(new JSONObject(json));
     }
 
+    public static int normalizeLockMode(int value) { return value == 0 ? 0 : 1; }
+
     public boolean anyEnabled() { return warningEnabled || recordingEnabled; }
     boolean eligible(int power, int lock) {
-        return anyEnabled() && power == 0
-                && (lockCondition == 0 || lockCondition == 1 && lock == 2
-                    || lockCondition == 2 && lock == 1);
+        return anyEnabled() && power == 0 && (lockCondition == 0 || lockCondition == 1 && lock == 2);
     }
     public int width() { return quality == 0 ? 1280 : quality == 1 ? 1920 : 2560; }
     public int height() { return width() * 9 / 16; }

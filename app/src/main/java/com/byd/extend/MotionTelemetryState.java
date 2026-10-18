@@ -1,6 +1,6 @@
 package com.byd.extend;
 
-/** Keeps Motion ineligible until fresh valid Power and Lock values form a baseline. */
+/** Keeps Motion ineligible until fresh valid telemetry baselines meet its activation mode. */
 final class MotionTelemetryState {
     private int power = -1;
     private int lock = -1;
@@ -10,7 +10,8 @@ final class MotionTelemetryState {
     void power(int raw, boolean baseline) {
         int normalized = AvasEventPolicy.normalizedPower(raw);
         if (normalized < 0) {
-            invalidate();
+            power = -1;
+            powerBaseline = false;
             return;
         }
         power = normalized;
@@ -19,7 +20,8 @@ final class MotionTelemetryState {
 
     void lock(int value, boolean baseline) {
         if (value != 1 && value != 2) {
-            invalidate();
+            lock = -1;
+            lockBaseline = false;
             return;
         }
         lock = value;
@@ -36,7 +38,9 @@ final class MotionTelemetryState {
     }
 
     boolean eligible(MotionConfig config) {
-        return ready() && config != null && config.eligible(power, lock);
+        return config != null && powerBaseline && power >= 0
+                && (config.lockCondition == 0 ? config.eligible(power, -1)
+                    : lockBaseline && config.eligible(power, lock));
     }
 
     int power() { return power; }

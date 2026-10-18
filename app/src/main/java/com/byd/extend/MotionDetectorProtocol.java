@@ -11,7 +11,12 @@ final class MotionDetectorProtocol {
     static final String CALLBACK_DESCRIPTOR = "com.byd.extend.IMotionDetectorCallback";
     static final String LOCK_PATH = "/data/local/tmp/bydextend_motion.lock";
     static final String LOG_PATH = "/data/local/tmp/bydextend_motion.log";
-    static final int VERSION = 1;
+    static final String STATE_ROOT = "/data/local/tmp/bydextend_motion";
+    static final String CONFIG_PATH = STATE_ROOT + "/config.json";
+    static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
+    static final String ACTION_DISMISS_WARNING = "com.byd.extend.action.DISMISS_MOTION_WARNING";
+    static final String EXTRA_SESSION = "motion_session_id";
+    static final int VERSION = 2;
 
     static final int TX_PING = IBinder.FIRST_CALL_TRANSACTION;
     static final int TX_START = IBinder.FIRST_CALL_TRANSACTION + 1;
@@ -22,6 +27,16 @@ final class MotionDetectorProtocol {
     static final int TX_FINISH_WARNING = IBinder.FIRST_CALL_TRANSACTION + 6;
     static final int TX_USER_TAKEOVER = IBinder.FIRST_CALL_TRANSACTION + 7;
     static final int TX_WARNING_WINDOW_READY = IBinder.FIRST_CALL_TRANSACTION + 8;
+    static final int TX_CONFIGURE = IBinder.FIRST_CALL_TRANSACTION + 9;
+    static final int TX_ATTACH_UI = IBinder.FIRST_CALL_TRANSACTION + 10;
+    static final int TX_DETACH_UI = IBinder.FIRST_CALL_TRANSACTION + 11;
+    static final int TX_TELEMETRY = IBinder.FIRST_CALL_TRANSACTION + 12;
+    static final int TX_IMPORT_MEDIA_INDEX = IBinder.FIRST_CALL_TRANSACTION + 13;
+    static final int TX_REFRESH_MEDIA = IBinder.FIRST_CALL_TRANSACTION + 14;
+    static final int TX_QUERY_MEDIA = IBinder.FIRST_CALL_TRANSACTION + 15;
+    static final int TX_READ_MEDIA = IBinder.FIRST_CALL_TRANSACTION + 16;
+    static final int TX_DELETE_MEDIA = IBinder.FIRST_CALL_TRANSACTION + 17;
+    static final int TX_EXPLICIT_SHUTDOWN = IBinder.FIRST_CALL_TRANSACTION + 18;
 
     static final int CB_PREPARED = IBinder.FIRST_CALL_TRANSACTION;
     static final int CB_STATUS = IBinder.FIRST_CALL_TRANSACTION + 1;
@@ -33,6 +48,12 @@ final class MotionDetectorProtocol {
     static final int CAMERA_ATTACH = 13;
     static final int CAMERA_DETACH = 14;
     static final int CAMERA_AUTHORIZE = 15;
+    static final int CAMERA_RECORD_ATTACH = 16;
+    static final int CAMERA_RECORD_DETACH = 17;
+    static final int CAMERA_OWN_WAKE = 18;
+    static final int CAMERA_END_WAKE = 19;
+    static final int CAMERA_BIND_WORKER = 20;
+    static final int CAMERA_UNBIND_WORKER = 21;
     static final int SURFACE_INDEX = 4123;
 
     static final int INPUT_WIDTH = 3840;

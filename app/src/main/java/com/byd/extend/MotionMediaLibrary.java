@@ -6,7 +6,12 @@ import android.media.MediaExtractor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
@@ -27,15 +32,56 @@ public final class MotionMediaLibrary {
     private final Context context;
     private final MotionStorage storage;
     private final MotionMediaIndex index;
+    private final File leaseDirectory;
+    private final Access access;
+
+    /** Narrow app-side facade for the worker-owned index; implementations must not expose paths. */
+    public interface Access {
+        int refresh();
+        String query(Query query, MotionConfig config, String pageToken);
+        String read(String volumeId, long mediaStoreId);
+        boolean delete(String volumeId, long mediaStoreId);
+        boolean importLegacyIndex(ParcelFileDescriptor source) throws IOException;
+    }
 
     public MotionMediaLibrary(Context context) {
         this.context = context.getApplicationContext();
         this.storage = new MotionStorage(this.context);
+        this.leaseDirectory = new File(this.context.getFilesDir(), "motion/leases");
+        this.access = null;
         try {
             this.index = MotionMediaIndex.shared(new File(this.context.getFilesDir(), "motion/media-index.json"));
         } catch (IOException e) {
             throw new IllegalStateException("Cannot open Motion media index", e);
         }
+    }
+
+    MotionMediaLibrary(MotionShellMediaContext shellContext) {
+        this.context = shellContext.systemContext();
+        this.storage = new MotionStorage(shellContext);
+        this.leaseDirectory = new File(shellContext.privateDirectory(), "leases");
+        this.access = null;
+        try {
+            this.index = MotionMediaIndex.shared(new File(shellContext.privateDirectory(), "media-index.json"));
+        } catch (IOException e) {
+            storage.close();
+            throw new IllegalStateException("Cannot open shell Motion media index", e);
+        }
+    }
+
+    /** Creates the existing UI-facing API over the authenticated worker Binder client. */
+    public MotionMediaLibrary(Context context, Access access) {
+        if (access == null) throw new IllegalArgumentException("Motion media access is required");
+        this.context = context.getApplicationContext();
+        this.storage = null;
+        this.index = null;
+        this.leaseDirectory = null;
+        this.access = access;
+    }
+
+    public boolean importLegacyIndex(ParcelFileDescriptor source) throws IOException {
+        if (access == null) throw new IllegalStateException("Legacy index import is worker-only");
+        return access.importLegacyIndex(source);
     }
 
     public enum Sort { NEWEST_FIRST, OLDEST_FIRST }
@@ -84,6 +130,7 @@ public final class MotionMediaLibrary {
         public final Uri contentUri;
         public final String title;
         public final String volumeId;
+        public final long mediaStoreId;
         public final String segmentId;
         public final long recordedAtMillis;
         public final long durationMs;
@@ -93,12 +140,13 @@ public final class MotionMediaLibrary {
         public final boolean available;
         public final boolean protectedFile;
 
-        private Entry(Uri contentUri, String title, String volumeId, String segmentId,
+        private Entry(Uri contentUri, String title, String volumeId, long mediaStoreId, String segmentId,
                 long recordedAtMillis, long durationMs, long sizeBytes, Status status,
                 List<Marker> markers, boolean available, boolean protectedFile) {
             this.contentUri = contentUri;
             this.title = title == null ? "" : title;
             this.volumeId = volumeId;
+            this.mediaStoreId = mediaStoreId;
             this.segmentId = segmentId;
             this.recordedAtMillis = recordedAtMillis;
             this.durationMs = Math.max(0, durationMs);
@@ -195,6 +243,7 @@ public final class MotionMediaLibrary {
 
     /** Reconciles app-owned public media and finishes valid interrupted segments after a crash. */
     public synchronized int refresh() {
+        if (access != null) return access.refresh();
         int changed = 0;
         List<MotionStorage.Volume> volumes = storage.volumes();
         Map<String, MotionStorage.Volume> byId = new HashMap<>();
@@ -203,7 +252,7 @@ public final class MotionMediaLibrary {
         for (MotionMediaIndex.Record row : index.records()) {
             if (!MotionMediaIndex.RECORDING.equals(row.status)) continue;
             MotionStorage.Volume volume = byId.get(row.volumeId);
-            if (volume == null || !volume.mounted || MotionMediaLease.isHeld(context, row.uri)) continue;
+            if (volume == null || !volume.mounted || MotionMediaLease.isHeld(leaseDirectory, row.uri)) continue;
             Uri finalUri = Uri.parse(row.uri);
             String inspectionUri = row.uri;
             if (row.stagingUri != null && "file".equals(finalUri.getScheme())
@@ -234,7 +283,7 @@ public final class MotionMediaLibrary {
                 if (index.find(uri) != null) continue;
                 if (item.pending) {
                     if (System.currentTimeMillis() - item.recordedAtMs < 60_000L
-                            || MotionMediaLease.isHeld(context, uri)) continue;
+                            || MotionMediaLease.isHeld(leaseDirectory, uri)) continue;
                     MediaFacts facts = inspect(uri);
                     try {
                         if (facts != null && facts.hasVideo && storage.recoverInterrupted(volume, item.uri, null)) {
@@ -265,6 +314,7 @@ public final class MotionMediaLibrary {
 
     public List<Entry> query(Query query) {
         Query actual = query == null ? Query.recent() : query;
+        if (access != null) return queryRemote(actual, MotionConfig.read(context));
         ArrayList<Entry> result = new ArrayList<>();
         Map<String, MotionStorage.Volume> volumes = volumeMap();
         for (MotionMediaIndex.Record record : index.records()) {
@@ -281,7 +331,8 @@ public final class MotionMediaLibrary {
                         marker.endWallTimeMs, marker.endElapsedRealtimeMs,
                         marker.elapsedRealtimeMs - record.startElapsedRealtimeMs, marker.level));
             }
-            result.add(new Entry(uri, record.name, record.volumeId, record.segmentId,
+            result.add(new Entry(uri, record.name, record.volumeId,
+                    storage.mediaStoreId(volume, uri), record.segmentId,
                     record.recordedAtMs, record.durationMs, record.sizeBytes, status, markers,
                     available, record.protectedFile));
         }
@@ -289,6 +340,92 @@ public final class MotionMediaLibrary {
         if (actual.sort == Sort.NEWEST_FIRST) order = order.reversed();
         result.sort(order.thenComparing(entry -> entry.contentUri.toString()));
         return result;
+    }
+
+    private List<Entry> queryRemote(Query query, MotionConfig config) {
+        ArrayList<Entry> result = new ArrayList<>();
+        String pageToken = null;
+        java.util.HashSet<String> tokens = new java.util.HashSet<>();
+        for (int pages = 0; pages < 10000; pages++) {
+            JSONObject response = parseResponse(access.query(query, config, pageToken));
+            try {
+                JSONArray entries = response.getJSONArray("entries");
+                for (int i = 0; i < entries.length(); i++) result.add(readEntry(entries.getJSONObject(i)));
+                if (response.isNull("nextPageToken")) break;
+                String next = response.getString("nextPageToken");
+                if (next.isEmpty() || !tokens.add(next))
+                    throw new IllegalStateException("Worker returned a repeated Motion page token");
+                pageToken = next;
+            } catch (JSONException e) {
+                throw new IllegalStateException("Invalid worker Motion media page", e);
+            }
+            if (pages == 9999) throw new IllegalStateException("Worker Motion media page limit exceeded");
+        }
+        Comparator<Entry> order = Comparator.comparingLong(entry -> entry.recordedAtMillis);
+        if (query.sort == Sort.NEWEST_FIRST) order = order.reversed();
+        result.sort(order.thenComparing(entry -> entry.contentUri.toString()));
+        return result;
+    }
+
+    private static JSONObject parseResponse(String encoded) {
+        if (encoded == null || encoded.isEmpty()) throw new IllegalStateException("Worker returned no Motion data");
+        try {
+            JSONObject root = new JSONObject(encoded);
+            if (root.optInt("version", 0) != 1) throw new IllegalStateException("Unsupported worker Motion response");
+            return root;
+        } catch (JSONException e) {
+            throw new IllegalStateException("Invalid worker Motion response", e);
+        }
+    }
+
+    private static Entry readEntry(JSONObject row) throws JSONException {
+        Uri uri = Uri.parse(row.getString("contentUri"));
+        if (!"content".equals(uri.getScheme()) || !"media".equals(uri.getAuthority()))
+            throw new JSONException("Worker Motion entry URI is not MediaStore media");
+        String statusValue = row.optString("status", Status.UNKNOWN.name());
+        Status entryStatus;
+        try { entryStatus = Status.valueOf(statusValue.toUpperCase(java.util.Locale.ROOT)); }
+        catch (IllegalArgumentException unknown) { entryStatus = Status.UNKNOWN; }
+        JSONArray encodedMarkers = row.optJSONArray("markers");
+        ArrayList<Marker> markers = new ArrayList<>();
+        if (encodedMarkers != null) for (int i = 0; i < encodedMarkers.length(); i++) {
+            JSONObject marker = encodedMarkers.getJSONObject(i);
+            long elapsed = marker.getLong("elapsedRealtimeMs");
+            long endElapsed = marker.optLong("endElapsedRealtimeMs", elapsed);
+            markers.add(new Marker(marker.optString("eventId", ""),
+                    marker.getLong("recordedAtMillis"), elapsed,
+                    marker.optLong("endRecordedAtMillis", marker.getLong("recordedAtMillis")),
+                    endElapsed, marker.optLong("positionMs", 0), marker.getInt("level")));
+        }
+        long mediaStoreId = row.optLong("mediaStoreId", -1);
+        if (mediaStoreId <= 0 || !Long.toString(mediaStoreId).equals(uri.getLastPathSegment()))
+            throw new JSONException("Worker Motion entry has no matching MediaStore ID");
+        return new Entry(uri, row.optString("title", ""), row.getString("volumeId"), mediaStoreId,
+                row.optString("segmentId", ""), row.optLong("recordedAtMillis", 0),
+                row.optLong("durationMs", 0), row.optLong("sizeBytes", 0), entryStatus,
+                markers, row.optBoolean("available", false), row.optBoolean("protectedFile", false));
+    }
+
+    private static Stats readStats(JSONObject json) throws JSONException {
+        JSONArray encodedVolumes = json.getJSONArray("volumes");
+        ArrayList<VolumeStats> volumes = new ArrayList<>();
+        HashMap<String, VolumeStats> byId = new HashMap<>();
+        for (int i = 0; i < encodedVolumes.length(); i++) {
+            JSONObject row = encodedVolumes.getJSONObject(i);
+            VolumeStats volume = new VolumeStats(row.getString("id"), row.optString("label", ""),
+                    row.optBoolean("primary"), row.optBoolean("removable"), row.optBoolean("mounted"),
+                    row.optBoolean("readOnly"), row.optLong("capacityBytes", -1),
+                    row.optLong("freeBytes", -1), row.optLong("otherBytes", -1),
+                    row.optLong("ownBytes", -1), row.optLong("oemRecorderBytes", -1),
+                    row.optLong("ownAllowanceBytes", -1), row.optLong("oemAllowanceBytes", -1),
+                    row.optLong("unallocatedBytes", -1));
+            volumes.add(volume);
+            byId.put(volume.id, volume);
+        }
+        String primaryId = json.isNull("primary") ? null : json.getJSONObject("primary").optString("id", null);
+        String secondaryId = json.isNull("secondary") ? null : json.getJSONObject("secondary").optString("id", null);
+        return new Stats(volumes, primaryId == null ? null : byId.get(primaryId),
+                secondaryId == null ? null : byId.get(secondaryId));
     }
 
     /** Aggregates only entries in the supplied interval/volume, using the device-local calendar date. */
@@ -322,6 +459,11 @@ public final class MotionMediaLibrary {
 
     public Stats queryStats(MotionConfig config) {
         MotionConfig actual = config == null ? MotionConfig.read(context) : config;
+        if (access != null) {
+            JSONObject response = parseResponse(access.query(Query.recent(), actual, null));
+            try { return readStats(response.getJSONObject("stats")); }
+            catch (JSONException e) { throw new IllegalStateException("Invalid worker Motion statistics", e); }
+        }
         List<MotionStorage.Volume> volumes = storage.volumes();
         ArrayList<VolumeStats> result = new ArrayList<>();
         VolumeStats primary = null;
@@ -368,6 +510,17 @@ public final class MotionMediaLibrary {
     public DeleteResult deleteSelected(Collection<Entry> selected) {
         if (selected == null || selected.isEmpty()) return new DeleteResult(0, 0, 0);
         int deleted = 0, failed = 0, skipped = 0;
+        if (access != null) {
+            for (Entry entry : selected) {
+                if (entry == null || entry.mediaStoreId <= 0 || entry.protectedFile
+                        || (entry.status != Status.COMPLETE && entry.status != Status.INTERRUPTED
+                        && entry.status != Status.UNKNOWN)) {
+                    skipped++;
+                } else if (access.delete(entry.volumeId, entry.mediaStoreId)) deleted++;
+                else failed++;
+            }
+            return new DeleteResult(deleted, failed, skipped);
+        }
         Map<String, MotionStorage.Volume> volumes = volumeMap();
         for (Entry entry : selected) {
             if (entry == null || entry.contentUri == null || entry.protectedFile
@@ -382,7 +535,7 @@ public final class MotionMediaLibrary {
                 skipped++;
                 continue;
             }
-            if (MotionMediaLease.isHeld(context, current.uri)) {
+            if (MotionMediaLease.isHeld(leaseDirectory, current.uri)) {
                 skipped++;
                 continue;
             }
@@ -414,8 +567,33 @@ public final class MotionMediaLibrary {
         return null;
     }
 
-    MotionMediaIndex index() { return index; }
-    MotionStorage storage() { return storage; }
+    MotionMediaIndex index() {
+        if (index == null) throw new IllegalStateException("Remote Motion library has no local index");
+        return index;
+    }
+    MotionStorage storage() {
+        if (storage == null) throw new IllegalStateException("Remote Motion library has no local storage");
+        return storage;
+    }
+    File leaseDirectory() { return leaseDirectory; }
+
+    public Entry read(String volumeId, long mediaStoreId) {
+        if (access == null) return null;
+        String encoded = access.read(volumeId, mediaStoreId);
+        if (encoded == null || encoded.isEmpty()) return null;
+        JSONObject root = parseResponse(encoded);
+        try { return root.isNull("entry") ? null : readEntry(root.getJSONObject("entry")); }
+        catch (JSONException e) { throw new IllegalStateException("Invalid worker Motion record", e); }
+    }
+
+    public void close() {
+        if (storage != null) {
+            storage.close();
+        } else if (access instanceof AutoCloseable) {
+            try { ((AutoCloseable) access).close(); }
+            catch (Exception ignored) { }
+        }
+    }
 
     /** Deletes only oldest indexed, complete, unprotected own clips until this segment's byte budget fits. */
     StorageDecision prepareOwnSpace(String volumeId, MotionConfig config, long requiredBytes) {
@@ -424,6 +602,8 @@ public final class MotionMediaLibrary {
 
     StorageDecision prepareOwnSpace(String volumeId, MotionConfig config, long requiredBytes,
             long baseOwnBytes, long activeBytes) {
+        if (!storage.hasMotionStoragePermission())
+            return new StorageDecision(false, -1, -1, "motion_storage_permission_denied");
         MotionConfig actual = config == null ? MotionConfig.read(context) : config;
         MotionStorage.Volume volume = storage.findVolume(volumeId);
         if (volume == null || !volume.mounted || volume.readOnly)
@@ -458,7 +638,7 @@ public final class MotionMediaLibrary {
             for (MotionMediaIndex.Record record : index.records()) {
                 if (!currentVolume.id.equals(record.volumeId) || !MotionMediaIndex.COMPLETE.equals(record.status)
                         || record.protectedFile || attempted.contains(record.uri)
-                        || MotionMediaLease.isHeld(context, record.uri)) continue;
+                        || MotionMediaLease.isHeld(leaseDirectory, record.uri)) continue;
                 Uri uri = Uri.parse(record.uri);
                 if (!storage.isOwnedMedia(currentVolume, uri)) continue;
                 if (candidate == null || record.recordedAtMs < candidate.recordedAtMs) candidate = record;
@@ -558,7 +738,10 @@ public final class MotionMediaLibrary {
         try {
             Uri uri = Uri.parse(uriValue);
             if ("file".equals(uri.getScheme())) extractor.setDataSource(uri.getPath());
-            else extractor.setDataSource(context, uri, null);
+            else try (ParcelFileDescriptor descriptor = storage.openMediaFileDescriptor(uri, "r")) {
+                if (descriptor == null) return null;
+                extractor.setDataSource(descriptor.getFileDescriptor());
+            }
             boolean video = false;
             long duration = 0;
             for (int i = 0; i < extractor.getTrackCount(); i++) {
@@ -581,8 +764,8 @@ public final class MotionMediaLibrary {
             File file = new File(uri.getPath());
             return file.isFile() ? file.length() : 0;
         }
-        try (android.content.res.AssetFileDescriptor descriptor = context.getContentResolver().openAssetFileDescriptor(uri, "r")) {
-            return descriptor == null ? 0 : descriptor.getLength();
+        try (ParcelFileDescriptor descriptor = storage.openMediaFileDescriptor(uri, "r")) {
+            return descriptor == null ? 0 : descriptor.getStatSize();
         } catch (IOException | RuntimeException unavailable) { return 0; }
     }
 

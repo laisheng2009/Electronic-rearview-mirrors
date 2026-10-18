@@ -5,9 +5,8 @@
     <string name="motion_enable">"检测到移动时显示警示"</string>
     <string name="motion_timing">"车辆关闭 • 等待2.5秒 • 显示10秒；再次检测到移动时延长显示。"</string>
     <string name="motion_lock">"车锁状态"</string>
-    <string name="motion_any">"不限"</string>
-    <string name="motion_locked">"仅锁车时"</string>
-    <string name="motion_unlocked">"仅解锁时"</string>
+    <string name="motion_any">"车辆下电"</string>
+    <string name="motion_locked">"车辆下电且已锁车"</string>
     <string name="motion_active">"当前模板"</string>
     <string name="motion_edit">"编辑"</string>
     <string name="motion_show">"预览"</string>

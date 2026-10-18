@@ -30,7 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class DirectCameraSourceHub
         implements CameraHelperMain.HelperBinder.PersistentSurfaceFanout {
     interface Listener {
-        void onConsumerFailure(Surface surface, int index, Throwable error);
+        void onConsumerFailure(
+                Surface surface, int index, int requestId, int producerEpoch, Throwable error);
         void onSourceFailure(int index, Throwable error);
         void onStats(int index, Stats stats);
 
@@ -539,6 +540,8 @@ final class DirectCameraSourceHub
         private void destroyTarget(Target target) {
             target.retiring = true;
             makeCurrent(idleSurface);
+            // Detach is the teardown barrier; do not drain GPU work on the frame path.
+            GLES20.glFinish();
             require(EGL14.eglDestroySurface(display, target.eglSurface), "downstream EGL release failed");
             if (target.mapping != null) target.mapping.close();
         }
@@ -800,8 +803,11 @@ final class DirectCameraSourceHub
                     forgetTargetFromWorker(target);
                     Surface failedSurface = target.surface;
                     int failedIndex = target.index;
+                    int failedRequestId = target.requestId;
+                    int failedProducerEpoch = target.producerEpoch;
                     postCoordinator(() -> listener.onConsumerFailure(
-                            failedSurface, failedIndex, error));
+                            failedSurface, failedIndex, failedRequestId,
+                            failedProducerEpoch, error));
                 }
             }
             try {

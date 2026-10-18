@@ -5,9 +5,8 @@
     <string name="motion_enable">"Показувати попередження при виявленні руху"</string>
     <string name="motion_timing">"Авто вимкнене • очікування 2,5 с • показ 10 с; повторна детекція продовжує показ."</string>
     <string name="motion_lock">"Стан замків"</string>
-    <string name="motion_any">"Будь-який"</string>
-    <string name="motion_locked">"Лише замкнене"</string>
-    <string name="motion_unlocked">"Лише відімкнене"</string>
+    <string name="motion_any">"Вимкнене"</string>
+    <string name="motion_locked">"Вимкнене і замкнене"</string>
     <string name="motion_active">"Поточний шаблон"</string>
     <string name="motion_edit">"Редагувати"</string>
     <string name="motion_show">"Передпоказ"</string>

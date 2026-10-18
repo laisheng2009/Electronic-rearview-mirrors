@@ -1336,6 +1336,10 @@ final class CameraHelperMain {
             }
         }
 
+        synchronized int motionProducerEpoch() {
+            return persistentPanoProducer && persistentSession.motionDetectionAttached ? producerEpoch : -1;
+        }
+
         synchronized void detachMotionDetector() throws Exception {
             if (persistentSession.motionDetectionSurface == null) return;
             persistentSession.motionDetectionWanted = false;
@@ -1367,6 +1371,8 @@ final class CameraHelperMain {
             if (persistentSession.motionGroup.has()) closePersistentGroup(
                     persistentSession.motionGroup, "motion_recording_stop",
                     persistentSession.motionGroup.requestId);
+            if (persistentSession.motionGroup.has())
+                throw new IllegalStateException("Motion recording outputs did not detach");
         }
 
         private synchronized String openMotionCompositionPreview(
@@ -2248,9 +2254,11 @@ final class CameraHelperMain {
                 openedHub = DirectCameraSourceHub.create(new DirectCameraSourceHub.Listener() {
                     @Override
                     public void onConsumerFailure(
-                            Surface failedSurface, int index, Throwable error) {
+                            Surface failedSurface, int index, int failedRequestId,
+                            int failedProducerEpoch, Throwable error) {
                         callbackHandler.post(() -> acceptRawConsumerFailure(
-                                openedHubGeneration, failedSurface, index, error));
+                                openedHubGeneration, failedSurface, index,
+                                failedRequestId, failedProducerEpoch, error));
                     }
 
                     @Override
@@ -2431,9 +2439,18 @@ final class CameraHelperMain {
         }
 
         private synchronized void acceptRawConsumerFailure(
-                int hubGeneration, Surface failedSurface, int index, Throwable error) {
+                int hubGeneration, Surface failedSurface, int index,
+                int failedRequestId, int failedProducerEpoch, Throwable error) {
             if (!matchesSourceHubGeneration(sourceHubGeneration, hubGeneration)
                     || rawSourceHub == null || !persistentPanoProducer) return;
+            ConsumerGroup current = persistentSession.groupContaining(failedSurface);
+            if (failedProducerEpoch != producerEpoch
+                    || current != null && current.requestId != failedRequestId) {
+                emit("camera_consumer_event_ignored", "reason", "retired_target",
+                        "request_id", failedRequestId, "producer_epoch", failedProducerEpoch,
+                        "active_producer_epoch", producerEpoch);
+                return;
+            }
             boolean handled;
             boolean[] shellCloseQueued = {false};
             try {

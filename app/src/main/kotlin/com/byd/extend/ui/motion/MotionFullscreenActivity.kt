@@ -3,6 +3,7 @@ package com.byd.extend.ui.motion
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -23,7 +24,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.byd.extend.AppLanguage
-import com.byd.extend.MotionRuntime
+import com.byd.extend.MotionDetectorClient
 import com.byd.extend.ui.UiLanguage
 import com.byd.extend.ui.UiStrings
 import com.byd.extend.ui.UiTheme
@@ -35,6 +36,7 @@ class MotionFullscreenActivity : ComponentActivity() {
     private var sessionId: String? = null
     private var runtimeDismissal = false
     private var takeoverNotified = false
+    private var activeRuntimeWarning = false
     private var readyNotifiedForSession: String? = null
     private var renderGeneration by mutableIntStateOf(0)
     private var template by mutableStateOf<MotionTemplate?>(null)
@@ -44,6 +46,10 @@ class MotionFullscreenActivity : ComponentActivity() {
         activeActivity = WeakReference(this)
         sessionId = savedInstanceState?.getString(STATE_SESSION) ?: intent.getStringExtra(EXTRA_SESSION)
         handleIntent(intent)
+        if (isFinishing || intent?.action == ACTION_DISMISS) {
+            finish()
+            return
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -96,39 +102,68 @@ class MotionFullscreenActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        val activeSession = sessionId ?: return
+        if (!activeRuntimeWarning || readyNotifiedForSession != activeSession
+            || runtimeDismissal || takeoverNotified) return
+        MotionDetectorClient.dismissWarning(applicationContext, activeSession)
+        takeoverNotified = true
+        activeRuntimeWarning = false
+        finish()
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(STATE_SESSION, sessionId)
         super.onSaveInstanceState(outState)
-    }
-
-    override fun onStop() {
-        if (!isChangingConfigurations && !runtimeDismissal && !takeoverNotified) {
-            sessionId?.let { session ->
-                MotionRuntime.dismissWarning(applicationContext, session, true)
-                takeoverNotified = true
-                finish()
-            }
-        }
-        super.onStop()
     }
 
     private fun handleIntent(next: Intent?) {
         when (next?.action) {
             ACTION_SHOW -> {
                 readyNotifiedForSession = null
-                sessionId = next.getStringExtra(EXTRA_SESSION)
+                val requestedSession = next.getStringExtra(EXTRA_SESSION)
+                if (requestedSession != null
+                    && !MotionDetectorClient.isLiveWarningSession(applicationContext, requestedSession)) {
+                    activeRuntimeWarning = false
+                    sessionId = null
+                    template = null
+                    finish()
+                    return
+                }
+                sessionId = requestedSession
                 runtimeDismissal = false
                 takeoverNotified = false
+                activeRuntimeWarning = requestedSession != null
+                if (activeRuntimeWarning) configureRuntimeWarningWindow()
                 renderGeneration++
                 template = MotionTemplateStore(applicationContext).read().active()
+            }
+            ACTION_DISMISS -> {
+                val requestedSession = next.getStringExtra(EXTRA_SESSION)
+                if (activeRuntimeWarning && requestedSession != null && requestedSession == sessionId) {
+                    runtimeDismissal = true
+                    activeRuntimeWarning = false
+                    finish()
+                }
             }
             else -> template = MotionTemplateStore(applicationContext).read().active()
         }
     }
 
+    private fun configureRuntimeWarningWindow() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            or android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+            or android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+    }
+
     private fun closeByUser() {
         if (!takeoverNotified) {
-            sessionId?.let { MotionRuntime.dismissWarning(applicationContext, it, true) }
+            sessionId?.let { MotionDetectorClient.dismissWarning(applicationContext, it) }
             takeoverNotified = true
         }
         finish()
@@ -138,12 +173,13 @@ class MotionFullscreenActivity : ComponentActivity() {
         if (sessionId != session || renderGeneration != generation) return
         if (readyNotifiedForSession == session) return
         if (isFinishing || isDestroyed) return
-        readyNotifiedForSession = session
-        MotionRuntime.warningWindowReady(applicationContext, session)
+        if (MotionDetectorClient.warningWindowReady(applicationContext, session))
+            readyNotifiedForSession = session
     }
 
     companion object {
         private const val ACTION_SHOW = "com.byd.extend.action.SHOW_MOTION_WARNING"
+        private const val ACTION_DISMISS = "com.byd.extend.action.DISMISS_MOTION_WARNING"
         private const val EXTRA_SESSION = "motion_session_id"
         private const val STATE_SESSION = "motion_saved_session_id"
         private const val SETTINGS_PREFS = "settings"

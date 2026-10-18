@@ -14,6 +14,7 @@ import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.media.MediaRecorder;
 import android.os.Build;
+import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
@@ -51,7 +52,52 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private static final int AUDIO_SAMPLE_RATE = 16_000;
     private static final int AUDIO_CHANNEL_COUNT = 1;
 
+    static final class InputSurfaceLease {
+        private boolean retained;
+        private boolean releaseStarted;
+        private boolean releaseAcknowledged;
+
+        synchronized void resetForNextRecording() {
+            if (retained && !releaseAcknowledged)
+                throw new IllegalStateException("Motion encoder surface release is still pending");
+            retained = false;
+            releaseStarted = false;
+            releaseAcknowledged = false;
+        }
+
+        synchronized void retain() {
+            if (releaseStarted || releaseAcknowledged)
+                throw new IllegalStateException("Motion encoder surface release has started");
+            if (retained) throw new IllegalStateException("Motion encoder surface is already retained");
+            retained = true;
+        }
+
+        synchronized boolean beginRelease() {
+            releaseStarted = true;
+            return retained && !releaseAcknowledged;
+        }
+
+        synchronized void acknowledgeRelease() {
+            releaseStarted = true;
+            releaseAcknowledged = true;
+            notifyAll();
+        }
+
+        void awaitReleaseAcknowledged() {
+            boolean interrupted = false;
+            synchronized (this) {
+                while (retained && !releaseAcknowledged) {
+                    try { wait(); }
+                    catch (InterruptedException ignored) { interrupted = true; }
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
     private final Context context;
+    private final MotionShellMediaContext shellMediaContext;
+    private final String sessionId;
     private final Consumer<String> stateCallback;
     private final MotionMediaLibrary library;
     private final BlockingQueue<Detection> detections = new ArrayBlockingQueue<>(256);
@@ -59,6 +105,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private final ArrayList<EncodedPacket> ring = new ArrayList<>(); // Only encoded samples; hard byte/time bounded.
     private final ArrayDeque<Detection> pendingDetections = new ArrayDeque<>();
     private final ArrayList<TimelineItem> iteration = new ArrayList<>();
+    private final InputSurfaceLease inputSurfaceLease = new InputSurfaceLease();
 
     private volatile boolean buffering;
     private volatile boolean recording;
@@ -93,16 +140,38 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private final HashMap<Integer, Episode> episodesByLevel = new HashMap<>();
     private boolean videoEos;
     private boolean closed;
+    private boolean firstVideoSampleLogged;
+    private boolean firstKeyframeLogged;
+    private boolean firstDetectionLogged;
 
     public MotionVideoRecorder(Context context, Consumer<String> stateCallback) {
         this.context = context.getApplicationContext();
+        this.shellMediaContext = null;
+        this.sessionId = "app";
         this.stateCallback = stateCallback == null ? ignored -> { } : stateCallback;
         this.library = new MotionMediaLibrary(this.context);
         this.index = library.index();
         this.storage = library.storage();
     }
 
-    /** Starts the video encoder and returns its GPU-fed input through inputSurface(). */
+    public MotionVideoRecorder(MotionShellMediaContext shellMediaContext, String sessionId,
+            Consumer<String> stateCallback) {
+        this(shellMediaContext, null, sessionId, stateCallback);
+    }
+
+    MotionVideoRecorder(MotionShellMediaContext shellMediaContext, MotionMediaLibrary workerLibrary,
+            String sessionId, Consumer<String> stateCallback) {
+        if (shellMediaContext == null) throw new IllegalArgumentException("Motion shell media context is required");
+        this.context = shellMediaContext.systemContext();
+        this.shellMediaContext = shellMediaContext;
+        this.sessionId = sessionId == null || sessionId.isEmpty() ? "unknown" : sessionId;
+        this.stateCallback = stateCallback == null ? ignored -> { } : stateCallback;
+        this.library = workerLibrary == null ? new MotionMediaLibrary(shellMediaContext) : workerLibrary;
+        this.index = library.index();
+        this.storage = library.storage();
+    }
+
+    /** Starts the video encoder; callers must retain its input before handing it to the composer. */
     public void startBuffering(MotionConfig requestedConfig) {
         synchronized (this) {
             if (closed) throw new IllegalStateException("MotionVideoRecorder is closed");
@@ -112,6 +181,16 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 notifyState("recording_disabled");
                 return;
             }
+            if (shellMediaContext != null && !storage.hasMotionStoragePermission()) {
+                notifyState("motion_storage_permission_denied");
+                return;
+            }
+            if (next.audioEnabled && !hasRecordAudioPermission()) {
+                audioFailed = true;
+                notifyState("audio_unavailable:app_or_shell_permission_denied");
+                return;
+            }
+            inputSurfaceLease.resetForNextRecording();
             config = next;
             storage = library.storage();
             index = library.index();
@@ -133,6 +212,9 @@ public final class MotionVideoRecorder implements AutoCloseable {
             videoFormat = null;
             audioFormat = null;
             audioFailed = false;
+            firstVideoSampleLogged = false;
+            firstKeyframeLogged = false;
+            firstDetectionLogged = false;
             videoEos = false;
             stopRequested = false;
             stopReason = null;
@@ -158,6 +240,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 Thread worker = new Thread(this::runVideoLoop, "motion-video-recorder");
                 workerThread = worker;
                 worker.start();
+                logDiagnostic("encoder_started", "size=" + next.width() + "x" + next.height()
+                        + " audio=" + next.audioEnabled);
                 if (next.audioEnabled) startAudioCapture();
             } catch (IOException | RuntimeException failure) {
                 if (surface != null) try { surface.release(); } catch (RuntimeException ignored) { }
@@ -176,12 +260,32 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     public Surface inputSurface() { return inputSurface; }
+
+    /** Retains the encoder input until the camera owner and composer acknowledge detach. */
+    public Surface retainInputSurface() {
+        synchronized (this) {
+            synchronized (inputSurfaceLease) {
+                Surface surface = inputSurface;
+                if (closed || !buffering || surface == null)
+                    throw new IllegalStateException("Motion encoder input is unavailable");
+                inputSurfaceLease.retain();
+                return surface;
+            }
+        }
+    }
+
+    /** Acknowledges that camera and composer no longer reference the retained encoder input. */
+    public void releaseInputSurface() { inputSurfaceLease.acknowledgeRelease(); }
     public int width() { return config == null ? MotionConfig.read(context).width() : config.width(); }
     public int height() { return config == null ? MotionConfig.read(context).height() : config.height(); }
 
     /** Records an event level 1 (yellow) or 2 (red), timestamped on elapsedRealtime. */
     public void onDetection(int level, long elapsedMs) {
         if (!buffering || (level != 1 && level != 2) || elapsedMs < 0) return;
+        if (!firstDetectionLogged) {
+            firstDetectionLogged = true;
+            logDiagnostic("first_detection", "level=" + level + " elapsed_ms=" + elapsedMs);
+        }
         if (!detections.offer(new Detection(level, elapsedMs))) notifyState("motion_detection_queue_full");
     }
 
@@ -206,8 +310,15 @@ public final class MotionVideoRecorder implements AutoCloseable {
             worker = workerThread;
         }
         if (worker != null && worker != Thread.currentThread()) {
-            try { worker.join(5_000L); }
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            try {
+                worker.join(5_000L);
+                if (worker.isAlive()) {
+                    logDiagnostic("video_drain_timeout", "interrupting_worker=true");
+                    worker.interrupt();
+                    worker.join(1_500L);
+                }
+                if (worker.isAlive()) logDiagnostic("video_worker_still_alive", "reason=" + stopReason);
+            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
     }
 
@@ -251,10 +362,10 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private void startAudioCapture() {
-        if (Build.VERSION.SDK_INT >= 23
-                && context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        if (!hasRecordAudioPermission()) {
             audioFailed = true;
-            notifyState("audio_unavailable:permission_denied");
+            requestStopForAudioPermissionRevocation();
+            notifyState("audio_unavailable:app_or_shell_permission_denied");
             return;
         }
         audioRunning = true;
@@ -300,6 +411,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
             while (audioRunning) {
                 assertAudioCaptureAvailable(recorder.getAudioSessionId());
                 int count = recorder.read(pcm, 0, pcm.length, AudioRecord.READ_BLOCKING);
+                // Do not encode bytes returned by a read that overlapped permission revocation.
+                assertAudioCaptureAvailable(recorder.getAudioSessionId());
                 if (count < 0) throw new IOException("audio_capture_read_failed_" + count);
                 if (count == 0) continue;
                 if ((count & 1) != 0) count--;
@@ -332,7 +445,14 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 }
             }
         } catch (IOException | RuntimeException failure) {
-            if (audioRunning) {
+            if ("record_audio_permission_revoked".equals(failure.getMessage())
+                    || failure instanceof SecurityException || !hasRecordAudioPermission()) {
+                audioFailed = true;
+                audioRunning = false;
+                requestStopForAudioPermissionRevocation();
+                logDiagnostic("audio_permission_revoked", "recording_stop_requested=true");
+                notifyState("record_audio_permission_revoked");
+            } else if (audioRunning) {
                 audioFailed = true;
                 String detail = failure.getMessage();
                 notifyState("audio_unavailable:" + (detail == null || detail.isEmpty()
@@ -354,6 +474,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
 
     /** Refuse or stop optional microphone capture when calls, AVAS, or another client owns input. */
     private void assertAudioCaptureAvailable(int ownAudioSessionId) throws IOException {
+        if (!hasRecordAudioPermission()) throw new IOException("record_audio_permission_revoked");
         AudioManager audio = context.getSystemService(AudioManager.class);
         if (audio == null) throw new IOException("audio_manager_unavailable");
         try {
@@ -370,6 +491,19 @@ public final class MotionVideoRecorder implements AutoCloseable {
         } catch (SecurityException | IllegalStateException unavailable) {
             throw new IOException("audio_state_unavailable", unavailable);
         }
+    }
+
+    private boolean hasRecordAudioPermission() {
+        if (shellMediaContext != null) return shellMediaContext.hasRecordAudioPermission();
+        return Build.VERSION.SDK_INT < 23
+                || context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                        == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestStopForAudioPermissionRevocation() {
+        stopReason = "record_audio_permission_revoked";
+        stopRequested = true;
+        signalVideoEndOfStream();
     }
 
     private boolean drainAudio(MediaCodec encoder, MediaCodec.BufferInfo info) {
@@ -403,8 +537,19 @@ public final class MotionVideoRecorder implements AutoCloseable {
 
     private void runVideoLoop() {
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        long nextPermissionCheckMs = SystemClock.elapsedRealtime();
         try {
             while (!stopRequested) {
+                long now = SystemClock.elapsedRealtime();
+                if (shellMediaContext != null && now >= nextPermissionCheckMs) {
+                    nextPermissionCheckMs = now + 1_000L;
+                    if (!storage.hasMotionStoragePermission()) {
+                        stopReason = "motion_storage_permission_revoked";
+                        stopRequested = true;
+                        logDiagnostic("storage_permission_revoked", "recording_stop_requested=true");
+                        continue;
+                    }
+                }
                 collectTimelineItems(info);
                 processTimelineItems();
                 applyFinishRequest();
@@ -424,27 +569,30 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 tryOpenPendingDetection();
                 Thread.sleep(5L);
             }
-            Thread audio = audioThread;
-            if (audio != null && audio != Thread.currentThread()) {
-                try { audio.join(500L); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            }
+            joinAudioThread();
             collectTimelineItems(info);
             processTimelineItems();
             if (activeClip != null) closeActiveClip();
         } catch (InterruptedException interrupted) {
-            if (!stopRequested) Thread.currentThread().interrupt();
+            if (!stopRequested) {
+                stopReason = "video_worker_interrupted";
+                Thread.currentThread().interrupt();
+            }
             if (activeClip != null) closeActiveClip();
         } catch (RuntimeException failure) {
             Log.e(TAG, "video_encoder_loop_failed", failure);
+            stopReason = "video_encoder_failed";
             notifyState("video_encoder_failed:" + failure.getClass().getSimpleName());
             if (activeClip != null) closeActiveClip();
         } finally {
             stopAudioCapture();
-            Thread audio = audioThread;
-            if (audio != null && audio != Thread.currentThread()) {
-                try { audio.join(300L); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            try { joinAudioThread(); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            if (inputSurfaceLease.beginRelease()) {
+                String reason = stopReason == null || stopReason.isEmpty() ? "encoder_ended" : stopReason;
+                logDiagnostic("input_surface_release_wait", "reason=" + reason);
+                notifyState("input_release_required:" + reason);
+                inputSurfaceLease.awaitReleaseAcknowledged();
             }
             MediaCodec encoder = videoEncoder;
             videoEncoder = null;
@@ -452,14 +600,28 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 try { encoder.stop(); } catch (RuntimeException ignored) { }
                 try { encoder.release(); } catch (RuntimeException ignored) { }
             }
-            Surface surface = inputSurface;
-            inputSurface = null;
+            Surface surface;
+            synchronized (inputSurfaceLease) {
+                surface = inputSurface;
+                inputSurface = null;
+            }
             if (surface != null) try { surface.release(); } catch (RuntimeException ignored) { }
-            buffering = false;
             recording = false;
             workerThread = null;
+            buffering = false;
             notifyState("stopped:" + (stopReason == null ? "encoder_ended" : stopReason));
         }
+    }
+
+    private void joinAudioThread() throws InterruptedException {
+        Thread audio = audioThread;
+        if (audio == null || audio == Thread.currentThread()) return;
+        audio.join(2_000L);
+        if (audio.isAlive()) {
+            audio.interrupt();
+            audio.join(1_000L);
+        }
+        if (audio.isAlive()) logDiagnostic("audio_worker_still_alive", "stop_requested=" + stopRequested);
     }
 
     private void collectTimelineItems(MediaCodec.BufferInfo info) {
@@ -487,6 +649,17 @@ public final class MotionVideoRecorder implements AutoCloseable {
                             && (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
                         long elapsedUs = mapVideoPts(info.presentationTimeUs);
                         if (elapsedUs > lastVideoElapsedUs) {
+                            if (!firstVideoSampleLogged) {
+                                firstVideoSampleLogged = true;
+                                logDiagnostic("first_video_sample", "pts_us=" + elapsedUs
+                                        + " flags=" + info.flags + " bytes=" + info.size);
+                            }
+                            if (!firstKeyframeLogged
+                                    && (info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+                                firstKeyframeLogged = true;
+                                logDiagnostic("first_video_keyframe", "pts_us=" + elapsedUs
+                                        + " bytes=" + info.size);
+                            }
                             byte[] bytes = copyBytes(output, info.offset, info.size);
                             iteration.add(TimelineItem.packet(new EncodedPacket(VIDEO_TRACK, elapsedUs,
                                     info.flags, bytes)));
@@ -664,7 +837,9 @@ public final class MotionVideoRecorder implements AutoCloseable {
             output = storage.createOutput(preferred, config.fallbackEnabled, name, config,
                     library, requiredBytes, firstAttemptVolumeId);
             uri = output.uri.toString();
-            lease = MotionMediaLease.acquire(context, uri);
+            logDiagnostic("mp4_create", "volume=" + output.volumeId + " name=" + output.displayName
+                    + " media_id=" + (output.uri.getLastPathSegment() == null ? "unknown" : output.uri.getLastPathSegment()));
+            lease = MotionMediaLease.acquire(library.leaseDirectory(), uri);
             MotionMediaIndex.Record record = new MotionMediaIndex.Record(uri,
                     output.recoveryUri == null ? null : output.recoveryUri.toString(),
                     output.volumeId, output.displayName, segmentId, wallFromElapsed(startElapsedMs),
@@ -682,6 +857,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
             MediaFormat selectedAudioFormat = config.audioEnabled && !audioFailed ? audioFormat : null;
             if (selectedAudioFormat != null) audioTrack = muxer.addTrack(selectedAudioFormat);
             muxer.start();
+            logDiagnostic("mp4_muxer_started", "volume=" + output.volumeId + " name=" + output.displayName);
             Clip clip = new Clip(output, muxer, lease, record, videoTrack, audioTrack,
                     selectedAudioFormat != null, startElapsedMs);
             activeClip = clip;
@@ -703,6 +879,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
             return true;
         } catch (IOException | RuntimeException failure) {
             Log.e(TAG, "motion_segment_open_failed", failure);
+            logDiagnostic("mp4_create_failed", "name=" + name
+                    + " error=" + failure.getClass().getSimpleName());
             notifyState("motion_storage_unavailable:" + failure.getClass().getSimpleName());
             if (output != null) scheduleOutputContinuation(output.volumeId);
             else if (firstAttemptVolumeId != null) scheduleOutputContinuationTo(firstAttemptVolumeId);
@@ -752,12 +930,16 @@ public final class MotionVideoRecorder implements AutoCloseable {
         activeClip = null;
         recording = false;
         persistCurrentEpisode(clip, true);
+        logDiagnostic("mp4_finalize_begin", "volume=" + clip.output.volumeId
+                + " name=" + clip.output.displayName + " video_samples=" + clip.videoSamples);
         boolean stopped = false;
         try {
             clip.muxer.stop();
             stopped = true;
         } catch (RuntimeException failure) {
             Log.w(TAG, "motion_muxer_stop_failed", failure);
+            logDiagnostic("mp4_muxer_stop_failed", "name=" + clip.output.displayName
+                    + " error=" + failure.getClass().getSimpleName());
         } finally {
             try { clip.muxer.release(); } catch (RuntimeException ignored) { }
             closeDescriptor(clip.output);
@@ -769,12 +951,20 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 storage.publish(clip.output);
                 long durationMs = Math.max(1L, clip.lastVideoElapsedMs - clip.startElapsedMs + 34L);
                 index.update(clip.record.uri, MotionMediaIndex.COMPLETE, durationMs, size);
+                logDiagnostic("mp4_finalize_complete", "volume=" + clip.output.volumeId
+                        + " name=" + clip.output.displayName + " size_bytes=" + size
+                        + " duration_ms=" + durationMs + " video_samples=" + clip.videoSamples
+                        + " audio_samples=" + clip.audioSamples);
             } else if (clip.videoSamples == 0) {
                 storage.discard(clip.output);
                 index.remove(clip.record.uri);
+                logDiagnostic("mp4_finalize_discard", "volume=" + clip.output.volumeId
+                        + " name=" + clip.output.displayName + " reason=no_video_samples");
             }
         } catch (IOException | RuntimeException failure) {
             Log.e(TAG, "motion_segment_publish_failed", failure);
+            logDiagnostic("mp4_finalize_failed", "volume=" + clip.output.volumeId
+                    + " name=" + clip.output.displayName + " error=" + failure.getClass().getSimpleName());
             notifyState("motion_publish_failed:" + failure.getClass().getSimpleName());
             scheduleOutputContinuation(clip.output.volumeId);
         } finally {
@@ -984,14 +1174,25 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private long wallFromElapsed(long elapsedMs) { return wallAnchorMs + elapsedMs - elapsedAnchorMs; }
 
     private long sizeOf(android.net.Uri uri) {
-        try (android.content.res.AssetFileDescriptor descriptor = context.getContentResolver().openAssetFileDescriptor(uri, "r")) {
-            return descriptor == null ? 0 : Math.max(0, descriptor.getLength());
+        try (android.os.ParcelFileDescriptor descriptor = storage.openMediaFileDescriptor(uri, "r")) {
+            return descriptor == null ? 0 : Math.max(0, descriptor.getStatSize());
         } catch (IOException | RuntimeException unavailable) { return 0; }
     }
 
     private void notifyState(String value) {
         try { stateCallback.accept(value); }
         catch (RuntimeException failure) { Log.w(TAG, "state_callback_failed", failure); }
+    }
+
+    private void logDiagnostic(String event, String details) {
+        String message = "session=" + sessionId + " pid=" + Process.myPid()
+                + " elapsed_ms=" + SystemClock.elapsedRealtime() + " event=" + event
+                + (details == null || details.isEmpty() ? "" : " " + details);
+        Log.i(TAG, message);
+        if (shellMediaContext != null) {
+            System.out.println("MOTION " + message);
+            System.out.flush();
+        }
     }
 
     private static byte[] copyBytes(ByteBuffer source, int offset, int size) {

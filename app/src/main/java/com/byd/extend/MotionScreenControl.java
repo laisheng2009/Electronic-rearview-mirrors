@@ -62,7 +62,7 @@ final class MotionScreenControl implements AutoCloseable {
                 report("ineligible", "screen writes disabled");
                 return;
             }
-            // The app owns the PowerOFF/lock gate and calls this only after its warm-up.
+            // The shell worker calls this only after direct fresh telemetry completed its warm-up.
             // Do not run a second continuous vehicle-state monitor before an owned wake.
             offContinuous = true;
         });

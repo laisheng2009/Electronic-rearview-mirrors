@@ -11,7 +11,7 @@ final class CameraRuntimeLifetime<T> {
         if (next == null) throw new IllegalArgumentException("client is null");
         if (stopped) throw new IllegalStateException("runtime stopped");
         boolean retained = started;
-        if (!started) { initialize.run(); started = true; }
+        start(initialize);
         client = next;
         return retained;
     }
@@ -25,6 +25,11 @@ final class CameraRuntimeLifetime<T> {
     T client() { return client; }
     boolean started() { return started; }
     boolean stopped() { return stopped; }
+
+    void start(Runnable initialize) {
+        if (stopped) throw new IllegalStateException("runtime stopped");
+        if (!started) { initialize.run(); started = true; }
+    }
 
     boolean updateAwakeSession(long generation, boolean interactive) {
         if (!started || stopped || generation < 0 || generation <= awakeSession) return false;

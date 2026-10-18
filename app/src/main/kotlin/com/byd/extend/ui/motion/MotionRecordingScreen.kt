@@ -75,6 +75,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.byd.extend.MotionConfig
+import com.byd.extend.MotionDetectorClient
 import com.byd.extend.MotionDirectionIcon
 import com.byd.extend.MotionMediaLibrary
 import com.byd.extend.MotionRuntime
@@ -153,7 +154,12 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
     val preferences = remember(context) {
         context.getSharedPreferences(MotionConfig.RECORDING_PREFS, Context.MODE_PRIVATE)
     }
-    val mediaLibrary = remember(context) { MotionMediaLibrary(context.applicationContext) }
+    val mediaLibrary = remember(context) {
+        MotionMediaLibrary(context.applicationContext, MotionDetectorClient(context.applicationContext))
+    }
+    DisposableEffect(mediaLibrary) {
+        onDispose { mediaLibrary.close() }
+    }
     var options by remember(context) { mutableStateOf(RecordingOptions.from(MotionConfig.read(context))) }
     var stats by remember { mutableStateOf<MotionMediaLibrary.Stats?>(null) }
     var composition by rememberSaveable { mutableStateOf(false) }
@@ -424,7 +430,7 @@ private fun MotionStorageCards(
                     .border(1.dp, colors.borderStrong, surfaceShape))
             }
         }
-        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             StoragePairRow({
                 Text(strings.motionText(R.string.motion_storage_internal), color = colors.text, fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold)
@@ -464,8 +470,10 @@ private fun MotionStorageCards(
 private fun StoragePairRow(left: @Composable ColumnScope.() -> Unit,
     right: @Composable ColumnScope.() -> Unit) {
     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(6.dp), content = left)
-        Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(6.dp), content = right)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp).fillMaxHeight(),
+            verticalArrangement = Arrangement.spacedBy(6.dp), content = left)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp).fillMaxHeight(),
+            verticalArrangement = Arrangement.spacedBy(6.dp), content = right)
     }
 }
 
@@ -551,39 +559,33 @@ private fun MotionStorageBar(
 @Composable
 private fun MotionStorageLegend(volume: MotionMediaLibrary.VolumeStats?, colors: UiPalette, strings: UiStrings) {
     fun gb(value: Long) = String.format(Locale.US, "%.1f", value.toDouble() / MOTION_GB)
-    val labels = listOf(R.string.motion_storage_other, R.string.motion_storage_oem,
-        R.string.motion_storage_own, R.string.motion_storage_unallocated)
-    val legendColors = listOf(MotionOtherData, MotionOemData, colors.yellow, Color.Transparent)
+    val labels = listOf(R.string.motion_storage_other, R.string.motion_storage_oem, R.string.motion_storage_own)
+    val legendColors = listOf(MotionOtherData, MotionOemData, colors.yellow)
     val usedValues = listOf(volume?.otherBytes, volume?.oemRecorderBytes, volume?.ownBytes)
-    val growthValues = listOf(volume?.oemAllowanceBytes, volume?.ownAllowanceBytes)
-    val growthColors = listOf(MotionOemData, colors.yellow)
+    val freeValues = listOf(volume?.unallocatedBytes, volume?.oemAllowanceBytes, volume?.ownAllowanceBytes)
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        labels.chunked(2).forEach { pair ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                pair.forEach { label ->
-                    val color = legendColors[labels.indexOf(label)]
-                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            labels.forEachIndexed { index, label ->
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(Modifier.fillMaxWidth().height(32.dp), verticalAlignment = Alignment.CenterVertically) {
                         Canvas(Modifier.size(12.dp).border(1.dp, colors.borderStrong, RoundedCornerShape(2.dp))) {
-                            if (label != R.string.motion_storage_unallocated) drawRect(color)
+                            drawRect(legendColors[index])
                         }
                         Spacer(Modifier.width(4.dp))
                         Text(strings.motionText(label), color = colors.muted, fontSize = 11.sp, maxLines = 2)
                     }
+                    StorageAmount(
+                        Modifier.fillMaxWidth().height(32.dp), usedValues[index]?.takeIf { it >= 0 },
+                        color = legendColors[index], isFree = false, hatched = false,
+                        colors = colors, strings = strings, format = { gb(it) })
+                    StorageAmount(
+                        Modifier.fillMaxWidth().height(32.dp), freeValues[index]?.takeIf { it >= 0 },
+                        color = if (index == 0) Color.Transparent else legendColors[index],
+                        isFree = true, hatched = index != 0,
+                        colors = colors, strings = strings, format = { gb(it) })
                 }
             }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            usedValues.forEachIndexed { index, bytes ->
-                StorageAmount(Modifier.weight(1f), bytes?.takeIf { it >= 0 }, legendColors[index], false, colors, strings) { gb(it) }
-            }
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            growthValues.forEachIndexed { index, bytes ->
-                StorageAmount(Modifier.weight(1f), bytes?.takeIf { it >= 0 }, growthColors[index], true, colors, strings) { gb(it) }
-            }
-        }
-        Text(strings.motionText(R.string.motion_storage_unallocated_value,
-            volume?.unallocatedBytes?.takeIf { it >= 0 }?.let(::gb) ?: "—"), color = colors.muted, fontSize = 11.sp)
         if (volume == null || volume.oemRecorderBytes < 0) {
             Text(strings.motionText(R.string.motion_oem_bytes_unknown), color = colors.muted, fontSize = 12.sp)
         }
@@ -591,14 +593,14 @@ private fun MotionStorageLegend(volume: MotionMediaLibrary.VolumeStats?, colors:
 }
 
 @Composable
-private fun StorageAmount(modifier: Modifier, bytes: Long?, color: Color, hatched: Boolean,
+private fun StorageAmount(modifier: Modifier, bytes: Long?, color: Color, isFree: Boolean, hatched: Boolean,
     colors: UiPalette, strings: UiStrings, format: (Long) -> String) {
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         Canvas(Modifier.size(12.dp).border(1.dp, colors.borderStrong, RoundedCornerShape(2.dp))) {
             if (hatched) motionHatch(color, 0f, size.width) else if (color != Color.Transparent) drawRect(color)
         }
         Spacer(Modifier.width(4.dp))
-        Text(strings.motionText(if (hatched) R.string.motion_storage_free_value else R.string.motion_storage_used_value,
+        Text(strings.motionText(if (isFree) R.string.motion_storage_free_value else R.string.motion_storage_used_value,
             bytes?.let(format) ?: "—"), color = colors.muted, fontSize = 11.sp, maxLines = 2)
     }
 }

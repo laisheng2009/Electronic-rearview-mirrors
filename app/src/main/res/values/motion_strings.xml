@@ -5,9 +5,8 @@
     <string name="motion_enable">"Show a warning when motion is detected"</string>
     <string name="motion_timing">"Vehicle off • wait 2.5 s • show for 10 s; repeated detection extends the display."</string>
     <string name="motion_lock">"Lock state"</string>
-    <string name="motion_any">"Any"</string>
-    <string name="motion_locked">"Locked only"</string>
-    <string name="motion_unlocked">"Unlocked only"</string>
+    <string name="motion_any">"Powered off"</string>
+    <string name="motion_locked">"Powered off and locked"</string>
     <string name="motion_active">"Current template"</string>
     <string name="motion_edit">"Edit"</string>
     <string name="motion_show">"Preview"</string>

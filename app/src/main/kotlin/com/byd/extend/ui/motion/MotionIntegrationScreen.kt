@@ -105,7 +105,15 @@ internal fun MotionIntegrationScreen(
     val scope = rememberCoroutineScope()
     var library by remember { mutableStateOf(store.read()) }
     var enabled by rememberSaveable { mutableStateOf(config.warningEnabled) }
-    var lock by rememberSaveable { mutableIntStateOf(config.lockCondition.coerceIn(0, 2)) }
+    var lock by rememberSaveable { mutableIntStateOf(config.lockCondition) }
+    val activationMode = MotionConfig.normalizeLockMode(lock)
+    LaunchedEffect(store) {
+        val storedLock = store.preferences.getInt("lock", 1)
+        val normalized = MotionConfig.normalizeLockMode(storedLock)
+        if (!store.preferences.contains("lock") || storedLock != normalized)
+            store.preferences.edit().putInt("lock", normalized).apply()
+    }
+    LaunchedEffect(lock) { if (lock != activationMode) lock = activationMode }
     var dialog by rememberSaveable { mutableIntStateOf(0) }
     var draft by rememberSaveable { mutableStateOf<MotionTemplate?>(null) }
     var importing by remember { mutableStateOf(false) }
@@ -148,9 +156,9 @@ internal fun MotionIntegrationScreen(
                     enabled = it; store.preferences.edit().putBoolean("enabled", it).apply()
                     MotionRuntime.settingsChanged(context)
                 }, colors)
-                ChoiceField(strings.motionText(R.string.motion_lock), listOf(R.string.motion_any, R.string.motion_locked,
-                    R.string.motion_unlocked).map { strings.motionText(it) }, lock, {
-                    lock = it; store.preferences.edit().putInt("lock", it).apply()
+                ChoiceField(strings.motionText(R.string.motion_lock), listOf(R.string.motion_locked, R.string.motion_any)
+                    .map { strings.motionText(it) }, if (activationMode == 1) 0 else 1, { selected ->
+                    lock = if (selected == 0) 1 else 0; store.preferences.edit().putInt("lock", lock).apply()
                     MotionRuntime.settingsChanged(context)
                 }, colors, enabled = enabled)
                 ActionButton(strings.motionText(R.string.motion_bases), Icons.Outlined.Palette, colors,

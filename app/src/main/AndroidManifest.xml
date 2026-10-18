@@ -58,7 +58,8 @@
 
         <activity
             android:name="com.byd.extend.ui.motion.MotionFullscreenActivity"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
             android:excludeFromRecents="true"
             android:launchMode="singleTop"
             android:screenOrientation="sensorLandscape" />

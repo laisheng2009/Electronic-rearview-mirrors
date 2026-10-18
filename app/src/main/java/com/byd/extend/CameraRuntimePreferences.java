@@ -18,13 +18,19 @@ final class CameraRuntimePreferences implements SharedPreferences {
 
     synchronized void setChangeListener(Consumer<Bundle> listener) { changed = listener; }
 
-    synchronized Bundle reconcile(Bundle snapshot) {
+    synchronized Bundle reconcile(Bundle snapshot, boolean initialAppSnapshot) {
         Map<String, Object> incoming = new HashMap<>();
         for (String key : snapshot.keySet()) incoming.put(key, normalize(snapshot.get(key)));
-        return encode(reconcile(incoming));
+        return encode(reconcile(incoming, initialAppSnapshot));
     }
 
     synchronized Map<String, Object> reconcile(Map<String, ?> snapshot) {
+        return reconcile(snapshot, false);
+    }
+
+    synchronized Map<String, Object> reconcile(Map<String, ?> snapshot, boolean initialAppSnapshot) {
+        // Motion may initialize controllers before any app snapshot; those defaults are not user edits.
+        if (initialAppSnapshot) pending.clear();
         values.clear();
         values.putAll(snapshot);
         // Changes made while the UI was absent win over the stale disk snapshot on reattach.
