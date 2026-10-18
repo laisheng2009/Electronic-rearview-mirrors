@@ -49,4 +49,28 @@ public class MotionEventPolicyTest {
         policy.stop(5_600L);
         assertFalse(policy.warningActive(5_600L));
     }
+
+    @Test public void visibleDeadlineStartsAfterCoverAndRenewsOnActualDetection() {
+        MotionEventPolicy policy = new MotionEventPolicy();
+        policy.setEligible(true, 0L);
+        policy.observe(1, 2_500L);
+        policy.beginVisibleWarning(6_000L);
+        assertEquals(16_000L, policy.warningUntilMs());
+
+        policy.observe(2, 15_500L);
+        assertEquals(25_500L, policy.warningUntilMs());
+        policy.observe(0, 16_000L);
+        assertTrue(policy.warningActive(25_499L));
+        assertFalse(policy.warningActive(25_500L));
+    }
+
+    @Test public void lateWindowDrawCannotRearmAnIneligibleSession() {
+        MotionEventPolicy policy = new MotionEventPolicy();
+        policy.setEligible(true, 0L);
+        policy.observe(1, 2_500L);
+        policy.setEligible(false, 3_000L);
+        policy.beginVisibleWarning(4_000L);
+        assertEquals(0L, policy.warningUntilMs());
+        assertFalse(policy.warningActive(4_000L));
+    }
 }

@@ -38,6 +38,12 @@ final class MotionEventPolicy {
         warningUntilMs = 0L;
     }
 
+    /** The first visible interval begins after cover release, not while the window is hidden. */
+    void beginVisibleWarning(long nowMs) {
+        if (nowMs < 0) throw new IllegalArgumentException("negative elapsed time");
+        if (eligible) warningUntilMs = nowMs + MotionDetectorProtocol.WARNING_MS;
+    }
+
     boolean warningActive(long nowMs) {
         if (nowMs < 0) throw new IllegalArgumentException("negative elapsed time");
         expire(nowMs);

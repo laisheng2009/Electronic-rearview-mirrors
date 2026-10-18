@@ -3,7 +3,7 @@ package com.byd.extend;
 import android.os.IBinder;
 
 /** Fixed Binder contract between the app, shell detector, and existing camera owner. */
-final class MotionDetectorProtocol {
+public final class MotionDetectorProtocol {
     static final String SERVICE_NAME = "byd_extend_motion";
     static final String PROCESS_NAME = "bydextend_motion";
     static final String MAIN_CLASS = "com.byd.extend.MotionDetectorShellMain";
@@ -14,9 +14,19 @@ final class MotionDetectorProtocol {
     static final String STATE_ROOT = "/data/local/tmp/bydextend_motion";
     static final String CONFIG_PATH = STATE_ROOT + "/config.json";
     static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
-    static final String ACTION_DISMISS_WARNING = "com.byd.extend.action.DISMISS_MOTION_WARNING";
     static final String EXTRA_SESSION = "motion_session_id";
-    static final int VERSION = 2;
+    static final int VERSION = 3;
+    public static final String EXTRA_WINDOW_REPORTER = "motion_window_reporter";
+    public static final String WINDOW_COMMANDS = "window_commands";
+    public static final String WINDOW_CANCELLED = "window_cancelled";
+    public static final String WINDOW_DEADLINE = "window_deadline_elapsed_ms";
+    public static final int WINDOW_READY = 1;
+    public static final int WINDOW_DRAWN = 2;
+    public static final int WINDOW_CLOSED = 3;
+    public static final int WINDOW_CLOSE = 4;
+    public static final int WINDOW_SET_DEADLINE = 5;
+    public static final long WINDOW_START_TIMEOUT_MS = 30_000L;
+    static final long WINDOW_CLOSE_TIMEOUT_MS = 2_000L;
 
     static final int TX_PING = IBinder.FIRST_CALL_TRANSACTION;
     static final int TX_START = IBinder.FIRST_CALL_TRANSACTION + 1;
@@ -62,7 +72,7 @@ final class MotionDetectorProtocol {
     static final int PREVIEW_WIDTH = 1920;
     static final int PREVIEW_HEIGHT = 1080;
     static final long WARMUP_MS = 2_500L;
-    static final long WARNING_MS = 10_000L;
+    public static final long WARNING_MS = 10_000L;
     static final String OEM_PACKAGE = "com.byd.sentrymode";
     static final String OEM_MODEL_ASSET = "SM_V8s_L_V08_19.dlc";
     static final long OEM_MODEL_BYTES = 39_536_897L;

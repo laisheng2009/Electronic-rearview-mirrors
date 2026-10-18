@@ -5,6 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.ResultReceiver
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -25,11 +29,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.byd.extend.AppLanguage
 import com.byd.extend.MotionDetectorClient
+import com.byd.extend.MotionDetectorProtocol
 import com.byd.extend.ui.UiLanguage
 import com.byd.extend.ui.UiStrings
-import com.byd.extend.ui.UiTheme
-import com.byd.extend.ui.palette
-import java.lang.ref.WeakReference
 
 /** Full-screen renderer shared by manual preview and the runtime Motion warning. */
 class MotionFullscreenActivity : ComponentActivity() {
@@ -38,18 +40,23 @@ class MotionFullscreenActivity : ComponentActivity() {
     private var takeoverNotified = false
     private var activeRuntimeWarning = false
     private var readyNotifiedForSession: String? = null
+    private val windowHandler = Handler(Looper.getMainLooper())
+    private var windowReporter: ResultReceiver? = null
+    private var windowDeadline = 0L
+    private val windowTimeout = Runnable {
+        if (activeRuntimeWarning && !isFinishing) {
+            runtimeDismissal = true
+            finish()
+        }
+    }
     private var renderGeneration by mutableIntStateOf(0)
     private var template by mutableStateOf<MotionTemplate?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        activeActivity = WeakReference(this)
         sessionId = savedInstanceState?.getString(STATE_SESSION) ?: intent.getStringExtra(EXTRA_SESSION)
         handleIntent(intent)
-        if (isFinishing || intent?.action == ACTION_DISMISS) {
-            finish()
-            return
-        }
+        if (isFinishing) return
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -63,7 +70,6 @@ class MotionFullscreenActivity : ComponentActivity() {
             AppLanguage.RUSSIAN -> UiLanguage.Russian
             else -> UiLanguage.English
         }
-        val colors = palette(if (settings.getBoolean("ui_dark_theme", true)) UiTheme.Dark else UiTheme.Light)
         val strings = UiStrings(language, this)
         Toast.makeText(this, strings.resource(com.byd.extend.R.string.motion_fullscreen_hint), Toast.LENGTH_LONG).show()
         setContent {
@@ -92,25 +98,26 @@ class MotionFullscreenActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        activeActivity = WeakReference(this)
         setIntent(intent)
         handleIntent(intent)
     }
 
     override fun onDestroy() {
-        if (activeActivity?.get() === this) activeActivity = null
+        windowHandler.removeCallbacks(windowTimeout)
+        reportWindowClosed()
         super.onDestroy()
     }
 
-    override fun onUserLeaveHint() {
-        super.onUserLeaveHint()
-        val activeSession = sessionId ?: return
-        if (!activeRuntimeWarning || readyNotifiedForSession != activeSession
-            || runtimeDismissal || takeoverNotified) return
-        MotionDetectorClient.dismissWarning(applicationContext, activeSession)
-        takeoverNotified = true
-        activeRuntimeWarning = false
-        finish()
+    override fun onPause() {
+        super.onPause()
+        // Like the probe, never leave a runtime warning behind another window.
+        if (activeRuntimeWarning && !isFinishing && !runtimeDismissal) closeByUser()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (activeRuntimeWarning && windowDeadline > 0L
+            && SystemClock.elapsedRealtime() >= windowDeadline) windowTimeout.run()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -121,10 +128,15 @@ class MotionFullscreenActivity : ComponentActivity() {
     private fun handleIntent(next: Intent?) {
         when (next?.action) {
             ACTION_SHOW -> {
+                reportWindowClosed()
+                windowHandler.removeCallbacks(windowTimeout)
                 readyNotifiedForSession = null
                 val requestedSession = next.getStringExtra(EXTRA_SESSION)
+                val reporter = next.getParcelableExtra<ResultReceiver>(MotionDetectorProtocol.EXTRA_WINDOW_REPORTER)
                 if (requestedSession != null
-                    && !MotionDetectorClient.isLiveWarningSession(applicationContext, requestedSession)) {
+                    && (reporter == null || !MotionDetectorClient.isLiveWarningSession(applicationContext, requestedSession))) {
+                    reporter?.send(MotionDetectorProtocol.WINDOW_CLOSED,
+                        Bundle().apply { putBoolean(MotionDetectorProtocol.WINDOW_CANCELLED, true) })
                     activeRuntimeWarning = false
                     sessionId = null
                     template = null
@@ -135,17 +147,30 @@ class MotionFullscreenActivity : ComponentActivity() {
                 runtimeDismissal = false
                 takeoverNotified = false
                 activeRuntimeWarning = requestedSession != null
-                if (activeRuntimeWarning) configureRuntimeWarningWindow()
+                windowReporter = reporter
+                if (activeRuntimeWarning) {
+                    configureRuntimeWarningWindow()
+                    setWindowDeadline(SystemClock.elapsedRealtime() + MotionDetectorProtocol.WINDOW_START_TIMEOUT_MS)
+                    val commands = object : ResultReceiver(windowHandler) {
+                        override fun onReceiveResult(code: Int, data: Bundle?) {
+                            if (windowReporter !== reporter || !activeRuntimeWarning || isFinishing) return
+                            when (code) {
+                                MotionDetectorProtocol.WINDOW_CLOSE -> {
+                                    runtimeDismissal = true
+                                    finish()
+                                }
+                                MotionDetectorProtocol.WINDOW_SET_DEADLINE -> {
+                                    val deadline = data?.getLong(MotionDetectorProtocol.WINDOW_DEADLINE) ?: 0L
+                                    if (deadline > 0L) setWindowDeadline(deadline)
+                                }
+                            }
+                        }
+                    }
+                    reporter?.send(MotionDetectorProtocol.WINDOW_READY,
+                        Bundle().apply { putParcelable(MotionDetectorProtocol.WINDOW_COMMANDS, commands) })
+                }
                 renderGeneration++
                 template = MotionTemplateStore(applicationContext).read().active()
-            }
-            ACTION_DISMISS -> {
-                val requestedSession = next.getStringExtra(EXTRA_SESSION)
-                if (activeRuntimeWarning && requestedSession != null && requestedSession == sessionId) {
-                    runtimeDismissal = true
-                    activeRuntimeWarning = false
-                    finish()
-                }
             }
             else -> template = MotionTemplateStore(applicationContext).read().active()
         }
@@ -162,10 +187,7 @@ class MotionFullscreenActivity : ComponentActivity() {
     }
 
     private fun closeByUser() {
-        if (!takeoverNotified) {
-            sessionId?.let { MotionDetectorClient.dismissWarning(applicationContext, it) }
-            takeoverNotified = true
-        }
+        takeoverNotified = true
         finish()
     }
 
@@ -173,37 +195,40 @@ class MotionFullscreenActivity : ComponentActivity() {
         if (sessionId != session || renderGeneration != generation) return
         if (readyNotifiedForSession == session) return
         if (isFinishing || isDestroyed) return
-        if (MotionDetectorClient.warningWindowReady(applicationContext, session))
-            readyNotifiedForSession = session
+        val reporter = windowReporter ?: return
+        readyNotifiedForSession = session
+        setWindowDeadline(SystemClock.elapsedRealtime() + MotionDetectorProtocol.WARNING_MS)
+        reporter.send(MotionDetectorProtocol.WINDOW_DRAWN, Bundle.EMPTY)
+    }
+
+    private fun setWindowDeadline(deadline: Long) {
+        windowDeadline = deadline
+        windowHandler.removeCallbacks(windowTimeout)
+        windowHandler.postDelayed(windowTimeout, (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+    }
+
+    private fun reportWindowClosed() {
+        val reporter = windowReporter ?: return
+        windowReporter = null
+        reporter.send(MotionDetectorProtocol.WINDOW_CLOSED, Bundle().apply {
+            putBoolean(MotionDetectorProtocol.WINDOW_CANCELLED, takeoverNotified || !runtimeDismissal)
+        })
     }
 
     companion object {
         private const val ACTION_SHOW = "com.byd.extend.action.SHOW_MOTION_WARNING"
-        private const val ACTION_DISMISS = "com.byd.extend.action.DISMISS_MOTION_WARNING"
         private const val EXTRA_SESSION = "motion_session_id"
         private const val STATE_SESSION = "motion_saved_session_id"
         private const val SETTINGS_PREFS = "settings"
-        @Volatile private var activeActivity: WeakReference<MotionFullscreenActivity>? = null
 
         @JvmStatic
-        fun show(context: Context, sessionId: String? = null) {
+        fun show(context: Context) {
             val intent = Intent(context, MotionFullscreenActivity::class.java)
                 .setAction(ACTION_SHOW)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                .putExtra(EXTRA_SESSION, sessionId)
             if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
         }
 
-        @JvmStatic
-        fun dismiss(context: Context, sessionId: String) {
-            val activity = activeActivity?.get() ?: return
-            activity.runOnUiThread {
-                if (!activity.isFinishing && !activity.isDestroyed && activity.sessionId == sessionId) {
-                    activity.runtimeDismissal = true
-                    activity.finish()
-                }
-            }
-        }
     }
 }

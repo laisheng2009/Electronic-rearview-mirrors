@@ -455,17 +455,24 @@ internal fun MotionTemplateCanvas(template: MotionTemplate, store: MotionTemplat
             onDispose { }
         } else {
             val observer = view.viewTreeObserver
+            var active = true
             val listener = object : ViewTreeObserver.OnDrawListener {
                 private var sent = false
                 override fun onDraw() {
                     if (sent) return
                     sent = true
-                    if (observer.isAlive) observer.removeOnDrawListener(this)
-                    view.post { onFirstRendered.invoke() }
+                    // Android forbids changing the listener list during draw dispatch.
+                    view.post {
+                        if (observer.isAlive) observer.removeOnDrawListener(this)
+                        if (active) onFirstRendered.invoke()
+                    }
                 }
             }
             observer.addOnDrawListener(listener)
-            onDispose { if (observer.isAlive) observer.removeOnDrawListener(listener) }
+            onDispose {
+                active = false
+                view.post { if (observer.isAlive) observer.removeOnDrawListener(listener) }
+            }
         }
     }
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {

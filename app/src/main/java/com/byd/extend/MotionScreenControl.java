@@ -5,10 +5,17 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.SystemClock;
-import java.util.function.BiConsumer;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /** One-shot shell-UID screen control guarded by an observed, continuously-OFF session. */
 final class MotionScreenControl implements AutoCloseable {
+    interface Listener { void onState(String sessionId, String state, String detail); }
     private static final String POWER_IFACE = "android.os.IPowerManager";
     private static final String DISPLAY_IFACE = "android.hardware.display.IDisplayManager";
     private static final String ANIMATION_IFACE = "android.os.IAccAnimation";
@@ -20,7 +27,13 @@ final class MotionScreenControl implements AutoCloseable {
 
     private final HandlerThread thread = new HandlerThread("motion-screen-control");
     private final Handler handler;
-    private final BiConsumer<String, String> stateListener;
+    private final Listener stateListener;
+    private final ExecutorService systemCalls = Executors.newSingleThreadExecutor(r -> {
+        Thread worker = new Thread(r, "motion-screen-system-call");
+        worker.setDaemon(true);
+        return worker;
+    });
+    private boolean systemCallUncertain;
     private final Runnable observe = this::observePower;
 
     private String sessionId;
@@ -32,7 +45,7 @@ final class MotionScreenControl implements AutoCloseable {
     private boolean finishAttempted;
     private final MotionScreenCyclePolicy cycle = new MotionScreenCyclePolicy();
 
-    MotionScreenControl(BiConsumer<String, String> stateListener) {
+    MotionScreenControl(Listener stateListener) {
         this.stateListener = stateListener;
         thread.start();
         handler = new Handler(thread.getLooper());
@@ -106,11 +119,14 @@ final class MotionScreenControl implements AutoCloseable {
                     return;
                 }
                 cycle.beginWakeAttempt(); // No repeat unless a full black/off baseline is observed.
-                Object power = service(POWER_IFACE);
-                Class<?> api = Class.forName(POWER_IFACE);
-                api.getMethod("wakeUp", long.class, int.class, String.class, String.class)
-                        .invoke(power, SystemClock.uptimeMillis(), 13,
-                                "byd-extend-motion-warning", "com.android.shell");
+                controlCall("wakeUp reason=13", () -> {
+                    Object power = service(POWER_IFACE);
+                    Class<?> api = Class.forName(POWER_IFACE);
+                    api.getMethod("wakeUp", long.class, int.class, String.class, String.class)
+                            .invoke(power, SystemClock.uptimeMillis(), 13,
+                                    "byd-extend-motion-warning", "com.android.shell");
+                    return null;
+                });
                 long deadline = SystemClock.elapsedRealtime() + WAIT_MS;
                 while (SystemClock.elapsedRealtime() < deadline) {
                     if (!offContinuous || cycle.userTookOver() || !eligible) break;
@@ -203,10 +219,13 @@ final class MotionScreenControl implements AutoCloseable {
                     report("sleep_skipped", "current vehicle/display state is not confirmed");
                     return;
                 }
-                Object power = service(POWER_IFACE);
-                Class<?> api = Class.forName(POWER_IFACE);
-                api.getMethod("goToSleep", long.class, int.class, int.class)
-                        .invoke(power, SystemClock.uptimeMillis(), 13, 1);
+                controlCall("goToSleep reason=13 flags=1", () -> {
+                    Object power = service(POWER_IFACE);
+                    Class<?> api = Class.forName(POWER_IFACE);
+                    api.getMethod("goToSleep", long.class, int.class, int.class)
+                            .invoke(power, SystemClock.uptimeMillis(), 13, 1);
+                    return null;
+                });
                 long deadline = SystemClock.elapsedRealtime() + WAIT_MS;
                 boolean off = false;
                 while (SystemClock.elapsedRealtime() < deadline) {
@@ -299,10 +318,49 @@ final class MotionScreenControl implements AutoCloseable {
 
     private void report(String state, String detail) {
         if (stateListener != null && sessionId != null)
-            stateListener.accept(state, detail == null ? "" : detail);
+            stateListener.onState(sessionId, state, detail == null ? "" : detail);
     }
 
-    private static int readPower() throws Exception {
+    private <T> T bounded(String operation, Callable<T> action) throws Exception {
+        if (systemCallUncertain)
+            throw new IllegalStateException(operation + ": previous OEM call timed out; worker replacement required");
+        Future<T> pending = systemCalls.submit(action);
+        try {
+            return pending.get(WAIT_MS, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException timeout) {
+            // Cancellation cannot stop a remote Binder write. Never queue another after uncertainty.
+            systemCallUncertain = true;
+            throw new TimeoutException(operation + " exceeded " + WAIT_MS + "ms; remote completion unknown");
+        } catch (InterruptedException interrupted) {
+            systemCallUncertain = true;
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        } catch (ExecutionException failed) {
+            Throwable cause = failed.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            throw new RuntimeException(operation + " failed", cause);
+        } finally {
+            pending.cancel(true);
+        }
+    }
+
+    private <T> T controlCall(String operation, Callable<T> action) throws Exception {
+        long started = SystemClock.elapsedRealtime();
+        report("screen_command_dispatch", operation);
+        try {
+            T result = bounded(operation, action);
+            report("screen_command_return", operation + "; elapsed_ms="
+                    + (SystemClock.elapsedRealtime() - started) + "; result=" + result);
+            return result;
+        } catch (Exception failure) {
+            report("screen_command_failed", operation + "; " + summary(failure));
+            throw failure;
+        }
+    }
+
+    private int readPower() throws Exception { return bounded("Power read", MotionScreenControl::readPowerRaw); }
+
+    private static int readPowerRaw() throws Exception {
         IBinder target = binder("autoservice");
         if (target == null) throw new IllegalStateException("autoservice unavailable");
         Parcel input = Parcel.obtain(), output = Parcel.obtain();
@@ -323,12 +381,18 @@ final class MotionScreenControl implements AutoCloseable {
         }
     }
 
-    private static boolean isInteractive() throws Exception {
+    private boolean isInteractive() throws Exception {
+        return bounded("isInteractive", MotionScreenControl::isInteractiveRaw);
+    }
+
+    private static boolean isInteractiveRaw() throws Exception {
         Object power = service(POWER_IFACE);
         return (Boolean) Class.forName(POWER_IFACE).getMethod("isInteractive").invoke(power);
     }
 
-    private static int displayState() throws Exception {
+    private int displayState() throws Exception { return bounded("display state", MotionScreenControl::displayStateRaw); }
+
+    private static int displayStateRaw() throws Exception {
         Object display = service(DISPLAY_IFACE);
         Object info = Class.forName(DISPLAY_IFACE).getMethod("getDisplayInfo", int.class)
                 .invoke(display, 0);
@@ -341,7 +405,11 @@ final class MotionScreenControl implements AutoCloseable {
                 .getMethod("get", String.class).invoke(null, "sys.accanim.status");
     }
 
-    private static String animationDescriptor() throws Exception {
+    private String animationDescriptor() throws Exception {
+        return bounded("accanimation descriptor", MotionScreenControl::animationDescriptorRaw);
+    }
+
+    private static String animationDescriptorRaw() throws Exception {
         Parcel input = Parcel.obtain(), output = Parcel.obtain();
         try {
             input.writeInterfaceToken(ANIMATION_IFACE);
@@ -355,7 +423,11 @@ final class MotionScreenControl implements AutoCloseable {
         }
     }
 
-    private static int animationCommand(int command) throws Exception {
+    private int animationCommand(int command) throws Exception {
+        return controlCall("accanimation command=" + command, () -> animationCommandRaw(command));
+    }
+
+    private static int animationCommandRaw(int command) throws Exception {
         if (command != 2 && command != 3) throw new IllegalArgumentException("unsupported accanimation command");
         Parcel input = Parcel.obtain(), output = Parcel.obtain();
         try {
@@ -403,5 +475,6 @@ final class MotionScreenControl implements AutoCloseable {
             sessionId = null;
         });
         thread.quitSafely();
+        systemCalls.shutdownNow();
     }
 }

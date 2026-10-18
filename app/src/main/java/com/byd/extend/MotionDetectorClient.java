@@ -212,8 +212,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 retireObsoleteWorker(requestGeneration, candidate, identity);
             }
             LocalAdbClient.Result launched = LocalAdbClient.executeAuthorized(context,
-                    launchCommand(context.getApplicationInfo().sourceDir, android.os.Process.myUid(),
-                            currentApkIdentity(context)), (kind, fields) -> { });
+                    launchCommand(context), (kind, fields) -> { });
             if (launched.authorizationRequired || launched.superseded)
                 throw new IllegalStateException("authenticated Motion worker launch failed: " + launched.error);
             candidate = awaitWorker(6_000L);
@@ -257,8 +256,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 retireObsoleteWorker(generation, candidate, identity);
                 if (!isCurrentRequest(generation)) return;
                 LocalAdbClient.Result launched = LocalAdbClient.executeAuthorized(context,
-                        launchCommand(context.getApplicationInfo().sourceDir,
-                                android.os.Process.myUid(), currentApkIdentity(context)),
+                        launchCommand(context),
                         (kind, fields) -> { });
                 if (launched.authorizationRequired || launched.superseded)
                     throw new IllegalStateException("authenticated shell launch failed: " + launched.error);
@@ -369,30 +367,6 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             Status status = readStatus(context);
             return id.equals(status.sessionId) && status.warning && !status.lastError.equals("host_shutdown");
         } catch (Throwable ignored) { return false; }
-    }
-
-    public static boolean warningWindowReady(Context context, String id) {
-        if (!isLiveWarningSession(context, id)) return false;
-        return directCommand(context, id, MotionDetectorProtocol.TX_WARNING_WINDOW_READY, null);
-    }
-
-    public static boolean dismissWarning(Context context, String id) {
-        if (!isLiveWarningSession(context, id)) return false;
-        return directCommand(context, id, MotionDetectorProtocol.TX_USER_TAKEOVER, null);
-    }
-
-    private static boolean directCommand(Context context, String id, int transaction, Boolean flag) {
-        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
-        try {
-            data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
-            data.writeString(id);
-            if (flag != null) data.writeInt(flag ? 1 : 0);
-            IBinder candidate = service(MotionDetectorProtocol.SERVICE_NAME);
-            if (candidate == null || !candidate.transact(transaction, data, reply, 0)) return false;
-            reply.readException();
-            return reply.readInt() == 1 && reply.dataAvail() == 0;
-        } catch (Throwable ignored) { return false; }
-        finally { data.recycle(); reply.recycle(); }
     }
 
     private static Status readStatusReply(Parcel reply) {
@@ -636,10 +610,27 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         }
     }
 
-    static String launchCommand(String apkPath, int appUid, String identity) {
+    private static String launchCommand(Context context) throws Exception {
+        String nativeDir = null;
+        try {
+            nativeDir = context.getPackageManager().getApplicationInfo(
+                    MotionDetectorProtocol.OEM_PACKAGE, 0).nativeLibraryDir;
+        } catch (android.content.pm.PackageManager.NameNotFoundException absent) {
+            // Media-only access does not require Sentry; monitoring reports its missing package.
+        }
+        return launchCommand(context.getApplicationInfo().sourceDir, android.os.Process.myUid(),
+                currentApkIdentity(context), nativeDir, android.os.Process.is64Bit());
+    }
+
+    static String launchCommand(String apkPath, int appUid, String identity,
+            String nativeDir, boolean is64Bit) {
         String apk = shellQuote(apkPath);
         String quotedIdentity = shellQuote(identity);
-        return "trap '' HUP; CLASSPATH=" + apk + " setsid app_process /system/bin --nice-name="
+        String lib = is64Bit ? "lib64" : "lib";
+        String libraryPath = (nativeDir == null || nativeDir.isEmpty() ? "" : nativeDir + ":")
+                + "/system/" + lib + ":/vendor/" + lib;
+        return "trap '' HUP; LD_LIBRARY_PATH=" + shellQuote(libraryPath)
+                + " CLASSPATH=" + apk + " setsid app_process /system/bin --nice-name="
                 + MotionDetectorProtocol.PROCESS_NAME + " " + MotionDetectorProtocol.MAIN_CLASS
                 + " " + appUid + " " + quotedIdentity + " </dev/null >>"
                 + MotionDetectorProtocol.LOG_PATH + " 2>&1 & for i in 1 2 3 4 5 6; do service list 2>/dev/null | grep -q '"
