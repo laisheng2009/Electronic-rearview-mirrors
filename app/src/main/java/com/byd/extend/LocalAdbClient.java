@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import android.os.SystemClock;
 import androidx.core.util.AtomicFile;
 
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -48,6 +50,7 @@ final class LocalAdbClient {
     // Old auto_prompt_key preferences are intentionally ignored: sending is not authorization.
     static final AdbAuthorizationSession AUTHORIZATION = new AdbAuthorizationSession();
     private static final Object KEY_LOCK = new Object();
+    private static final BouncyCastleProvider RSA_KEY_PROVIDER = new BouncyCastleProvider();
     private static final Object AUTHORIZATION_LOCK = new Object();
     private static final Object ACCESS_STATE_LOCK = new Object();
     private static final String AUTHORIZED_KEY = "authorized_key";
@@ -1028,7 +1031,8 @@ final class LocalAdbClient {
         if (hasAtomicFile(privateFile)) {
             PrivateKey privateKey;
             try {
-                privateKey = KeyFactory.getInstance("RSA").generatePrivate(
+                // OEM decoders can hide CRT parameters that are present in the saved PKCS8.
+                privateKey = KeyFactory.getInstance("RSA", RSA_KEY_PROVIDER).generatePrivate(
                         new PKCS8EncodedKeySpec(read(privateFile)));
             } catch (Throwable error) {
                 throw new IOException("ADB private key is corrupt; refusing replacement", error);
