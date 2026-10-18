@@ -197,8 +197,12 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         }
     }
 
-    /** Opens the existing worker for fixed media operations only; it never configures monitoring. */
-    private IBinder ensureMediaWorker() {
+    /** Opens the worker for fixed media operations; never configures monitoring. */
+    private IBinder ensureMediaWorker() { return ensureWorker(true); }
+
+    IBinder ensureCheckWorker() { return ensureWorker(false); }
+
+    private IBinder ensureWorker(boolean replaceObsolete) {
         try {
             IBinder candidate = resolveWorker();
             WorkerIdentity identity = readIdentity(candidate);
@@ -207,6 +211,9 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 return candidate;
             }
             if (candidate != null && candidate.isBinderAlive()) {
+                if (!replaceObsolete)
+                    throw new IllegalStateException("obsolete Motion worker is left running; "
+                            + "check-up cannot interrupt it; reopen the application to complete normal worker recovery");
                 if (identity == null)
                     throw new IllegalStateException("cannot identify existing Motion worker");
                 retireObsoleteWorker(requestGeneration, candidate, identity);

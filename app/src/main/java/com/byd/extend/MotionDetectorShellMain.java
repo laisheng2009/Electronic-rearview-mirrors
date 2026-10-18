@@ -27,14 +27,12 @@ import android.media.Image;
 import com.byd.sentrymode.monitor.library.MotionNativeLibrary;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileLock;
 import java.io.RandomAccessFile;
 import java.lang.reflect.Method;
-import java.security.MessageDigest;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -110,6 +108,8 @@ public final class MotionDetectorShellMain {
     private int recordingRequestId;
     private boolean recordingAttached;
     private boolean recordingStopRequested;
+    private long recordingAttemptRevision;
+    private long recordingFailureRevision = Long.MIN_VALUE;
     private boolean teardownPending;
     private boolean teardownNotifyHost;
     private boolean teardownHostShutdown;
@@ -135,7 +135,6 @@ public final class MotionDetectorShellMain {
     private String deliberatelyDetachedProducerReason = "";
     private String warningWindowFailure = "";
     private volatile String expectedSourceEpoch = "";
-    private MotionFirmwareProfile.Mismatch firmwareMismatch;
 
     private volatile String sessionId;
     private volatile IBinder appCallback;
@@ -155,6 +154,26 @@ public final class MotionDetectorShellMain {
     private long frameNumber;
     private String lastReportedDetectorState = "";
     private boolean firstInferenceReceived;
+    private volatile ManualCheck manualCheck;
+
+    private final class ManualCheck {
+        final String id;
+        final IBinder owner;
+        final ResultReceiver results;
+        final long deadline = SystemClock.elapsedRealtime() + MotionCheckupClient.TIMEOUT_MS;
+        final MotionCheckupFrames frames = new MotionCheckupFrames();
+        final IBinder.DeathRecipient death;
+        final Runnable timeout;
+        volatile boolean cancelled;
+        boolean ownsSession, ownsReader, finishing, completing;
+        int stage = MotionCheckupClient.ACCESS;
+        ManualCheck(String id, IBinder owner, ResultReceiver results) {
+            this.id = id; this.owner = owner; this.results = results;
+            death = () -> cancelCheck(this);
+            timeout = () -> completeCheck(this, MotionCheckupClient.ERROR, "timeout",
+                    "Check-up stage did not complete before its deadline", true);
+        }
+    }
 
     private MotionDetectorShellMain(int appUid, String extendIdentity, Context systemContext) {
         this.appUid = appUid;
@@ -242,6 +261,32 @@ public final class MotionDetectorShellMain {
             try {
                 data.enforceInterface(MotionDetectorProtocol.DESCRIPTOR);
                 switch (code) {
+                    case MotionDetectorProtocol.TX_CHECK_START: {
+                        String id = data.readString();
+                        IBinder owner = data.readStrongBinder();
+                        ResultReceiver results = data.readTypedObject(ResultReceiver.CREATOR);
+                        if (!MotionDetectorProtocol.validSession(id) || owner == null || results == null
+                                || data.dataAvail() != 0)
+                            throw new IllegalArgumentException("invalid Motion check-up request");
+                        ManualCheck check = new ManualCheck(id, owner, results);
+                        synchronized (binder) {
+                            if (manualCheck != null) throw new IllegalStateException("Motion check-up already running");
+                            owner.linkToDeath(check.death, 0);
+                            manualCheck = check;
+                        }
+                        control.post(() -> beginCheck(check));
+                        reply.writeNoException();
+                        return true;
+                    }
+                    case MotionDetectorProtocol.TX_CHECK_CANCEL: {
+                        String id = data.readString();
+                        if (!MotionDetectorProtocol.validSession(id) || data.dataAvail() != 0)
+                            throw new IllegalArgumentException("invalid Motion check-up cancellation");
+                        ManualCheck check = manualCheck;
+                        if (check != null && check.id.equals(id)) cancelCheck(check);
+                        reply.writeNoException();
+                        return true;
+                    }
                     case MotionDetectorProtocol.TX_PING:
                         if (data.dataAvail() != 0) throw new IllegalArgumentException("ping payload not empty");
                         reply.writeNoException();
@@ -391,6 +436,9 @@ public final class MotionDetectorShellMain {
     }
 
     private MotionSessionConfigStore.Snapshot configureOnControl(String configJson) throws Exception {
+        ManualCheck check = manualCheck;
+        if (check != null) completeCheck(check, MotionCheckupClient.NOT_CHECKED,
+                "cancelled", "Motion settings changed during check-up", true);
         int installedUid = systemContext.getPackageManager().getPackageUid(
                 MotionShellMediaContext.OWNER_PACKAGE, 0);
         if (installedUid != appUid) throw new SecurityException("installed app UID changed");
@@ -410,6 +458,112 @@ public final class MotionDetectorShellMain {
             return next;
         }
         return startConfiguredSession(next) ? next : null;
+    }
+
+    private void cancelCheck(ManualCheck check) {
+        check.cancelled = true;
+        control.post(() -> completeCheck(check, MotionCheckupClient.NOT_CHECKED,
+                "cancelled", "Manual check-up was cancelled", true));
+    }
+
+    private boolean checkLive(ManualCheck check) {
+        return manualCheck == check && !check.cancelled && check.owner.isBinderAlive()
+                && SystemClock.elapsedRealtime() < check.deadline;
+    }
+
+    private void checkResult(ManualCheck check, int status, String reason, String detail, boolean terminal) {
+        logEvent("motion_checkup", sessionId, "check_id", check.id, "stage", check.stage,
+                "status", status, "reason", reason, "detail", detail, "terminal", terminal);
+        Bundle result = new Bundle();
+        result.putInt("stage", check.stage);
+        result.putString("reason", reason);
+        result.putString("detail", detail);
+        result.putBoolean("terminal", terminal);
+        check.results.send(status, result);
+    }
+
+    private void requireCheckPowerOn() throws Exception {
+        FutureTask<Integer> read = new FutureTask<>(MotionScreenControl::readPowerRaw);
+        hostOperations.execute(read);
+        try {
+            if (AvasEventPolicy.normalizedPower(read.get(1_500L, TimeUnit.MILLISECONDS)) != 1)
+                throw new IllegalStateException("power_not_on");
+        } finally { read.cancel(false); }
+    }
+
+    private void beginCheck(ManualCheck check) {
+        if (!checkLive(check)) {
+            completeCheck(check, MotionCheckupClient.NOT_CHECKED, "cancelled", "Check-up is no longer active", true);
+            return;
+        }
+        control.postDelayed(check.timeout, Math.max(0L, check.deadline - SystemClock.elapsedRealtime()));
+        try {
+            if (eligible || attached || recorder != null || warning || warningClosing || warningWindowPending
+                    || workerBinding || teardownPending || shuttingDown || sessionRuntime.arming() || sessionRuntime.armed()
+                    || sessionId != null && !prepared && !"error".equals(state)) {
+                completeCheck(check, MotionCheckupClient.NOT_CHECKED, "busy",
+                        "Active or preparing Motion resources are left unchanged; try after they finish", true);
+                return;
+            }
+            requireCheckPowerOn();
+            if (!checkLive(check)) {
+                completeCheck(check, MotionCheckupClient.NOT_CHECKED, "cancelled", "Check-up ended during Power read", true);
+                return;
+            }
+            checkResult(check, MotionCheckupClient.OK, "access_ok", "Authenticated shell worker; Power=ON", false);
+            check.stage = MotionCheckupClient.DETECTOR;
+            checkResult(check, MotionCheckupClient.RUNNING, "", "", false);
+            if (sessionId != null) {
+                if (!prepared) throw new IllegalStateException(lastError);
+                startCheckFrames(check);
+            } else {
+                // Ephemeral disabled config is never persisted or published to the app observer.
+                check.ownsSession = true;
+                startConfiguredSession(new MotionSessionConfigStore.Snapshot(check.id, MotionConfig.parse("{}")));
+            }
+        } catch (Throwable error) {
+            boolean off = "power_not_on".equals(error.getMessage());
+            completeCheck(check, off ? MotionCheckupClient.NOT_CHECKED : MotionCheckupClient.ERROR,
+                    off ? "power_not_on" : "check_failed", summary(error), true);
+        }
+    }
+
+    private void startCheckFrames(ManualCheck check) throws Exception {
+        requireCheckPowerOn();
+        if (!checkLive(check)) {
+            completeCheck(check, MotionCheckupClient.NOT_CHECKED, "cancelled", "Check-up is no longer active", true);
+            return;
+        }
+        checkResult(check, MotionCheckupClient.OK, "detector_ok", "OEM native detector initialized", false);
+        check.stage = MotionCheckupClient.FRAMES;
+        checkResult(check, MotionCheckupClient.RUNNING, "", "", false);
+        check.ownsReader = true;
+        attachReader(sessionId);
+        control.removeCallbacks(check.timeout);
+        control.postDelayed(check.timeout, Math.min(FIRST_INFERENCE_TIMEOUT_MS,
+                Math.max(0L, check.deadline - SystemClock.elapsedRealtime())));
+    }
+
+    private void completeCheck(ManualCheck check, int status, String reason, String detail, boolean release) {
+        if (manualCheck != check || check.completing) return;
+        check.completing = true;
+        check.cancelled = true;
+        control.removeCallbacks(check.timeout);
+        try { check.owner.unlinkToDeath(check.death, 0); } catch (java.util.NoSuchElementException ignored) { }
+        if (release) {
+            boolean released = true;
+            if (check.ownsSession && check.id.equals(sessionId)) {
+                stopOnControl(sessionId, "manual_check_finished");
+                released = sessionId == null;
+            } else if (check.ownsReader) released = detachAndCloseReader(false);
+            if (!released) {
+                status = MotionCheckupClient.ERROR;
+                reason = "cleanup_pending";
+                detail += "; camera resource release has not been confirmed";
+            }
+        }
+        synchronized (binder) { manualCheck = null; }
+        checkResult(check, status, reason, detail, true);
     }
 
     private void resumePersistedConfig() {
@@ -468,33 +622,38 @@ public final class MotionDetectorShellMain {
         workerBound = false;
         expectedSourceEpoch = "";
         screen.beginSession(id);
-        if (firmwareMismatch != null) {
-            state = "error";
-            lastError = MotionFirmwareProfile.ERROR_STAGE + ": " + summary(firmwareMismatch);
-            sendError(id, MotionFirmwareProfile.ERROR_STAGE, summary(firmwareMismatch));
-            sendStatus(id, "error", lastError);
-            return true;
-        }
         sendStatus(id, "preparing", "shell-owned Motion session; inspecting installed OEM detector artifacts");
         workerBinding = true;
         hostOperations.execute(() -> {
             Throwable failure = null;
+            boolean bound = false;
             try {
-                if (!cameraOperation(MotionDetectorProtocol.CAMERA_BIND_WORKER, id, null, null, 0))
+                bound = true; // A failed Binder reply may follow an accepted binding; teardown must confirm release.
+                if (!cameraOperation(MotionDetectorProtocol.CAMERA_BIND_WORKER, id, null, null, 0)) {
+                    bound = false;
                     throw new IllegalStateException("camera runtime refused Motion worker binding");
+                }
                 setMotionTelemetryDemand(id, true);
             } catch (Throwable error) { failure = error; }
             Throwable result = failure;
-            control.post(() -> onHostBindingComplete(id, result));
+            boolean hostBound = bound;
+            control.post(() -> onHostBindingComplete(id, hostBound, result));
         });
         return true;
     }
 
-    private void onHostBindingComplete(String id, Throwable failure) {
+    private void onHostBindingComplete(String id, boolean hostBound, Throwable failure) {
+        workerBinding = false;
+        if (sameSession(id)) {
+            workerBound = hostBound;
+            if (teardownPending) {
+                continuePendingTeardown();
+                return;
+            }
+        }
         if (failure != null) {
-            workerBinding = false;
             if (sameSession(id)) fail(id, "camera_bind", failure);
-            else if (workerBound) hostOperations.execute(() -> cleanupHostBinding(id));
+            else if (hostBound) hostOperations.execute(() -> cleanupHostBinding(id));
             return;
         }
         if (!sameSession(id) || shuttingDown) {
@@ -567,34 +726,47 @@ public final class MotionDetectorShellMain {
 
     private void prepareSession(String id) {
         if (!sameSession(id)) return;
+        ManualCheck pendingCheck = manualCheck;
+        if (pendingCheck != null && pendingCheck.ownsSession && !checkLive(pendingCheck)) {
+            completeCheck(pendingCheck, MotionCheckupClient.NOT_CHECKED, "cancelled",
+                    "Check-up ended while the camera host was binding", true);
+            return;
+        }
         MotionNativeSetup setup = new MotionNativeSetup(systemContext);
         try {
+            logEvent("motion_native_environment", id, "sdk", Build.VERSION.SDK_INT,
+                    "release", Build.VERSION.RELEASE, "display", Build.DISPLAY,
+                    "incremental", Build.VERSION.INCREMENTAL, "model", Build.MODEL);
             setup.prepare();
             assets = setup.assets;
             sensitivity = setup.sensitivity;
+            setup.stage = "native_init";
             nativeApi = new MotionNativeLibrary();
             nativeInput = new byte[MotionDetectorProtocol.INPUT_BYTES];
+            logEvent("motion_native_init_begin", id, "model_value", setup.modelValue,
+                    "mirrors_open", setup.mirrorSetting == 0, "sensitivity", sensitivity);
             int init = nativeApi.init(assets, MotionDetectorProtocol.PREVIEW_WIDTH,
                     MotionDetectorProtocol.PREVIEW_HEIGHT, setup.mirrorSetting == 0, setup.modelValue);
             logEvent("motion_native_init", id, "result", init,
                     "preview_width", MotionDetectorProtocol.PREVIEW_WIDTH,
-                    "preview_height", MotionDetectorProtocol.PREVIEW_HEIGHT);
+                    "preview_height", MotionDetectorProtocol.PREVIEW_HEIGHT,
+                    "model_value", setup.modelValue, "sensitivity", sensitivity);
             if (init != 0 && init != 1) throw new IOException("native init refused: " + init);
             nativeInitialized = true;
             prepared = true;
+            setup.stage = "prepared_session";
             state = "prepared";
             sendPrepared(id);
             sendStatus(id, "prepared", "OEM artifacts and native init accepted; awaiting fresh shell telemetry");
-            if (sessionRuntime.armed()) setEligibleOnControl(id, true);
+            ManualCheck check = manualCheck;
+            if (check != null && check.ownsSession && check.id.equals(id)) startCheckFrames(check);
+            else if (sessionRuntime.armed()) setEligibleOnControl(id, true);
             else if (!sessionRuntime.arming()) holdCpu(false);
         } catch (Throwable error) {
             if (assets == null && setup.assets != null) {
                 try { setup.assets.close(); } catch (Throwable ignored) { }
             }
-            if (error instanceof MotionFirmwareProfile.Mismatch)
-                firmwareMismatch = (MotionFirmwareProfile.Mismatch) error;
-            fail(id, error instanceof MotionFirmwareProfile.Mismatch
-                    ? MotionFirmwareProfile.ERROR_STAGE : "prepare", error);
+            fail(id, setup.stage, error);
         }
     }
 
@@ -661,7 +833,8 @@ public final class MotionDetectorShellMain {
 
     private void drainLatestFrame() {
         try {
-            if (!eligible || reader == null) return;
+            ManualCheck check = manualCheck;
+            if (reader == null || !eligible && (check == null || !checkLive(check) || check.finishing)) return;
             Image frame = reader.acquireLatestImage();
             if (frame == null) return;
             try (Image owned = frame) { processFrame(owned); }
@@ -677,14 +850,19 @@ public final class MotionDetectorShellMain {
         if (frame.getFormat() != ImageFormat.YUV_420_888
                 || frame.getWidth() != MotionDetectorProtocol.INPUT_WIDTH
                 || frame.getHeight() != MotionDetectorProtocol.INPUT_HEIGHT)
-            throw new IllegalStateException("unexpected composed camera Surface format/dimensions");
+            throw new IllegalStateException("composed camera frame mismatch: expected format="
+                    + ImageFormat.YUV_420_888 + " size=" + MotionDetectorProtocol.INPUT_WIDTH + "x"
+                    + MotionDetectorProtocol.INPUT_HEIGHT + " actual format=" + frame.getFormat()
+                    + " size=" + frame.getWidth() + "x" + frame.getHeight());
         Rect crop = frame.getCropRect();
         if (crop.left != 0 || crop.top != 0 || crop.right != frame.getWidth()
                 || crop.bottom != frame.getHeight())
-            throw new IllegalStateException("motion frame crop is not the inspected full composition");
+            throw new IllegalStateException("motion frame crop is not the full composition: crop="
+                    + crop + " size=" + frame.getWidth() + "x" + frame.getHeight());
         Image.Plane[] planes = frame.getPlanes();
         if (planes == null || planes.length != 3)
-            throw new IllegalStateException("YUV_420_888 did not provide exactly three planes");
+            throw new IllegalStateException("YUV_420_888 requires three planes: actual="
+                    + (planes == null ? "null" : planes.length));
         MotionYuvPacker.pack(
                 plane(planes[0]), plane(planes[1]), plane(planes[2]),
                 frame.getWidth(), frame.getHeight(), nativeInput);
@@ -693,6 +871,28 @@ public final class MotionDetectorShellMain {
         int raw = nativeApi.detect(nativeInput, MotionDetectorProtocol.INPUT_WIDTH,
                 MotionDetectorProtocol.INPUT_HEIGHT, sensitivity);
         frameNumber++;
+        ManualCheck check = manualCheck;
+        if (check != null && check.ownsReader) {
+            boolean done = check.frames.observe(frameTimeNs, raw);
+            int nativeState = nativeApi.getState();
+            logEvent("motion_checkup_frame", sessionId, "check_id", check.id,
+                    "timestamp_ns", frameTimeNs, "raw_result", raw, "native_state", nativeState);
+            if (done && !check.finishing) {
+                check.finishing = true;
+                // Release the Image before detaching or closing its ImageReader.
+                control.post(() -> {
+                    try {
+                        requireCheckPowerOn();
+                        completeCheck(check, checkLive(check) ? MotionCheckupClient.OK : MotionCheckupClient.NOT_CHECKED,
+                                checkLive(check) ? (check.frames.motionObserved() ? "frames_motion" : "frames_clear") : "cancelled",
+                                "Two fresh frames processed; outputs were not triggered", true);
+                    } catch (Throwable error) {
+                        completeCheck(check, MotionCheckupClient.ERROR, "check_failed", summary(error), true);
+                    }
+                });
+            }
+            return;
+        }
         if (raw == MotionEventPolicy.ERROR_RESULT) {
             noteFirstInference(raw, "not_read_after_error", frameTimeNs);
             policy.observe(raw, now);
@@ -1025,6 +1225,11 @@ public final class MotionDetectorShellMain {
             }
             if (teardownPending || shuttingDown || "error".equals(state)) return;
             if ("helper_death".equals(kind) || "helper_ping_failed".equals(kind)) {
+                ManualCheck check = manualCheck;
+                if (check != null) {
+                    completeCheck(check, MotionCheckupClient.ERROR, "check_failed", kind, true);
+                    if (!sameSession(id)) return;
+                }
                 sessionRuntime.invalidateTelemetry();
                 control.removeCallbacks(armCheck);
                 if (eligible) setEligibleOnControl(id, false);
@@ -1039,10 +1244,31 @@ public final class MotionDetectorShellMain {
             String epoch = event.optString("source_epoch", "");
             if (epoch.isEmpty() || !epoch.equals(expectedSourceEpoch)) return;
             int value = event.optInt("value", Integer.MIN_VALUE);
+            ManualCheck check = manualCheck;
+            if (check != null && "power".equals(signal) && AvasEventPolicy.normalizedPower(value) != 1) {
+                completeCheck(check, MotionCheckupClient.NOT_CHECKED, "power_not_on",
+                        "Power is no longer ON; check-up resources released", true);
+                if (!sameSession(id)) return;
+            }
             boolean baseline = event.optBoolean("baseline", false);
             long now = SystemClock.elapsedRealtime();
             MotionSessionRuntime.Change change = sessionRuntime.telemetry(epoch, signal,
                     value, baseline, now);
+            applyEligibilityChange(id, change);
+        } catch (Throwable error) {
+            System.err.println("motion_telemetry_rejected " + summary(error));
+        }
+    }
+
+    private void advanceEligibility() {
+        if (sessionId == null || shuttingDown || teardownPending || sessionRuntime.suspended()) return;
+        long now = SystemClock.elapsedRealtime();
+        applyEligibilityChange(sessionId, sessionRuntime.advance(now));
+    }
+
+    private void applyEligibilityChange(String id, MotionSessionRuntime.Change change) {
+        if (!sameSession(id) || shuttingDown || teardownPending || sessionRuntime.suspended()) return;
+        try {
             if (change == MotionSessionRuntime.Change.EPOCH_CHANGED) {
                 if (eligible) setEligibleOnControl(id, false);
                 eligible = false;
@@ -1052,10 +1278,15 @@ public final class MotionDetectorShellMain {
             if (sessionRuntime.arming()) {
                 holdCpu(true);
                 control.removeCallbacks(armCheck);
-                control.postDelayed(armCheck, MotionDetectorProtocol.WARMUP_MS);
-                sendStatus(id, "arming", "fresh mode-eligible telemetry must remain valid for 2.5 seconds");
-            }
-            if (change == MotionSessionRuntime.Change.DISARMED) {
+                control.postDelayed(armCheck, sessionRuntime.remainingArmDelayMs(SystemClock.elapsedRealtime()));
+                if (change == MotionSessionRuntime.Change.ARMING || change == MotionSessionRuntime.Change.EPOCH_CHANGED)
+                    sendStatus(id, "arming", "fresh mode-eligible telemetry must remain valid for 2.5 seconds");
+            } else control.removeCallbacks(armCheck);
+            if (change == MotionSessionRuntime.Change.ARMED) {
+                holdCpu(true);
+                sendStatus(id, "armed", "2.5-second shell telemetry warm-up completed");
+                if (prepared) setEligibleOnControl(id, true);
+            } else if (change == MotionSessionRuntime.Change.DISARMED) {
                 control.removeCallbacks(armCheck);
                 if (eligible) setEligibleOnControl(id, false);
                 eligible = false;
@@ -1063,29 +1294,7 @@ public final class MotionDetectorShellMain {
                 sendStatus(id, "disarmed", "Power/Lock telemetry no longer meets Motion mode");
             }
         } catch (Throwable error) {
-            System.err.println("motion_telemetry_rejected " + summary(error));
-        }
-    }
-
-    private void advanceEligibility() {
-        if (sessionId == null || shuttingDown || sessionRuntime.suspended()) return;
-        MotionSessionRuntime.Change change = sessionRuntime.advance(SystemClock.elapsedRealtime());
-        if (change == MotionSessionRuntime.Change.ARMED) {
-            holdCpu(true);
-            sendStatus(sessionId, "armed", "2.5-second shell telemetry warm-up completed");
-            try {
-                if (prepared) setEligibleOnControl(sessionId, true);
-            } catch (Throwable error) {
-                fail(sessionId, "camera_attach", error);
-            }
-        } else if (change == MotionSessionRuntime.Change.DISARMED) {
-            control.removeCallbacks(armCheck);
-            if (eligible) {
-                try { setEligibleOnControl(sessionId, false); }
-                catch (Throwable error) { fail(sessionId, "camera_detach", error); }
-            }
-            eligible = false;
-            if (recorder == null || !recorder.isRecording()) holdCpu(false);
+            fail(id, "eligibility", error);
         }
     }
 
@@ -1103,6 +1312,12 @@ public final class MotionDetectorShellMain {
                 && ("motion_detector_idle".equals(reason) || "motion_recording_stop".equals(reason)
                     || "source_demand_idle".equals(reason));
         if (deliberate || !sameSession(id) || shuttingDown) return;
+        ManualCheck check = manualCheck;
+        if (check != null) {
+            if (producerClosed && check.ownsReader) detachAndCloseReader(true);
+            completeCheck(check, MotionCheckupClient.ERROR, "check_failed", kind + ": " + reason, true);
+            if (!sameSession(id)) return;
+        }
         sendStatus(id, "camera_recovering", kind + ":" + reason
                 + (detail.isEmpty() ? "" : ":" + detail));
         sessionRuntime.invalidateTelemetry();
@@ -1127,7 +1342,9 @@ public final class MotionDetectorShellMain {
 
     private void startRecording(String id) {
         if (!sameSession(id) || !eligible || config == null || !config.recordingEnabled
-                || recorder != null || shuttingDown) return;
+                || recorder != null || shuttingDown || teardownPending
+                || recordingFailureRevision == sessionRuntime.recordingRevision()) return;
+        recordingAttemptRevision = sessionRuntime.recordingRevision();
         try {
             int generation = ++recordingGeneration;
             ensureMediaBridge();
@@ -1145,6 +1362,7 @@ public final class MotionDetectorShellMain {
                     detail -> control.post(() -> {
                         if (!sameSession(id) || generation != recordingGeneration) return;
                         sendError(id, "video_composer", detail);
+                        blockRecordingRetry(id, "composer_failed");
                         stopRecording("composer_failed");
                     }));
             // Retain cleanup ownership even when initialization times out on the GL thread.
@@ -1165,19 +1383,29 @@ public final class MotionDetectorShellMain {
             sendStatus(id, "recording_buffering", "hardware encoder and four camera inputs are shell-owned");
         } catch (Throwable error) {
             sendError(id, "recording_start", summary(error));
+            blockRecordingRetry(id, "start_failed");
             stopRecording("start_failed");
         }
+    }
+
+    private void blockRecordingRetry(String id, String reason) {
+        recordingFailureRevision = recordingAttemptRevision;
+        logEvent("motion_recording_retry_blocked", id, "reason", reason,
+                "attempt_revision", recordingAttemptRevision,
+                "current_revision", sessionRuntime.recordingRevision());
     }
 
     private void onRecorderEvent(String id, MotionVideoRecorder owner, int generation, String detail) {
         if (owner == null || recorder != owner) return;
         if (detail != null && detail.startsWith("input_release_required:")) {
+            if (!recordingStopRequested) blockRecordingRetry(id, detail);
             if (teardownPending) continuePendingTeardown();
             else stopRecording(detail.substring("input_release_required:".length()));
             return;
         }
         if (detail != null && detail.startsWith("stopped:")) {
             if (owner.isBuffering()) return;
+            if (!recordingStopRequested) blockRecordingRetry(id, detail);
             if (recordingAttached || composer != null) {
                 logEvent("motion_teardown_pending", id, "resource", "recorder",
                         "reason", "video worker ended before camera detach was confirmed");
@@ -1196,6 +1424,7 @@ public final class MotionDetectorShellMain {
         if (detail != null && (detail.startsWith("video_encoder_unavailable:")
                 || detail.startsWith("video_encoder_failed:"))) {
             sendError(id, "video_encoder", detail);
+            blockRecordingRetry(id, detail);
             stopRecording("encoder_failed");
         }
     }
@@ -1308,6 +1537,8 @@ public final class MotionDetectorShellMain {
 
     private void beginTeardown(String id, String reason, boolean notifyHost,
             boolean hostShutdown, boolean surfacesDrained, IBinder callback, String finalState) {
+        ManualCheck check = manualCheck;
+        if (check != null) completeCheck(check, MotionCheckupClient.NOT_CHECKED, "cancelled", reason, false);
         if (teardownPending && sameSession(id)) return;
         teardownPending = true;
         teardownNotifyHost = notifyHost;
@@ -1326,6 +1557,10 @@ public final class MotionDetectorShellMain {
     private void continuePendingTeardown() {
         String id = sessionId;
         if (!teardownPending || id == null) return;
+        if (workerBinding) {
+            state = "teardown_pending";
+            return;
+        }
         control.removeCallbacks(armCheck);
         control.removeCallbacks(firstInferenceTimeout);
         control.removeCallbacks(warningWindowTimeout);
@@ -1452,6 +1687,11 @@ public final class MotionDetectorShellMain {
 
     private void fail(String id, String stage, Throwable error) {
         if (!sameSession(id)) return;
+        ManualCheck check = manualCheck;
+        if (check != null && (check.ownsSession || check.ownsReader)) {
+            completeCheck(check, MotionCheckupClient.ERROR, "check_failed", stage + ": " + summary(error), true);
+            return;
+        }
         lastError = stage + ": " + summary(error);
         sendError(id, stage, summary(error));
         beginTeardown(id, "runtime_error", true, false, false, appCallback, "error");
@@ -1666,51 +1906,49 @@ public final class MotionDetectorShellMain {
 
     private interface ControlCall<T> { T run() throws Exception; }
 
-    private static final class MotionNativeSetup {
+    static final class MotionNativeSetup {
         final Context context;
         ApplicationInfo info;
         AssetManager assets;
         int modelValue;
         int mirrorSetting;
         int sensitivity;
+        String stage = "oem_package";
 
         MotionNativeSetup(Context context) { this.context = context; }
 
         void prepare() throws Exception {
-            verifyFirmware();
             PackageInfo packageInfo = context.getPackageManager().getPackageInfo(
                     MotionDetectorProtocol.OEM_PACKAGE, 0);
-            long version = packageInfo.getLongVersionCode();
-            if (version != 10_503_004L) throw new MotionFirmwareProfile.Mismatch(
-                    "SentryMode.versionCode", "10503004", Long.toString(version));
             info = context.getPackageManager().getApplicationInfo(MotionDetectorProtocol.OEM_PACKAGE, 0);
-            if (!info.sourceDir.startsWith("/system/") || !info.nativeLibraryDir.startsWith("/system/"))
-                throw new MotionFirmwareProfile.Mismatch("SentryMode.paths", "/system/*",
-                        "sourceDir=" + info.sourceDir + "; nativeLibraryDir=" + info.nativeLibraryDir);
-            requireHash(new File(info.sourceDir), MotionDetectorProtocol.OEM_APK_SHA256);
-            File nativeLibrary = new File(info.nativeLibraryDir, "libnative-lib-motion.so");
-            requireHash(nativeLibrary, MotionDetectorProtocol.OEM_LIBRARY_SHA256);
+            System.out.println("motion_oem_package version=" + packageInfo.versionCode
+                    + " sourceDir=" + info.sourceDir + " nativeLibraryDir=" + info.nativeLibraryDir);
+            if (info.sourceDir == null || info.sourceDir.isEmpty()
+                    || info.nativeLibraryDir == null || info.nativeLibraryDir.isEmpty())
+                throw new IOException("OEM package has no APK or native-library path: sourceDir="
+                        + info.sourceDir + " nativeLibraryDir=" + info.nativeLibraryDir);
 
+            stage = "oem_model_value";
             modelValue = parseModel(runCommand("/system/bin/content", "query", "--user", "0",
                     "--uri", "content://carsettings/config", "--projection", "value",
                     "--where", "key='model_value'"));
-            if (modelValue != MotionDetectorProtocol.MODEL_VALUE)
-                throw new MotionFirmwareProfile.Mismatch("model_value",
-                        Integer.toString(MotionDetectorProtocol.MODEL_VALUE), Integer.toString(modelValue));
+            stage = "oem_mirror_setting";
             mirrorSetting = parseSetting(runCommand("/system/bin/settings", "--user", "0",
                     "get", "global", "sentrymode_rearview_status"), 0, 1);
+            stage = "oem_sensitivity_setting";
             int sensitivitySetting = parseSetting(runCommand("/system/bin/settings", "--user", "0",
                     "get", "global", "sentrymode_sensitivity_level"), 2, 2);
             sensitivity = 3 - sensitivitySetting;
 
+            stage = "oem_assets";
             assets = AssetManager.class.getDeclaredConstructor().newInstance();
             int assetPath = (Integer) AssetManager.class.getMethod("addAssetPath", String.class)
                     .invoke(assets, info.sourceDir);
-            if (assetPath == 0) throw new IOException("stock model APK asset path unavailable");
-            requireAssetHash(assets, MotionDetectorProtocol.OEM_MODEL_ASSET,
-                    MotionDetectorProtocol.OEM_MODEL_BYTES, MotionDetectorProtocol.OEM_MODEL_SHA256);
+            if (assetPath == 0) throw new IOException("OEM APK assets unavailable: " + info.sourceDir);
+            // The installed native detector selects its own model asset during init.
 
             for (String name : new String[] { "libc++_shared.so", "libSNPE.so", "libnative-lib-motion.so" }) {
+                stage = "native_load:" + name;
                 String path = new File(info.nativeLibraryDir, name).getPath();
                 System.out.println("motion_native_load_begin path=" + path);
                 System.out.flush();
@@ -1720,27 +1958,11 @@ public final class MotionDetectorShellMain {
             }
         }
 
-        private static void verifyFirmware() throws Exception {
-            MotionFirmwareProfile.verify(Build.VERSION.SDK_INT, Build.VERSION.RELEASE,
-                    Build.DISPLAY, Build.VERSION.INCREMENTAL);
-            String configured = property("vehicle.config.camInfo.avm");
-            String active = property("persist.vendor.camera.autostudy.avm");
-            if (!MotionDetectorProtocol.IDC_CONFIG.equals(configured) || !configured.equals(active))
-                throw new IOException("IDC camera configuration mismatch: expected=["
-                        + MotionDetectorProtocol.IDC_CONFIG + "] vehicle.config.camInfo.avm=["
-                        + configured + "] persist.vendor.camera.autostudy.avm=[" + active + "]");
-        }
-
-        private static String property(String key) throws Exception {
-            return (String) Class.forName("android.os.SystemProperties")
-                    .getMethod("get", String.class).invoke(null, key);
-        }
-
         private static String runCommand(String... command) throws Exception {
             java.lang.Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
             try {
                 if (!process.waitFor(5, TimeUnit.SECONDS))
-                    throw new IOException("configuration read timed out: " + command[0]);
+                    throw new IOException("configuration read timed out: " + String.join(" ", command));
                 ByteArrayOutputStream bytes = new ByteArrayOutputStream();
                 try (InputStream input = process.getInputStream()) {
                     byte[] buffer = new byte[1024];
@@ -1750,7 +1972,8 @@ public final class MotionDetectorShellMain {
                     }
                 }
                 if (process.exitValue() != 0)
-                    throw new IOException("configuration command failed: " + command[0]);
+                    throw new IOException("configuration command failed: " + String.join(" ", command)
+                            + " exit=" + process.exitValue() + " output=" + bytes.toString("UTF-8").trim());
                 return bytes.toString("UTF-8").trim();
             } finally {
                 if (process.isAlive()) process.destroyForcibly();
@@ -1760,10 +1983,10 @@ public final class MotionDetectorShellMain {
             }
         }
 
-        private static int parseModel(String text) throws IOException {
+        static int parseModel(String text) throws IOException {
             Matcher row = Pattern.compile("Row: 0 value=([0-9]+)").matcher(text.trim());
-            if (!row.matches()) throw new IOException("model_value missing or ambiguous");
-            return parseBounded(row.group(1), 1, 65_535);
+            if (!row.matches()) throw new IOException("model_value missing or ambiguous: " + text);
+            return parseBounded(row.group(1), 1, Integer.MAX_VALUE);
         }
 
         private static int parseSetting(String text, int absentDefault, int max) throws IOException {
@@ -1772,47 +1995,13 @@ public final class MotionDetectorShellMain {
         }
 
         private static int parseBounded(String value, int min, int max) throws IOException {
-            if (!value.matches("[0-9]+")) throw new IOException("invalid OEM setting value");
+            if (!value.matches("[0-9]+")) throw new IOException("invalid OEM setting value: " + value);
             int result;
             try { result = Integer.parseInt(value); }
-            catch (NumberFormatException error) { throw new IOException("invalid OEM setting value", error); }
-            if (result < min || result > max) throw new IOException("OEM setting out of range");
+            catch (NumberFormatException error) { throw new IOException("invalid OEM setting value: " + value, error); }
+            if (result < min || result > max) throw new IOException("OEM setting out of range: value="
+                    + value + " expected=" + min + ".." + max);
             return result;
-        }
-
-        private static void requireAssetHash(AssetManager manager, String path, long expectedBytes,
-                String expectedHash) throws Exception {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            long bytes = 0L;
-            try (InputStream input = manager.open(path)) {
-                byte[] buffer = new byte[65_536];
-                for (int n; (n = input.read(buffer)) != -1;) {
-                    bytes += n;
-                    digest.update(buffer, 0, n);
-                }
-            }
-            String actualHash = hex(digest.digest());
-            if (bytes != expectedBytes || !expectedHash.equals(actualHash))
-                throw new MotionFirmwareProfile.Mismatch("asset:" + path,
-                        "bytes=" + expectedBytes + "; sha256=" + expectedHash,
-                        "bytes=" + bytes + "; sha256=" + actualHash);
-        }
-
-        private static void requireHash(File file, String expected) throws Exception {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            try (InputStream input = new FileInputStream(file)) {
-                byte[] buffer = new byte[65_536];
-                for (int n; (n = input.read(buffer)) != -1;) digest.update(buffer, 0, n);
-            }
-            String actual = hex(digest.digest());
-            if (!expected.equals(actual))
-                throw new MotionFirmwareProfile.Mismatch("sha256:" + file.getPath(), expected, actual);
-        }
-
-        private static String hex(byte[] bytes) {
-            StringBuilder value = new StringBuilder(bytes.length * 2);
-            for (byte b : bytes) value.append(String.format(java.util.Locale.ROOT, "%02X", b & 0xff));
-            return value.toString();
         }
     }
 }

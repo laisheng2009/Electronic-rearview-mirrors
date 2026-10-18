@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="motion_check_title">Перевірка роботи</string>
+    <string name="motion_check_hint">Перевірка детектора й живих кадрів камер на увімкненому авто.</string>
+    <string name="motion_check_run">Перевірити роботу</string>
+    <string name="motion_check_scope">Тимчасова перевірка, навіть коли Motion вимкнено. Налаштування не змінюються. Без пробудження екрана, попередження й запису відео. Закриття вікна скасовує перевірку.</string>
+    <string name="motion_check_access">Доступ до системи</string>
+    <string name="motion_check_detector">Ініціалізація детектора</string>
+    <string name="motion_check_frames">Кадри камер і детекція</string>
+    <string name="motion_check_display">Показ попередження</string>
+    <string name="motion_check_recording">Запис відео</string>
+    <string name="motion_check_working">Працює</string>
+    <string name="motion_check_error">Помилка</string>
+    <string name="motion_check_running">Перевіряється…</string>
+    <string name="motion_check_not_checked">Не перевірено</string>
+    <string name="motion_check_access_ok">Авторизований shell-хелпер доступний; авто увімкнене.</string>
+    <string name="motion_check_detector_ok">Штатний детектор успішно ініціалізовано.</string>
+    <string name="motion_check_frames_clear">Свіжі кадри успішно оброблено. Руху не виявлено — це нормальний результат. Розпізнавання реального руху ще не перевірено.</string>
+    <string name="motion_check_frames_motion">Свіжі кадри оброблено; детектор повідомив про рух. Попередження й запис не запускалися.</string>
+    <string name="motion_check_busy">Motion уже працює або готується. Його не перервано. Повторіть перевірку після завершення.</string>
+    <string name="motion_check_power">Ця перевірка доступна лише на увімкненому авто.</string>
+    <string name="motion_check_cancelled">Перевірку скасовано; незавершені етапи залишаються неперевіреними.</string>
+    <string name="motion_check_cleanup">Звільнення ресурсів камер не підтверджено. Подробиці — у журналі.</string>
+    <string name="motion_check_timeout">Етап не завершився вчасно. Причина наведена нижче та в журналі.</string>
+    <string name="motion_check_worker">Не вдалося отримати доступ до авторизованого хелпера Motion.</string>
+    <string name="motion_check_failed">Етап не пройдено. Технічна причина:</string>
+    <string name="motion_check_output_unverified">Ця перевірка не запускає цей етап. Потрібна реальна подія руху на вимкненому авто з увімкненою відповідною функцією.</string>
+</resources>

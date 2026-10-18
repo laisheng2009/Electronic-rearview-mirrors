@@ -360,7 +360,7 @@ final class MotionScreenControl implements AutoCloseable {
 
     private int readPower() throws Exception { return bounded("Power read", MotionScreenControl::readPowerRaw); }
 
-    private static int readPowerRaw() throws Exception {
+    static int readPowerRaw() throws Exception {
         IBinder target = binder("autoservice");
         if (target == null) throw new IllegalStateException("autoservice unavailable");
         Parcel input = Parcel.obtain(), output = Parcel.obtain();

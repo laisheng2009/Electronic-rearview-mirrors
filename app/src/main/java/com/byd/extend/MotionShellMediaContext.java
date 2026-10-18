@@ -28,8 +28,6 @@ final class MotionShellMediaContext implements AutoCloseable {
 
     MotionShellMediaContext(Context systemContext, int appUid, String ownerPackage,
             File privateDirectory) throws Exception {
-        if (Build.VERSION.SDK_INT < 31)
-            throw new IOException("Shell MediaStore external-provider access requires Android 12+");
         if (systemContext == null || appUid <= 0 || !OWNER_PACKAGE.equals(ownerPackage))
             throw new IllegalArgumentException("Invalid Motion shell owner identity");
         this.shellContext = TurnSignalShellMain.shellContext(systemContext);

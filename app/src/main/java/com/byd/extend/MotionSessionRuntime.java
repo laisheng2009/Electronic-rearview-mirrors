@@ -14,6 +14,7 @@ final class MotionSessionRuntime {
     private boolean armed;
     private boolean suspended;
     private boolean warningRetryBlocked;
+    private long recordingRevision;
 
     void configure(String sessionId, MotionConfig config) {
         if (!MotionDetectorProtocol.validSession(sessionId) || config == null)
@@ -26,6 +27,7 @@ final class MotionSessionRuntime {
         armed = false;
         suspended = false;
         warningRetryBlocked = false;
+        recordingRevision++;
     }
 
     Change telemetry(String epoch, String signal, int value, boolean baseline, long nowMs) {
@@ -36,12 +38,15 @@ final class MotionSessionRuntime {
             telemetry.invalidate();
             armDeadlineMs = 0L;
             armed = false;
+            recordingRevision++;
         }
         sourceEpoch = epoch;
-        if (warningRetryBlocked && config != null
+        if (config != null
                 && ("power".equals(signal) && AvasEventPolicy.normalizedPower(value) > 0
-                    || config.lockCondition != 0 && "lock".equals(signal) && value == 1))
+                    || config.lockCondition != 0 && "lock".equals(signal) && value == 1)) {
             warningRetryBlocked = false;
+            recordingRevision++;
+        }
         if ("power".equals(signal)) telemetry.power(value, baseline);
         else if ("lock".equals(signal)) telemetry.lock(value, baseline);
         else return changedEpoch ? Change.EPOCH_CHANGED : Change.NONE;
@@ -93,6 +98,8 @@ final class MotionSessionRuntime {
     int lock() { return telemetry.lock(); }
     boolean armed() { return armed; }
     boolean arming() { return armDeadlineMs != 0L && !armed; }
+    long remainingArmDelayMs(long nowMs) { return arming() ? Math.max(0L, armDeadlineMs - nowMs) : 0L; }
+    long recordingRevision() { return recordingRevision; }
     boolean suspended() { return suspended; }
     void blockWarningRetry() { warningRetryBlocked = true; }
     boolean warningRetryBlocked() { return warningRetryBlocked; }

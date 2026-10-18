@@ -326,8 +326,12 @@ public final class MotionVideoRecorder implements AutoCloseable {
     public boolean isRecording() { return recording; }
 
     private static MediaCodec createHardwareAvcEncoder(int width, int height, int bitrate) throws IOException {
-        if (Build.VERSION.SDK_INT < 29) {
-            throw new IOException("hardware_encoder_classification_unavailable");
+        try {
+            MediaCodecInfo.class.getMethod("isHardwareAccelerated");
+            MediaCodecInfo.class.getMethod("isSoftwareOnly");
+        } catch (NoSuchMethodException missingApi) {
+            throw new IOException("hardware_encoder_classification_unavailable: "
+                    + missingApi.getMessage(), missingApi);
         }
         MediaCodecList codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
         String lastFailure = "no_hardware_avc_encoder_supports_requested_size_rate";

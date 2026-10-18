@@ -15,7 +15,7 @@ public final class MotionDetectorProtocol {
     static final String CONFIG_PATH = STATE_ROOT + "/config.json";
     static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
     static final String EXTRA_SESSION = "motion_session_id";
-    static final int VERSION = 3;
+    static final int VERSION = 4;
     public static final String EXTRA_WINDOW_REPORTER = "motion_window_reporter";
     public static final String WINDOW_COMMANDS = "window_commands";
     public static final String WINDOW_CANCELLED = "window_cancelled";
@@ -47,6 +47,8 @@ public final class MotionDetectorProtocol {
     static final int TX_READ_MEDIA = IBinder.FIRST_CALL_TRANSACTION + 16;
     static final int TX_DELETE_MEDIA = IBinder.FIRST_CALL_TRANSACTION + 17;
     static final int TX_EXPLICIT_SHUTDOWN = IBinder.FIRST_CALL_TRANSACTION + 18;
+    static final int TX_CHECK_START = IBinder.FIRST_CALL_TRANSACTION + 19;
+    static final int TX_CHECK_CANCEL = IBinder.FIRST_CALL_TRANSACTION + 20;
 
     static final int CB_PREPARED = IBinder.FIRST_CALL_TRANSACTION;
     static final int CB_STATUS = IBinder.FIRST_CALL_TRANSACTION + 1;
@@ -74,17 +76,6 @@ public final class MotionDetectorProtocol {
     static final long WARMUP_MS = 2_500L;
     public static final long WARNING_MS = 10_000L;
     static final String OEM_PACKAGE = "com.byd.sentrymode";
-    static final String OEM_MODEL_ASSET = "SM_V8s_L_V08_19.dlc";
-    static final long OEM_MODEL_BYTES = 39_536_897L;
-    static final String OEM_APK_SHA256 =
-            "02EBF1C2290145063CC477D24C06DD286C80FE02EBB732D9A93B7A1D7903C296";
-    static final String OEM_LIBRARY_SHA256 =
-            "EE4CCBC9CA3111895FA8A825E312D5A8CD129BD12FAFF7BE915B05A45059539C";
-    static final String OEM_MODEL_SHA256 =
-            "036A57356B1B47A34419A0CFBF5DEED78827CC5BFCF8A3524273653936D08F76";
-    static final String IDC_CONFIG =
-            "supplier:idc;resolution:7680x1300;fps:30.0;datatype:yuv422;";
-    static final int MODEL_VALUE = 286;
 
     private MotionDetectorProtocol() {}
 

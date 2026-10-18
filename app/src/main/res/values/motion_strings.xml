@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="motion_title">"Motion warning"</string>
-    <string name="motion_notice">"Motion detection and recording require a verified Sea Lion 07 EV firmware profile."</string>
+    <string name="motion_notice">"Operation depends on the available vehicle components. Required capabilities are checked at runtime; failures and their causes are logged."</string>
     <string name="motion_enable">"Show a warning when motion is detected"</string>
     <string name="motion_timing">"Vehicle off • wait 2.5 s • show for 10 s; repeated detection extends the display."</string>
     <string name="motion_lock">"Lock state"</string>

@@ -138,6 +138,7 @@ internal fun MotionIntegrationScreen(
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        MotionCheckupSection(colors, strings)
         Text(strings.motionText(R.string.motion_notice), color = colors.muted, fontSize = 13.sp)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Section(strings.motionText(R.string.preview), colors, Modifier.weight(1f)) {
