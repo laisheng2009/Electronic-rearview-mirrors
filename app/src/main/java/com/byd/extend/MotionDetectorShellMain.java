@@ -1056,7 +1056,8 @@ public final class MotionDetectorShellMain {
                         .setAction(MotionDetectorProtocol.ACTION_SHOW_WARNING)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION)
                         .putExtra(MotionDetectorProtocol.EXTRA_SESSION, id)
-                        .putExtra(MotionDetectorProtocol.EXTRA_WINDOW_REPORTER, reporter);
+                        .putExtra(MotionDetectorProtocol.EXTRA_WINDOW_REPORTER,
+                                MotionDetectorProtocol.remoteReceiver(reporter));
                 startActivityFromShell(intent);
                 sendStatus(id, "warning_window_pending", "shell launched warning Activity; first draw must be acknowledged within 10 seconds");
             } catch (Throwable error) {
@@ -1162,13 +1163,15 @@ public final class MotionDetectorShellMain {
     }
 
     private void onWarningWindowResult(String id, int generation, int code, Bundle data) {
-        ResultReceiver commands = code == MotionDetectorProtocol.WINDOW_READY && data != null
-                ? data.getParcelable(MotionDetectorProtocol.WINDOW_COMMANDS) : null;
-        if (!sameSession(id) || generation != warningWindowGeneration || !warning || !warningWindowLaunched) {
-            if (commands != null) commands.send(MotionDetectorProtocol.WINDOW_CLOSE, Bundle.EMPTY);
-            return;
-        }
+        boolean currentWindow = sameSession(id) && generation == warningWindowGeneration
+                && warning && warningWindowLaunched;
         try {
+            ResultReceiver commands = code == MotionDetectorProtocol.WINDOW_READY && data != null
+                    ? data.getParcelable(MotionDetectorProtocol.WINDOW_COMMANDS) : null;
+            if (!currentWindow) {
+                if (commands != null) commands.send(MotionDetectorProtocol.WINDOW_CLOSE, Bundle.EMPTY);
+                return;
+            }
             if (code == MotionDetectorProtocol.WINDOW_READY) {
                 if (commands == null) throw new IllegalStateException("window close channel missing");
                 warningWindowCommands = commands;
@@ -1186,6 +1189,10 @@ public final class MotionDetectorShellMain {
                 completeWarningClose(id, true, cancelled);
             }
         } catch (Throwable error) {
+            if (!currentWindow) {
+                System.err.println("motion_stale_window_callback " + summary(error));
+                return;
+            }
             if (eligible) sessionRuntime.blockWarningRetry();
             sendError(id, "warning_window_callback", summary(error));
             finishWarning(id, false);
@@ -1249,6 +1256,10 @@ public final class MotionDetectorShellMain {
                 return;
             }
             if ("camera_producer_closed".equals(kind) || "camera_error".equals(kind)) {
+                if (!expectedSourceEpoch.equals(event.optString("source_epoch", ""))
+                        || !MotionDetectorProtocol.isMotionCameraLoss(kind,
+                            event.optString("camera_owner", ""), event.optInt("request_id", 0),
+                            recordingAttached ? recordingRequestId : 0)) return;
                 handleProducerLoss(id, kind, event.optString("reason", kind),
                         event.optString("error", ""));
                 return;

@@ -1,6 +1,8 @@
 package com.byd.extend;
 
 import android.os.IBinder;
+import android.os.Parcel;
+import android.os.ResultReceiver;
 
 /** Fixed Binder contract between the app, shell detector, and existing camera owner. */
 public final class MotionDetectorProtocol {
@@ -15,7 +17,7 @@ public final class MotionDetectorProtocol {
     static final String CONFIG_PATH = STATE_ROOT + "/config.json";
     static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
     static final String EXTRA_SESSION = "motion_session_id";
-    static final int VERSION = 6;
+    static final int VERSION = 7;
     public static final String EXTRA_WINDOW_REPORTER = "motion_window_reporter";
     public static final String WINDOW_COMMANDS = "window_commands";
     public static final String WINDOW_CANCELLED = "window_cancelled";
@@ -78,6 +80,25 @@ public final class MotionDetectorProtocol {
     static final String OEM_PACKAGE = "com.byd.sentrymode";
 
     private MotionDetectorProtocol() {}
+
+    public static ResultReceiver remoteReceiver(ResultReceiver receiver) {
+        // Bundles must name the framework class, not a process-local anonymous subclass.
+        Parcel parcel = Parcel.obtain();
+        try {
+            receiver.writeToParcel(parcel, 0);
+            parcel.setDataPosition(0);
+            return ResultReceiver.CREATOR.createFromParcel(parcel);
+        } finally {
+            parcel.recycle();
+        }
+    }
+
+    static boolean isMotionCameraLoss(String kind, String owner, int requestId,
+            int activeRecordingRequestId) {
+        return "camera_producer_closed".equals(kind)
+                || "camera_error".equals(kind) && "motion_recording".equals(owner)
+                && activeRecordingRequestId > 0 && requestId == activeRecordingRequestId;
+    }
 
     static boolean validSession(String sessionId) {
         return sessionId != null && sessionId.matches("[0-9a-f]{32}");

@@ -167,7 +167,10 @@ class MotionFullscreenActivity : ComponentActivity() {
                         }
                     }
                     reporter?.send(MotionDetectorProtocol.WINDOW_READY,
-                        Bundle().apply { putParcelable(MotionDetectorProtocol.WINDOW_COMMANDS, commands) })
+                        Bundle().apply {
+                            putParcelable(MotionDetectorProtocol.WINDOW_COMMANDS,
+                                MotionDetectorProtocol.remoteReceiver(commands))
+                        })
                 }
                 renderGeneration++
                 template = MotionTemplateStore(applicationContext).read().active()
