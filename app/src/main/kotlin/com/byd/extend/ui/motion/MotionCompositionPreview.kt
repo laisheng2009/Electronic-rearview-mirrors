@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.viewinterop.AndroidView
 import com.byd.extend.ui.CameraHostKind
 import com.byd.extend.ui.CameraHostSlot
+import java.util.IdentityHashMap
 
 internal val LocalMotionCameraHost = staticCompositionLocalOf<@Composable (CameraHostSlot) -> Unit> {
     error("Motion camera host is not installed")
@@ -49,6 +50,14 @@ class MotionCompositionPreviewView(
 
     private val preview = TextureView(context).apply {
         surfaceTextureListener = this@MotionCompositionPreviewView
+    }
+    private val surfaces = IdentityHashMap<Surface, SurfaceTexture>()
+    private val detachedTextures = mutableSetOf<SurfaceTexture>()
+
+    fun releaseSurface(surface: Surface) {
+        val texture = surfaces.remove(surface)
+        surface.release()
+        if (texture != null && detachedTextures.remove(texture)) texture.release()
     }
     private val unavailable = TextView(context).apply {
         text = unavailableText
@@ -95,14 +104,19 @@ class MotionCompositionPreviewView(
     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
         texture.setDefaultBufferSize(SOURCE_WIDTH, SOURCE_HEIGHT)
         showUnavailable()
-        listener.onMotionPreviewSurfaceAvailable(this, Surface(texture))
+        val surface = Surface(texture)
+        surfaces[surface] = texture
+        listener.onMotionPreviewSurfaceAvailable(this, surface)
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
 
     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+        detachedTextures.add(texture)
         listener.onMotionPreviewSurfaceDestroyed(this)
-        return true
+        // The remote producer must detach before its BufferQueue can be abandoned.
+        if (!surfaces.containsValue(texture) && detachedTextures.remove(texture)) texture.release()
+        return false
     }
 
     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {

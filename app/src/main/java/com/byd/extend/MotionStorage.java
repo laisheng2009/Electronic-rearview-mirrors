@@ -772,6 +772,21 @@ public final class MotionStorage {
         return -1;
     }
 
+    void deleteTemporaryOutput(Output output) throws IOException {
+        if (output.pendingMediaStore) {
+            int deleted = mediaProvider.delete(output.uri,
+                    MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
+                            + MediaStore.MediaColumns.RELATIVE_PATH + "=?",
+                    new String[]{ownerPackage, RELATIVE_PATH});
+            if (deleted != 1) throw new IOException("Cannot delete temporary Motion clip: " + output.uri);
+        } else {
+            for (File file : new File[]{output.temporaryFile, output.destinationFile}) {
+                if (file != null && file.exists() && !file.delete())
+                    throw new IOException("Cannot delete temporary Motion clip: " + file.getName());
+            }
+        }
+    }
+
     void discard(Output output) {
         if (output == null) return;
         if (output.pendingMediaStore) {

@@ -160,15 +160,17 @@ public final class MotionDetectorShellMain {
         final String id;
         final IBinder owner;
         final ResultReceiver results;
+        final MotionConfig recordingConfig;
         final long deadline = SystemClock.elapsedRealtime() + MotionCheckupClient.TIMEOUT_MS;
         final MotionCheckupFrames frames = new MotionCheckupFrames();
         final IBinder.DeathRecipient death;
         final Runnable timeout;
         volatile boolean cancelled;
-        boolean ownsSession, ownsReader, finishing, completing;
+        boolean ownsSession, ownsReader, ownsRecording, finishing, completing;
         int stage = MotionCheckupClient.ACCESS;
-        ManualCheck(String id, IBinder owner, ResultReceiver results) {
+        ManualCheck(String id, IBinder owner, ResultReceiver results, MotionConfig recordingConfig) {
             this.id = id; this.owner = owner; this.results = results;
+            this.recordingConfig = recordingConfig;
             death = () -> cancelCheck(this);
             timeout = () -> completeCheck(this, MotionCheckupClient.ERROR, "timeout",
                     "Check-up stage did not complete before its deadline", true);
@@ -265,10 +267,11 @@ public final class MotionDetectorShellMain {
                         String id = data.readString();
                         IBinder owner = data.readStrongBinder();
                         ResultReceiver results = data.readTypedObject(ResultReceiver.CREATOR);
+                        MotionConfig recordingConfig = MotionConfig.parse(data.readString());
                         if (!MotionDetectorProtocol.validSession(id) || owner == null || results == null
                                 || data.dataAvail() != 0)
                             throw new IllegalArgumentException("invalid Motion check-up request");
-                        ManualCheck check = new ManualCheck(id, owner, results);
+                        ManualCheck check = new ManualCheck(id, owner, results, recordingConfig);
                         synchronized (binder) {
                             if (manualCheck != null) throw new IllegalStateException("Motion check-up already running");
                             owner.linkToDeath(check.death, 0);
@@ -498,6 +501,10 @@ public final class MotionDetectorShellMain {
         }
         control.postDelayed(check.timeout, Math.max(0L, check.deadline - SystemClock.elapsedRealtime()));
         try {
+            if (teardownPending && !lastError.isEmpty()) {
+                completeCheck(check, MotionCheckupClient.ERROR, "cleanup_pending", lastError, false);
+                return;
+            }
             if (eligible || attached || recorder != null || warning || warningClosing || warningWindowPending
                     || workerBinding || teardownPending || shuttingDown || sessionRuntime.arming() || sessionRuntime.armed()
                     || sessionId != null && !prepared && !"error".equals(state)) {
@@ -555,7 +562,10 @@ public final class MotionDetectorShellMain {
             if (check.ownsSession && check.id.equals(sessionId)) {
                 stopOnControl(sessionId, "manual_check_finished");
                 released = sessionId == null;
-            } else if (check.ownsReader) released = detachAndCloseReader(false);
+            } else {
+                if (check.ownsRecording) released = stopRecording("manual_check_finished");
+                if (check.ownsReader) released &= detachAndCloseReader(false);
+            }
             if (!released) {
                 status = MotionCheckupClient.ERROR;
                 reason = "cleanup_pending";
@@ -564,6 +574,23 @@ public final class MotionDetectorShellMain {
         }
         synchronized (binder) { manualCheck = null; }
         checkResult(check, status, reason, detail, true);
+    }
+
+    private void startCheckRecording(ManualCheck check) throws Exception {
+        requireCheckPowerOn();
+        if (!checkLive(check)) {
+            completeCheck(check, MotionCheckupClient.NOT_CHECKED, "cancelled", "Check-up ended", true);
+            return;
+        }
+        checkResult(check, MotionCheckupClient.OK,
+                check.frames.motionObserved() ? "frames_motion" : "frames_clear",
+                "Two fresh frames processed", false);
+        check.stage = MotionCheckupClient.RECORDING;
+        checkResult(check, MotionCheckupClient.RUNNING, "", "", false);
+        control.removeCallbacks(check.timeout);
+        control.postDelayed(check.timeout, Math.max(0L, check.deadline - SystemClock.elapsedRealtime()));
+        check.ownsRecording = true;
+        startRecording(sessionId, check);
     }
 
     private void resumePersistedConfig() {
@@ -626,17 +653,14 @@ public final class MotionDetectorShellMain {
         workerBinding = true;
         hostOperations.execute(() -> {
             Throwable failure = null;
-            boolean bound = false;
             try {
-                bound = true; // A failed Binder reply may follow an accepted binding; teardown must confirm release.
                 if (!cameraOperation(MotionDetectorProtocol.CAMERA_BIND_WORKER, id, null, null, 0)) {
-                    bound = false;
                     throw new IllegalStateException("camera runtime refused Motion worker binding");
                 }
                 setMotionTelemetryDemand(id, true);
             } catch (Throwable error) { failure = error; }
             Throwable result = failure;
-            boolean hostBound = bound;
+            boolean hostBound = workerBound;
             control.post(() -> onHostBindingComplete(id, hostBound, result));
         });
         return true;
@@ -834,7 +858,7 @@ public final class MotionDetectorShellMain {
     private void drainLatestFrame() {
         try {
             ManualCheck check = manualCheck;
-            if (reader == null || !eligible && (check == null || !checkLive(check) || check.finishing)) return;
+            if (reader == null || !eligible && (check == null || !checkLive(check))) return;
             Image frame = reader.acquireLatestImage();
             if (frame == null) return;
             try (Image owned = frame) { processFrame(owned); }
@@ -847,6 +871,8 @@ public final class MotionDetectorShellMain {
     }
 
     private void processFrame(Image frame) throws Exception {
+        ManualCheck check = manualCheck;
+        if (check != null && check.finishing) return;
         if (frame.getFormat() != ImageFormat.YUV_420_888
                 || frame.getWidth() != MotionDetectorProtocol.INPUT_WIDTH
                 || frame.getHeight() != MotionDetectorProtocol.INPUT_HEIGHT)
@@ -871,7 +897,6 @@ public final class MotionDetectorShellMain {
         int raw = nativeApi.detect(nativeInput, MotionDetectorProtocol.INPUT_WIDTH,
                 MotionDetectorProtocol.INPUT_HEIGHT, sensitivity);
         frameNumber++;
-        ManualCheck check = manualCheck;
         if (check != null && check.ownsReader) {
             boolean done = check.frames.observe(frameTimeNs, raw);
             int nativeState = nativeApi.getState();
@@ -882,10 +907,7 @@ public final class MotionDetectorShellMain {
                 // Release the Image before detaching or closing its ImageReader.
                 control.post(() -> {
                     try {
-                        requireCheckPowerOn();
-                        completeCheck(check, checkLive(check) ? MotionCheckupClient.OK : MotionCheckupClient.NOT_CHECKED,
-                                checkLive(check) ? (check.frames.motionObserved() ? "frames_motion" : "frames_clear") : "cancelled",
-                                "Two fresh frames processed; outputs were not triggered", true);
+                        startCheckRecording(check);
                     } catch (Throwable error) {
                         completeCheck(check, MotionCheckupClient.ERROR, "check_failed", summary(error), true);
                     }
@@ -955,12 +977,20 @@ public final class MotionDetectorShellMain {
                 data.writeTypedArray(recording, 0);
                 data.writeInt(requestId);
             }
-            if (!cameraHost.transact(TurnSignalShellProtocol.TX_CAMERA_RUNTIME, data, reply, 0))
+            // Only an attempted transaction can leave a remote binding after an uncertain reply.
+            if (operation == MotionDetectorProtocol.CAMERA_BIND_WORKER) workerBound = true;
+            if (!cameraHost.transact(TurnSignalShellProtocol.TX_CAMERA_RUNTIME, data, reply, 0)) {
+                if (operation == MotionDetectorProtocol.CAMERA_BIND_WORKER) workerBound = false;
                 throw new IllegalStateException("camera runtime did not accept auxiliary operation " + operation);
+            }
             reply.readException();
             boolean accepted = reply.readInt() == 1;
             if (operation == MotionDetectorProtocol.CAMERA_BIND_WORKER) {
                 String epoch = reply.readString();
+                if (!accepted && reply.dataAvail() == 0) {
+                    workerBound = false;
+                    return false;
+                }
                 if (!accepted || epoch == null || epoch.isEmpty() || epoch.length() > 128
                         || reply.dataAvail() != 0)
                     throw new IllegalStateException("camera runtime returned an invalid Motion source epoch");
@@ -1315,6 +1345,7 @@ public final class MotionDetectorShellMain {
         ManualCheck check = manualCheck;
         if (check != null) {
             if (producerClosed && check.ownsReader) detachAndCloseReader(true);
+            if (producerClosed && check.ownsRecording) stopRecording("camera_source_lost", true);
             completeCheck(check, MotionCheckupClient.ERROR, "check_failed", kind + ": " + reason, true);
             if (!sameSession(id)) return;
         }
@@ -1344,6 +1375,11 @@ public final class MotionDetectorShellMain {
         if (!sameSession(id) || !eligible || config == null || !config.recordingEnabled
                 || recorder != null || shuttingDown || teardownPending
                 || recordingFailureRevision == sessionRuntime.recordingRevision()) return;
+        startRecording(id, null);
+    }
+
+    private void startRecording(String id, ManualCheck check) {
+        MotionConfig recordingConfig = check == null ? config : check.recordingConfig;
         recordingAttemptRevision = sessionRuntime.recordingRevision();
         try {
             int generation = ++recordingGeneration;
@@ -1353,15 +1389,19 @@ public final class MotionDetectorShellMain {
                     detail -> control.post(() -> onRecorderEvent(id, owner[0], generation, detail)));
             owner[0] = created;
             recorder = created;
-            recorder.startBuffering(config);
+            recorder.startBuffering(recordingConfig, check != null);
             if (!recorder.isBuffering() || recorder.inputSurface() == null)
                 throw new IllegalStateException("hardware video encoder did not start");
             Surface encoderSurface = recorder.retainInputSurface();
             composer = new MotionGpuComposer(mediaContext,
-                    recorder.width(), recorder.height(), config.cameraOrder, id,
+                    recorder.width(), recorder.height(), recordingConfig.cameraOrder, id,
                     detail -> control.post(() -> {
                         if (!sameSession(id) || generation != recordingGeneration) return;
                         sendError(id, "video_composer", detail);
+                        if (check != null) {
+                            completeCheck(check, MotionCheckupClient.ERROR, "check_failed", detail, true);
+                            return;
+                        }
                         blockRecordingRetry(id, "composer_failed");
                         stopRecording("composer_failed");
                     }));
@@ -1382,6 +1422,10 @@ public final class MotionDetectorShellMain {
             recordingAttached = true;
             sendStatus(id, "recording_buffering", "hardware encoder and four camera inputs are shell-owned");
         } catch (Throwable error) {
+            if (check != null) {
+                completeCheck(check, MotionCheckupClient.ERROR, "check_failed", summary(error), true);
+                return;
+            }
             sendError(id, "recording_start", summary(error));
             blockRecordingRetry(id, "start_failed");
             stopRecording("start_failed");
@@ -1397,6 +1441,14 @@ public final class MotionDetectorShellMain {
 
     private void onRecorderEvent(String id, MotionVideoRecorder owner, int generation, String detail) {
         if (owner == null || recorder != owner) return;
+        ManualCheck check = manualCheck;
+        if (check != null && check.ownsRecording
+                && detail != null && detail.startsWith("input_release_required:")) {
+            completeCheck(check, owner.checkupSavedAndDeleted() ? MotionCheckupClient.OK : MotionCheckupClient.ERROR,
+                    owner.checkupSavedAndDeleted() ? "recording_ok" : "check_failed",
+                    owner.checkupDetail(), true);
+            return;
+        }
         if (detail != null && detail.startsWith("input_release_required:")) {
             if (!recordingStopRequested) blockRecordingRetry(id, detail);
             if (teardownPending) continuePendingTeardown();
@@ -1423,6 +1475,10 @@ public final class MotionDetectorShellMain {
         if (!sameSession(id) || generation != recordingGeneration) return;
         if (detail != null && (detail.startsWith("video_encoder_unavailable:")
                 || detail.startsWith("video_encoder_failed:"))) {
+            if (check != null && check.ownsRecording) {
+                completeCheck(check, MotionCheckupClient.ERROR, "check_failed", detail, true);
+                return;
+            }
             sendError(id, "video_encoder", detail);
             blockRecordingRetry(id, detail);
             stopRecording("encoder_failed");

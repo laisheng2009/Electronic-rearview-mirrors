@@ -55,7 +55,7 @@ private fun MotionCheckupDialog(colors: UiPalette, strings: UiStrings, onClose: 
         onDispose { client.close() }
     }
     val stages = listOf(R.string.motion_check_access, R.string.motion_check_detector,
-        R.string.motion_check_frames, R.string.motion_check_display, R.string.motion_check_recording)
+        R.string.motion_check_frames, R.string.motion_check_recording)
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.fillMaxSize(.94f).clip(RoundedCornerShape(10.dp)).background(colors.surface)
             .border(1.dp, colors.borderStrong, RoundedCornerShape(10.dp)).padding(16.dp),
@@ -93,6 +93,7 @@ private fun MotionCheckupDialog(colors: UiPalette, strings: UiStrings, onClose: 
                             "detector_ok" -> R.string.motion_check_detector_ok
                             "frames_clear" -> R.string.motion_check_frames_clear
                             "frames_motion" -> R.string.motion_check_frames_motion
+                            "recording_ok" -> R.string.motion_check_recording_ok
                             "busy" -> R.string.motion_check_busy
                             "power_not_on" -> R.string.motion_check_power
                             "cancelled" -> R.string.motion_check_cancelled
@@ -100,7 +101,7 @@ private fun MotionCheckupDialog(colors: UiPalette, strings: UiStrings, onClose: 
                             "timeout" -> R.string.motion_check_timeout
                             "worker_unavailable" -> R.string.motion_check_worker
                             "check_failed" -> R.string.motion_check_failed
-                            else -> if (index >= 3) R.string.motion_check_output_unverified else null
+                            else -> null
                         }
                         reason?.let { Text(strings.resource(it), color = if (state == MotionCheckupClient.ERROR)
                             colors.red else colors.muted, fontSize = 14.sp) }

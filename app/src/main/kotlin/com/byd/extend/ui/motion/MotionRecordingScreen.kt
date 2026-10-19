@@ -48,6 +48,7 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -60,6 +61,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -1138,7 +1140,7 @@ private fun MotionCompositionGrid(order: List<Int>, colors: UiPalette, strings: 
     fun tile(point: Offset) = if (size.width > 0 && size.height > 0)
         motionTileAt(point.x / size.width, point.y / size.height) else null
     val target = if (dragging != null) tile(position) else null
-    Column(modifier.onSizeChanged { size = it }.clipToBounds()
+    Layout(modifier = modifier.onSizeChanged { size = it }.clipToBounds()
         .then(if (onChange == null) Modifier else Modifier.pointerInput(Unit) {
             detectDragGesturesAfterLongPress(onDragStart = { dragging = tile(it); start = it; position = it },
                 onDrag = { change, amount -> change.consume(); position += amount },
@@ -1148,16 +1150,13 @@ private fun MotionCompositionGrid(order: List<Int>, colors: UiPalette, strings: 
                     if (from != null && to != null) update?.invoke(swapMotionCameras(latestOrder, from, to))
                     dragging = null
                 })
-        }), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        repeat(2) { row ->
-            Row(Modifier.weight(1f).zIndex(if (dragging?.div(2) == row) 1f else 0f),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                repeat(2) { column ->
-                    val index = row * 2 + column
-                    val source = order[index]
+        }), content = {
+                // Keep each AndroidView in the same composition slot; reorder placement, not owners.
+                repeat(4) { source ->
+                    val index = order.indexOf(source)
                     val label = strings.motionText(listOf(R.string.motion_camera_front, R.string.motion_camera_rear,
                         R.string.motion_camera_left, R.string.motion_camera_right)[source])
-                    Box(Modifier.weight(1f).fillMaxHeight().zIndex(if (dragging == index) 1f else 0f)
+                    Box(Modifier.zIndex(if (dragging == index) 1f else 0f)
                         .graphicsLayer { if (dragging == index) {
                             translationX = position.x - start.x; translationY = position.y - start.y; alpha = .85f
                         } }.clip(RoundedCornerShape(7.dp)).background(colors.panelAlt)
@@ -1174,7 +1173,7 @@ private fun MotionCompositionGrid(order: List<Int>, colors: UiPalette, strings: 
                             }
                         }, contentAlignment = Alignment.Center) {
                         BoxWithConstraints(Modifier.fillMaxSize()) {
-                            key(source) { MotionCameraTile(source, Modifier.fillMaxSize()) }
+                            MotionCameraTile(source, Modifier.fillMaxSize())
                             Image(painterResource(MotionDirectionIcon.drawableFor(source)), contentDescription = null,
                                 modifier = Modifier.align(Alignment.TopStart)
                                     .padding(top = maxHeight * .0083f, start = maxWidth * .0083f)
@@ -1185,6 +1184,15 @@ private fun MotionCompositionGrid(order: List<Int>, colors: UiPalette, strings: 
                         }
                     }
                 }
+    }) { measurables, constraints ->
+        val gap = 6.dp.roundToPx()
+        val width = ((constraints.maxWidth - gap) / 2).coerceAtLeast(0)
+        val height = ((constraints.maxHeight - gap) / 2).coerceAtLeast(0)
+        val tiles = measurables.map { it.measure(Constraints.fixed(width, height)) }
+        layout(constraints.maxWidth, constraints.maxHeight) {
+            tiles.forEachIndexed { source, tile ->
+                val index = order.indexOf(source)
+                tile.placeRelative((index % 2) * (width + gap), (index / 2) * (height + gap))
             }
         }
     }

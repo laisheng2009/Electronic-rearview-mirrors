@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="motion_check_title">Operation check</string>
-    <string name="motion_check_hint">Check the detector and live camera frames while the vehicle is on.</string>
+    <string name="motion_check_hint">Check the detector, live camera frames and recording while the vehicle is on.</string>
     <string name="motion_check_run">Check operation</string>
-    <string name="motion_check_scope">Temporary check, including when Motion is disabled. Settings stay unchanged. No screen wake, warning or video recording. Closing this window cancels the check.</string>
+    <string name="motion_check_scope">Temporary check. Settings stay unchanged. No screen wake or warning. A three-second video is saved, then deleted. Closing this window cancels the check.</string>
     <string name="motion_check_access">System access</string>
     <string name="motion_check_detector">Detector initialization</string>
     <string name="motion_check_frames">Camera frames and detection</string>
-    <string name="motion_check_display">Warning display</string>
     <string name="motion_check_recording">Video recording</string>
     <string name="motion_check_working">Working</string>
     <string name="motion_check_error">Error</string>
@@ -16,7 +15,8 @@
     <string name="motion_check_access_ok">Authenticated shell helper is available; vehicle power is on.</string>
     <string name="motion_check_detector_ok">OEM detector initialized successfully.</string>
     <string name="motion_check_frames_clear">Fresh frames processed successfully. No motion detected — this is a normal result. Positive motion recognition has not been checked.</string>
-    <string name="motion_check_frames_motion">Fresh frames processed; the detector reported motion. No warning or recording was triggered.</string>
+    <string name="motion_check_frames_motion">Fresh frames processed; the detector reported motion. No warning was triggered.</string>
+    <string name="motion_check_recording_ok">The temporary video was saved and deleted.</string>
     <string name="motion_check_busy">Motion is already active or preparing. It was not interrupted. Try again after it finishes.</string>
     <string name="motion_check_power">This check is available only while the vehicle is on.</string>
     <string name="motion_check_cancelled">Check cancelled; unfinished stages remain unverified.</string>
@@ -24,5 +24,4 @@
     <string name="motion_check_timeout">The stage did not finish in time. See the reason below and the log.</string>
     <string name="motion_check_worker">Could not access the authorized Motion helper.</string>
     <string name="motion_check_failed">The stage failed. Technical reason:</string>
-    <string name="motion_check_output_unverified">Not run by this check. Requires a real motion event while the vehicle is off and this feature is enabled.</string>
 </resources>

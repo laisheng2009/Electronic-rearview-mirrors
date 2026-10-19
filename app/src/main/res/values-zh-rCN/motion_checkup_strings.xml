@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="motion_check_title">运行检查</string>
-    <string name="motion_check_hint">车辆开启时检查检测器和实时摄像头画面。</string>
+    <string name="motion_check_hint">车辆开启时检查检测器、实时摄像头画面及视频录制。</string>
     <string name="motion_check_run">开始检查</string>
-    <string name="motion_check_scope">即使 Motion 已关闭，也可临时检查。不改变设置，不唤醒屏幕、不显示警告、不录制视频。关闭此窗口将取消检查。</string>
+    <string name="motion_check_scope">临时检查。不改变设置，不唤醒屏幕、不显示警告。录制三秒视频，保存后删除。关闭此窗口将取消检查。</string>
     <string name="motion_check_access">系统访问</string>
     <string name="motion_check_detector">检测器初始化</string>
     <string name="motion_check_frames">摄像头画面与检测</string>
-    <string name="motion_check_display">警告显示</string>
     <string name="motion_check_recording">视频录制</string>
     <string name="motion_check_working">正常</string>
     <string name="motion_check_error">错误</string>
@@ -16,7 +15,8 @@
     <string name="motion_check_access_ok">已授权的 shell 辅助进程可用；车辆已开启。</string>
     <string name="motion_check_detector_ok">原厂检测器初始化成功。</string>
     <string name="motion_check_frames_clear">新画面处理成功。未检测到移动属于正常结果，尚未验证实际移动识别。</string>
-    <string name="motion_check_frames_motion">新画面已处理，检测器报告了移动。未触发警告或录制。</string>
+    <string name="motion_check_frames_motion">新画面已处理，检测器报告了移动。未触发警告。</string>
+    <string name="motion_check_recording_ok">临时视频已保存并删除。</string>
     <string name="motion_check_busy">Motion 正在运行或准备中，未被中断。请在结束后重试。</string>
     <string name="motion_check_power">此检查仅在车辆开启时可用。</string>
     <string name="motion_check_cancelled">检查已取消；未完成的阶段仍未验证。</string>
@@ -24,5 +24,4 @@
     <string name="motion_check_timeout">该阶段未及时完成。请查看下方原因及日志。</string>
     <string name="motion_check_worker">无法访问已授权的 Motion 辅助进程。</string>
     <string name="motion_check_failed">该阶段失败。技术原因：</string>
-    <string name="motion_check_output_unverified">此检查不运行该阶段。需在车辆关闭且相应功能开启时发生真实移动事件。</string>
 </resources>

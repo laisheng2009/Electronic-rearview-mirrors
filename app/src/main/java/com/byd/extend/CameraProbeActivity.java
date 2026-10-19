@@ -501,8 +501,10 @@ public final class CameraProbeActivity extends ComponentActivity
         final MotionCompositionPreviewView view;
         final int requestId;
         Surface surface;
+        IBinder cameraOwner;
         boolean openQueued;
         boolean opened;
+        boolean openUncertain;
         boolean closeQueued;
         boolean releaseSurfaceWhenClosed;
 
@@ -6524,7 +6526,7 @@ public final class CameraProbeActivity extends ComponentActivity
             MotionCompositionPreviewView view, Surface surface) {
         CameraHostKind kind = motionPreviewKind(view.getDirection());
         if (productionCameraHosts.get(kind) != view || surface == null || !surface.isValid()) {
-            if (surface != null) surface.release();
+            if (surface != null) view.releaseSurface(surface);
             return;
         }
         MotionPreviewOutput previous = motionPreviewOutputs.get(kind);
@@ -6556,11 +6558,12 @@ public final class CameraProbeActivity extends ComponentActivity
         if (!cameraDiscovered) return;
         IBinder current = helper;
         for (MotionPreviewOutput output : new ArrayList<>(motionPreviewOutputs.values())) {
-            if (output.opened || output.openQueued || output.closeQueued
+            if (output.opened || output.openQueued || output.openUncertain || output.closeQueued
                     || output.releaseSurfaceWhenClosed || output.surface == null
                     || !output.surface.isValid()
                     || productionCameraHosts.get(output.kind) != output.view) continue;
             output.openQueued = true;
+            output.cameraOwner = current;
             output.view.showUnavailable();
             ipcExecutor.execute(() -> transactOpenMotionPreview(current, output));
         }
@@ -6583,18 +6586,19 @@ public final class CameraProbeActivity extends ComponentActivity
         if (releaseSurface) output.releaseSurfaceWhenClosed = true;
         output.view.showUnavailable();
         if (output.closeQueued) return;
-        if (!output.opened && !output.openQueued) {
+        if (!output.opened && !output.openQueued && !output.openUncertain) {
             finishMotionPreviewClose(output);
             return;
         }
-        IBinder current = helper;
-        if (current == null) {
+        IBinder current = output.cameraOwner;
+        if (current == null || !current.isBinderAlive()) {
             output.opened = false;
             output.openQueued = false;
             finishMotionPreviewClose(output);
             return;
         }
         output.closeQueued = true;
+        output.openUncertain = true;
         output.opened = false;
         output.openQueued = false;
         ipcExecutor.execute(() -> transactCloseMotionPreview(current, output, reason));
@@ -6602,8 +6606,10 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private void finishMotionPreviewClose(MotionPreviewOutput output) {
         output.closeQueued = false;
+        output.openUncertain = false;
+        output.cameraOwner = null;
         if (output.releaseSurfaceWhenClosed) {
-            if (output.surface != null) output.surface.release();
+            if (output.surface != null) output.view.releaseSurface(output.surface);
             output.surface = null;
         } else if (activityResumed && motionPreviewOutputs.get(output.kind) == output) {
             openPendingMotionPreviews();
@@ -6631,6 +6637,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 if (output.closeQueued || output.releaseSurfaceWhenClosed
                         || motionPreviewOutputs.get(output.kind) != output) return;
                 output.opened = opened;
+                output.openUncertain = false;
                 if (!opened) output.view.showUnavailable();
             });
         } catch (Throwable error) {
@@ -6638,7 +6645,10 @@ public final class CameraProbeActivity extends ComponentActivity
                     "request_id", output.requestId, "error", error.toString());
             runOnUiThread(() -> {
                 output.openQueued = false;
+                if (output.closeQueued || output.releaseSurfaceWhenClosed
+                        || motionPreviewOutputs.get(output.kind) != output) return;
                 output.opened = false;
+                output.openUncertain = true; // A failed reply does not prove that the producer rejected the Surface.
                 output.view.showUnavailable();
             });
         } finally {

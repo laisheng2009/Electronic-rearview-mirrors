@@ -16,7 +16,7 @@ import java.util.function.Consumer;
 
 /** A dialog-owned diagnostic lease; never configures or stops the autonomous session. */
 public final class MotionCheckupClient implements AutoCloseable {
-    public static final int ACCESS = 0, DETECTOR = 1, FRAMES = 2;
+    public static final int ACCESS = 0, DETECTOR = 1, FRAMES = 2, RECORDING = 3;
     public static final int NOT_CHECKED = 0, RUNNING = 1, OK = 2, ERROR = 3;
     static final long TIMEOUT_MS = 45_000L;
 
@@ -31,6 +31,7 @@ public final class MotionCheckupClient implements AutoCloseable {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService commands = Executors.newSingleThreadExecutor();
     private final MotionDetectorClient launcher;
+    private final Context context;
     private final String id = UUID.randomUUID().toString().replace("-", "");
     private final IBinder owner = new Binder();
     private final Consumer<Update> listener;
@@ -46,7 +47,7 @@ public final class MotionCheckupClient implements AutoCloseable {
         @Override protected void onReceiveResult(int code, Bundle data) {
             if (closed || finished || data == null) return;
             stage = data.getInt("stage", ACCESS);
-            if (stage < ACCESS || stage > FRAMES) return;
+            if (stage < ACCESS || stage > RECORDING) return;
             listener.accept(new Update(stage, code, data.getString("reason", ""),
                     data.getString("detail", "")));
             if (data.getBoolean("terminal")) {
@@ -57,7 +58,8 @@ public final class MotionCheckupClient implements AutoCloseable {
     };
 
     public MotionCheckupClient(Context context, Consumer<Update> listener) {
-        launcher = new MotionDetectorClient(context.getApplicationContext());
+        this.context = context.getApplicationContext();
+        launcher = new MotionDetectorClient(this.context);
         this.listener = listener;
     }
 
@@ -78,6 +80,7 @@ public final class MotionCheckupClient implements AutoCloseable {
                     data.writeString(id);
                     data.writeStrongBinder(owner);
                     data.writeTypedObject(results, 0);
+                    data.writeString(MotionConfig.read(context).toJson());
                     if (!target.transact(MotionDetectorProtocol.TX_CHECK_START, data, reply, 0))
                         throw new IllegalStateException("Motion check-up endpoint unavailable");
                     reply.readException();

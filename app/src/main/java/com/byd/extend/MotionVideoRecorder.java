@@ -143,6 +143,10 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private boolean firstVideoSampleLogged;
     private boolean firstKeyframeLogged;
     private boolean firstDetectionLogged;
+    private boolean checkup;
+    private boolean checkupStarted;
+    private volatile boolean checkupSavedAndDeleted;
+    private volatile String checkupFailure;
 
     public MotionVideoRecorder(Context context, Consumer<String> stateCallback) {
         this.context = context.getApplicationContext();
@@ -173,11 +177,19 @@ public final class MotionVideoRecorder implements AutoCloseable {
 
     /** Starts the video encoder; callers must retain its input before handing it to the composer. */
     public void startBuffering(MotionConfig requestedConfig) {
+        startBuffering(requestedConfig, false);
+    }
+
+    void startBuffering(MotionConfig requestedConfig, boolean temporaryCheck) {
         synchronized (this) {
             if (closed) throw new IllegalStateException("MotionVideoRecorder is closed");
             if (buffering) return;
             MotionConfig next = requestedConfig == null ? MotionConfig.read(context) : requestedConfig;
-            if (!next.recordingEnabled) {
+            checkup = temporaryCheck;
+            checkupStarted = false;
+            checkupSavedAndDeleted = false;
+            checkupFailure = null;
+            if (!next.recordingEnabled && !checkup) {
                 notifyState("recording_disabled");
                 return;
             }
@@ -324,6 +336,11 @@ public final class MotionVideoRecorder implements AutoCloseable {
 
     public boolean isBuffering() { return buffering; }
     public boolean isRecording() { return recording; }
+    boolean checkupSavedAndDeleted() { return checkupSavedAndDeleted && checkupFailure == null; }
+    String checkupDetail() {
+        return checkupFailure != null ? checkupFailure : checkupSavedAndDeleted
+                ? "Three-second clip saved and deleted" : "Temporary recording did not finish: " + stopReason;
+    }
 
     private static MediaCodec createHardwareAvcEncoder(int width, int height, int bitrate) throws IOException {
         try {
@@ -756,6 +773,14 @@ public final class MotionVideoRecorder implements AutoCloseable {
         remember(packet);
         long packetElapsedMs = packet.elapsedUs / 1_000L;
         long nowMs = SystemClock.elapsedRealtime();
+        if (checkup && !checkupStarted && !stopRequested
+                && packet.track == VIDEO_TRACK && packet.isKeyFrame() && videoFormat != null
+                && (!config.audioEnabled || audioFormat != null)) {
+            checkupStarted = true;
+            if (openSegment(packetElapsedMs, Collections.emptyList(), 0, null)) {
+                finishDeadlineMs = nowMs + 3_000L;
+            } else stopRequested = true;
+        }
         expireOutputRestart(nowMs);
         if (activeClip == null && outputRestartActive(nowMs)
                 && packet.track == VIDEO_TRACK && packet.isKeyFrame()) {
@@ -805,6 +830,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private boolean hasStorageForPacket(Clip clip, int packetBytes) {
+        // A disposable three-second clip must never evict the user's archive.
+        if (checkup) return true;
         long now = SystemClock.elapsedRealtime();
         long currentSize = Math.max(clip.segmentSizeBytes, clip.sampleBytes);
         long actualSize = storage.outputSizeBytes(clip.output);
@@ -838,8 +865,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
         String uri = null;
         String preferred = library.selectedVolumeId(config.primarySd);
         try {
-            output = storage.createOutput(preferred, config.fallbackEnabled, name, config,
-                    library, requiredBytes, firstAttemptVolumeId);
+            output = storage.createOutput(preferred, config.fallbackEnabled, name, checkup ? null : config,
+                    checkup ? null : library, requiredBytes, firstAttemptVolumeId);
             uri = output.uri.toString();
             logDiagnostic("mp4_create", "volume=" + output.volumeId + " name=" + output.displayName
                     + " media_id=" + (output.uri.getLastPathSegment() == null ? "unknown" : output.uri.getLastPathSegment()));
@@ -894,7 +921,12 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 try { muxer.release(); } catch (RuntimeException ignored) { }
             }
             closeDescriptor(output);
-            if (output != null) storage.discard(output);
+            if (output != null) {
+                if (checkup) {
+                    try { storage.deleteTemporaryOutput(output); }
+                    catch (IOException | RuntimeException cleanup) { notifyState("checkup_delete_failed:" + cleanup); }
+                } else storage.discard(output);
+            }
             if (lease != null) try { lease.close(); } catch (IOException ignored) { }
             if (uri != null) {
                 try { index.remove(uri); } catch (IOException ignored) { }
@@ -931,6 +963,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private void closeActiveClip() {
         Clip clip = activeClip;
         if (clip == null) return;
+        boolean checkupDurationComplete = checkup && !stopRequested
+                && finishDeadlineMs != Long.MIN_VALUE && SystemClock.elapsedRealtime() >= finishDeadlineMs;
         activeClip = null;
         recording = false;
         persistCurrentEpisode(clip, true);
@@ -959,11 +993,14 @@ public final class MotionVideoRecorder implements AutoCloseable {
                         + " name=" + clip.output.displayName + " size_bytes=" + size
                         + " duration_ms=" + durationMs + " video_samples=" + clip.videoSamples
                         + " audio_samples=" + clip.audioSamples);
+                if (checkup) checkupSavedAndDeleted = checkupDurationComplete;
             } else if (clip.videoSamples == 0) {
-                storage.discard(clip.output);
+                if (!checkup) storage.discard(clip.output);
                 index.remove(clip.record.uri);
                 logDiagnostic("mp4_finalize_discard", "volume=" + clip.output.volumeId
                         + " name=" + clip.output.displayName + " reason=no_video_samples");
+            } else if (checkup) {
+                throw new IOException("temporary recording muxer did not finish");
             }
         } catch (IOException | RuntimeException failure) {
             Log.e(TAG, "motion_segment_publish_failed", failure);
@@ -972,6 +1009,18 @@ public final class MotionVideoRecorder implements AutoCloseable {
             notifyState("motion_publish_failed:" + failure.getClass().getSimpleName());
             scheduleOutputContinuation(clip.output.volumeId);
         } finally {
+            if (checkup) {
+                try {
+                    storage.deleteTemporaryOutput(clip.output);
+                    index.remove(clip.record.uri);
+                    logDiagnostic("checkup_clip_deleted", "name=" + clip.output.displayName);
+                } catch (IOException | RuntimeException failure) {
+                    checkupSavedAndDeleted = false;
+                    notifyState("checkup_delete_failed:" + failure);
+                }
+                stopRequested = true;
+                stopReason = "manual_check_finished";
+            }
             try { clip.lease.close(); } catch (IOException ignored) { }
         }
     }
@@ -1123,6 +1172,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private void scheduleOutputContinuationTo(String firstAttemptVolumeId) {
+        if (checkup) return;
         if (config == null || !config.fallbackEnabled || firstAttemptVolumeId == null
                 || finishDeadlineMs == Long.MIN_VALUE) return;
         if (finishDeadlineMs <= SystemClock.elapsedRealtime()) return;
@@ -1184,6 +1234,10 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private void notifyState(String value) {
+        if (checkup && !value.startsWith("input_release_required:") && !value.startsWith("stopped:")) {
+            checkupFailure = value;
+            stopRequested = true;
+        }
         try { stateCallback.accept(value); }
         catch (RuntimeException failure) { Log.w(TAG, "state_callback_failed", failure); }
     }
