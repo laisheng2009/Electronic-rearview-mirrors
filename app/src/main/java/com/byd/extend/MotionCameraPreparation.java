@@ -1,0 +1,168 @@
+package com.byd.extend;
+
+import android.content.Context;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.SystemClock;
+import java.lang.reflect.Method;
+
+/** The two fixed OEM IDC requests, owned only by an active OFF-state Motion session. */
+final class MotionCameraPreparation {
+    interface Listener {
+        void onSample(String session, int power, int online, int stream, String error);
+        void onRelease(String session, String error);
+        void onStopped();
+    }
+
+    private static final long IDC_PERIOD_MS = 500;
+    private static final long STREAM_PERIOD_MS = 1_000;
+    private static final byte[] IDC_WAKE = {76, 0, 0, 0, 0, 0, 0, 0};
+    private final Context context;
+    private final Listener listener;
+    private final Handler handler;
+    private final Runnable tick = this::tick;
+    private final Runnable reconcile = this::reconcile;
+    private volatile String requestedSession = "";
+    private volatile String readySession = "";
+    private volatile boolean stopped = true;
+    private String activeSession = "";
+    private Object manager;
+    private Method getInt, setInt, setBuffer;
+    private int streamRequest, idcWake, onlineFid, streamFid;
+    private boolean releaseNeeded;
+    private long nextStreamMs;
+
+    MotionCameraPreparation(Context context, Listener listener) {
+        this.context = context;
+        this.listener = listener;
+        // Native inference and camera detach can block Motion's control thread for seconds.
+        HandlerThread thread = new HandlerThread("motion-idc-keepalive");
+        thread.start();
+        handler = new Handler(thread.getLooper());
+    }
+
+    synchronized void start(String session) {
+        if (session.equals(requestedSession)) return;
+        stopped = false;
+        requestedSession = session;
+        readySession = "";
+        handler.post(reconcile);
+    }
+
+    synchronized void stop() {
+        if (requestedSession.isEmpty() && stopped) return;
+        requestedSession = "";
+        readySession = "";
+        handler.post(reconcile);
+    }
+
+    boolean ready(String session) { return session.equals(requestedSession) && session.equals(readySession); }
+    boolean stopped() { return stopped; }
+
+    static boolean sourceReady(int power, int online, int stream) {
+        return power == 0 && online == 1 && stream == 1;
+    }
+
+    private void reconcile() {
+        handler.removeCallbacks(reconcile);
+        handler.removeCallbacks(tick);
+        String requested = requestedSession;
+        if (!activeSession.equals(requested)) {
+            if (!release()) {
+                handler.postDelayed(reconcile, STREAM_PERIOD_MS);
+                return;
+            }
+            activeSession = requested;
+            nextStreamMs = 0;
+        }
+        if (!activeSession.isEmpty()) tick();
+        else {
+            synchronized (this) {
+                if (!requestedSession.isEmpty()) { handler.post(reconcile); return; }
+                stopped = true;
+            }
+            listener.onStopped();
+        }
+    }
+
+    private void tick() {
+        String session = activeSession;
+        if (session.isEmpty() || !session.equals(requestedSession)) { reconcile(); return; }
+        long started = SystemClock.elapsedRealtime();
+        int power = -1, online = -1, stream = -1;
+        String error = "";
+        try {
+            initialize();
+            power = read(AvasTelemetryController.POWER_DEVICE, AvasTelemetryController.POWER_FID);
+            if (power == 0 && session.equals(requestedSession)) {
+                if (started >= nextStreamMs) {
+                    releaseNeeded = true; // An uncertain Binder result still requires stream0.
+                    requireSuccess("stream1", setInt.invoke(manager, 1049, streamRequest, 1));
+                    nextStreamMs = started + STREAM_PERIOD_MS;
+                }
+                if (session.equals(requestedSession)) {
+                    requireSuccess("idc", setBuffer.invoke(manager, 1049, idcWake, IDC_WAKE));
+                    online = read(1001, onlineFid);
+                    stream = read(1038, streamFid);
+                }
+            } else {
+                release();
+            }
+        } catch (Exception failure) {
+            error = describe(failure);
+            release();
+        }
+        readySession = sourceReady(power, online, stream) && error.isEmpty()
+                && session.equals(requestedSession) ? session : "";
+        listener.onSample(session, power, online, stream, error);
+        if (session.equals(requestedSession)) {
+            handler.postDelayed(tick, Math.max(1, IDC_PERIOD_MS - (SystemClock.elapsedRealtime() - started)));
+        } else reconcile();
+    }
+
+    private void initialize() throws Exception {
+        if (manager != null) return;
+        Object next = context.getSystemService("auto");
+        if (next == null) throw new IllegalStateException("BYDAutoManager unavailable");
+        getInt = next.getClass().getMethod("getInt", int.class, int.class);
+        setInt = next.getClass().getMethod("setInt", int.class, int.class, int.class);
+        setBuffer = next.getClass().getMethod("setBuffer", int.class, int.class, byte[].class);
+        streamRequest = fid("Special", "SPECIAL_SENTRY_MODE_VIDEO_STREAM_SOURCE_SET");
+        idcWake = fid("Special", "SPECIAL_SENTRY_MODE_WAKEUP_INTELLIGENT_DRIVING_CONTROLER_SET");
+        onlineFid = fid("Bodywork", "BODYWORK_ONLINE_HAS_0x02F000");
+        streamFid = fid("Adas", "ADAS_AVM_VIDEO_STREAM_STATUS");
+        manager = next;
+    }
+
+    private static int fid(String group, String name) throws Exception {
+        return Class.forName("android.hardware.bydauto.BYDAutoFeatureIds$" + group)
+                .getField(name).getInt(null);
+    }
+
+    private int read(int device, int fid) throws Exception {
+        return ((Number) getInt.invoke(manager, device, fid)).intValue();
+    }
+
+    private boolean release() {
+        readySession = "";
+        if (!releaseNeeded) return true;
+        String error = "";
+        try {
+            requireSuccess("stream0", setInt.invoke(manager, 1049, streamRequest, 0));
+            releaseNeeded = false;
+            nextStreamMs = 0;
+        } catch (Exception failure) { error = describe(failure); }
+        listener.onRelease(activeSession, error);
+        return !releaseNeeded;
+    }
+
+    private static void requireSuccess(String command, Object result) {
+        if (!(result instanceof Number) || ((Number) result).intValue() != 0)
+            throw new IllegalStateException(command + " rejected: " + result);
+    }
+
+    private static String describe(Throwable error) {
+        while (error.getCause() != null) error = error.getCause();
+        return error.toString();
+    }
+}

@@ -90,7 +90,13 @@ public final class MotionDetectorShellMain {
     private final MotionScreenControl screen;
     private final MotionSessionConfigStore configStore;
     private final MotionSessionRuntime sessionRuntime = new MotionSessionRuntime();
+    private final MotionCameraPreparation cameraPreparation;
     private final Runnable armCheck = this::advanceEligibility;
+    private final Runnable telemetryRefresh = this::refreshTelemetry;
+    private boolean telemetryRefreshQueued;
+    private boolean telemetryRefreshPending;
+    private boolean cameraRecovering;
+    private String lastCameraPreparation = "";
     private final Runnable firstInferenceTimeout = this::onFirstInferenceTimeout;
     private final Runnable warningWindowTimeout = this::onWarningWindowTimeout;
     private final Runnable warningTimeout = this::finishWarningAfterPolicy;
@@ -126,6 +132,8 @@ public final class MotionDetectorShellMain {
     private boolean shuttingDown;
     private volatile boolean workerBound;
     private volatile boolean workerBinding;
+    private volatile IBinder telemetryHost;
+    private IBinder.DeathRecipient telemetryHostDeath;
     private boolean warningVisible;
     private boolean warningClosing;
     private boolean warningRestoreAllowed;
@@ -184,6 +192,21 @@ public final class MotionDetectorShellMain {
         this.configStore = new MotionSessionConfigStore(appUid);
         controlThread.start();
         control = new Handler(controlThread.getLooper());
+        cameraPreparation = new MotionCameraPreparation(systemContext, new MotionCameraPreparation.Listener() {
+            @Override public void onSample(String id, int power, int online, int stream, String error) {
+                control.post(() -> cameraPreparationSample(id, power, online, stream, error));
+            }
+            @Override public void onRelease(String id, String error) {
+                logEvent("motion_camera_release", id, "confirmed", error.isEmpty(), "error", error);
+            }
+            @Override public void onStopped() {
+                control.post(() -> {
+                    if (teardownPending) continuePendingTeardown();
+                    else if (!sessionRuntime.arming() && !sessionRuntime.armed() && !eligible
+                            && !warning && (recorder == null || !recorder.isRecording())) holdCpu(false);
+                });
+            }
+        });
         screen = new MotionScreenControl((active, screenState, detail) -> {
             if (!sameSession(active)) return;
             if ("wake_requested".equals(screenState)) launchWarningWindow(active);
@@ -646,6 +669,8 @@ public final class MotionDetectorShellMain {
         lastReportedDetectorState = "";
         frameNumber = 0L;
         firstInferenceReceived = false;
+        cameraRecovering = false;
+        lastCameraPreparation = "";
         workerBound = false;
         expectedSourceEpoch = "";
         screen.beginSession(id);
@@ -786,6 +811,7 @@ public final class MotionDetectorShellMain {
             if (check != null && check.ownsSession && check.id.equals(id)) startCheckFrames(check);
             else if (sessionRuntime.armed()) setEligibleOnControl(id, true);
             else if (!sessionRuntime.arming()) holdCpu(false);
+            updateCameraDemand();
         } catch (Throwable error) {
             if (assets == null && setup.assets != null) {
                 try { setup.assets.close(); } catch (Throwable ignored) { }
@@ -816,9 +842,22 @@ public final class MotionDetectorShellMain {
                 state = stopRecording("eligibility_ended", false) ? "prepared" : "recording_detach_pending";
             }
             sendStatus(id, state, "fresh Motion telemetry no longer meets the configured activation mode");
+            updateCameraDemand();
             return 1;
         }
+        cameraPreparation.start(id);
+        if (!cameraPreparation.ready(id)) {
+            if (!"camera_preparing".equals(state)) {
+                state = "camera_preparing";
+                sendStatus(id, state, "waiting for IDC online and AVM stream readiness");
+            }
+            return 1;
+        }
+        if (cameraRecovering) {
+            if (!stopRecording("camera_recovery", false) || !detachAndCloseReader(false)) return 1;
+        }
         attachReader(id);
+        cameraRecovering = false;
         eligible = true;
         policy.setEligible(true, SystemClock.elapsedRealtime() - MotionDetectorProtocol.WARMUP_MS);
         screen.setEligible(id, true);
@@ -996,10 +1035,14 @@ public final class MotionDetectorShellMain {
                     throw new IllegalStateException("camera runtime returned an invalid Motion source epoch");
                 expectedSourceEpoch = epoch;
                 workerBound = true;
+                watchTelemetryHost(id, cameraHost);
                 return true;
             }
             if (operation == MotionDetectorProtocol.CAMERA_UNBIND_WORKER
-                    && accepted && reply.dataAvail() == 0) workerBound = false;
+                    && accepted && reply.dataAvail() == 0) {
+                workerBound = false;
+                watchTelemetryHost(id, null);
+            }
             return accepted && reply.dataAvail() == 0;
         } finally {
             data.recycle();
@@ -1230,6 +1273,8 @@ public final class MotionDetectorShellMain {
     }
 
     private void holdCpu(boolean required) {
+        // Do not sleep between an OEM keepalive and its confirmed release.
+        required |= !cameraPreparation.stopped();
         try {
             if (required && wakeLock == null) {
                 PowerManager manager = (PowerManager) systemContext.getSystemService(Context.POWER_SERVICE);
@@ -1266,17 +1311,10 @@ public final class MotionDetectorShellMain {
             }
             if (teardownPending || shuttingDown || "error".equals(state)) return;
             if ("helper_death".equals(kind) || "helper_ping_failed".equals(kind)) {
-                ManualCheck check = manualCheck;
-                if (check != null) {
-                    completeCheck(check, MotionCheckupClient.ERROR, "check_failed", kind, true);
-                    if (!sameSession(id)) return;
-                }
+                if (!expectedSourceEpoch.equals(event.optString("source_epoch", ""))) return;
                 sessionRuntime.invalidateTelemetry();
-                control.removeCallbacks(armCheck);
-                if (eligible) setEligibleOnControl(id, false);
-                eligible = false;
-                holdCpu(false);
-                sendStatus(id, "telemetry_disconnected", event.optString("error", kind));
+                cameraPreparation.stop();
+                handleProducerLoss(id, kind, kind, event.optString("error", ""));
                 return;
             }
             if (!"motion_vehicle_state".equals(kind) && !"shell_power_state".equals(kind)) return;
@@ -1296,6 +1334,7 @@ public final class MotionDetectorShellMain {
             MotionSessionRuntime.Change change = sessionRuntime.telemetry(epoch, signal,
                     value, baseline, now);
             applyEligibilityChange(id, change);
+            if (sessionRuntime.needsTelemetry()) requestTelemetryRefresh();
         } catch (Throwable error) {
             System.err.println("motion_telemetry_rejected " + summary(error));
         }
@@ -1334,8 +1373,108 @@ public final class MotionDetectorShellMain {
                 if (recorder == null || !recorder.isRecording()) holdCpu(false);
                 sendStatus(id, "disarmed", "Power/Lock telemetry no longer meets Motion mode");
             }
+            updateCameraDemand();
         } catch (Throwable error) {
             fail(id, "eligibility", error);
+        }
+    }
+
+    private void updateCameraDemand() {
+        boolean needed = sessionId != null && prepared && !shuttingDown && !teardownPending
+                && !sessionRuntime.suspended() && config != null && config.anyEnabled()
+                && sessionRuntime.power() == 0
+                && (sessionRuntime.arming() || sessionRuntime.armed() || eligible
+                    || recorder != null && recorder.isRecording());
+        if (needed) {
+            holdCpu(true);
+            cameraPreparation.start(sessionId);
+        } else cameraPreparation.stop();
+    }
+
+    private void cameraPreparationSample(String id, int power, int online, int stream, String error) {
+        if (!sameSession(id) || shuttingDown || teardownPending || sessionRuntime.suspended()) return;
+        String snapshot = power + "/" + online + "/" + stream + "/" + error;
+        if (!snapshot.equals(lastCameraPreparation)) {
+            lastCameraPreparation = snapshot;
+            logEvent("motion_camera_preparation", id, "power", power, "idc_online", online,
+                    "avm_stream", stream, "ready", cameraPreparation.ready(id), "error", error);
+        }
+        if (power != 0) {
+            // Never continue OFF-state requests on unknown/ON power; obtain a fresh shared baseline.
+            sessionRuntime.invalidateTelemetry();
+            control.removeCallbacks(armCheck);
+            try { if (eligible) setEligibleOnControl(id, false); }
+            catch (Throwable failure) { fail(id, "camera_power_lost", failure); return; }
+            cameraPreparation.stop();
+            if (!warning && (recorder == null || !recorder.isRecording())) holdCpu(false);
+            requestTelemetryRefresh();
+            return;
+        }
+        // A ready flag gates opening. A later flag loss alone is not proof of lost frames.
+        if (prepared && sessionRuntime.armed() && !eligible && cameraPreparation.ready(id)) {
+            try { setEligibleOnControl(id, true); }
+            catch (Throwable failure) { fail(id, "camera_prepare_attach", failure); }
+        }
+    }
+
+    private void requestTelemetryRefresh() {
+        if (sessionId == null || shuttingDown || teardownPending || sessionRuntime.suspended()
+                || telemetryRefreshPending || telemetryRefreshQueued) return;
+        telemetryRefreshQueued = true;
+        control.postDelayed(telemetryRefresh, AvasTelemetryController.FALLBACK_MS);
+    }
+
+    private void refreshTelemetry() {
+        telemetryRefreshQueued = false;
+        String id = sessionId;
+        if (id == null || shuttingDown || teardownPending || sessionRuntime.suspended()
+                || telemetryRefreshPending) return;
+        telemetryRefreshPending = true;
+        IBinder host = telemetryHost;
+        boolean rebind = host == null || !host.isBinderAlive();
+        if (rebind) workerBinding = true;
+        hostOperations.execute(() -> {
+            try {
+                if (sameSession(id) && !shuttingDown && !teardownPending) {
+                    if (rebind && !cameraOperation(MotionDetectorProtocol.CAMERA_BIND_WORKER, id, null))
+                        throw new IllegalStateException("Motion telemetry host rebind refused");
+                    setMotionTelemetryDemand(id, true);
+                }
+            }
+            catch (Exception error) { logEvent("motion_telemetry_refresh_failed", id, "error", summary(error)); }
+            finally {
+                control.post(() -> {
+                    telemetryRefreshPending = false;
+                    if (rebind) workerBinding = false;
+                    if (teardownPending) { continuePendingTeardown(); return; }
+                    if (sessionId != null && sessionRuntime.needsTelemetry()) requestTelemetryRefresh();
+                });
+            }
+        });
+    }
+
+    private synchronized void watchTelemetryHost(String id, IBinder next) throws RemoteException {
+        if (telemetryHost == next) return;
+        if (telemetryHost != null && telemetryHostDeath != null) {
+            try { telemetryHost.unlinkToDeath(telemetryHostDeath, 0); }
+            catch (java.util.NoSuchElementException ignored) { }
+        }
+        telemetryHost = next;
+        telemetryHostDeath = null;
+        if (next == null) return;
+        telemetryHostDeath = () -> control.post(() -> {
+            if (!sameSession(id) || telemetryHost != next) return;
+            try { watchTelemetryHost(id, null); } catch (RemoteException ignored) { }
+            workerBound = false;
+            expectedSourceEpoch = "";
+            sessionRuntime.invalidateTelemetry();
+            cameraPreparation.stop();
+            handleProducerLoss(id, "camera_producer_closed", "telemetry_host_died", "Binder died");
+        });
+        try { next.linkToDeath(telemetryHostDeath, 0); }
+        catch (RemoteException dead) {
+            telemetryHostDeath.binderDied();
+            throw dead;
         }
     }
 
@@ -1362,7 +1501,8 @@ public final class MotionDetectorShellMain {
         }
         sendStatus(id, "camera_recovering", kind + ":" + reason
                 + (detail.isEmpty() ? "" : ":" + detail));
-        sessionRuntime.invalidateTelemetry();
+        sessionRuntime.cameraLost();
+        cameraRecovering = true;
         control.removeCallbacks(armCheck);
         try {
             if (eligible) {
@@ -1376,7 +1516,10 @@ public final class MotionDetectorShellMain {
             boolean readerDetached = detachAndCloseReader(producerClosed);
             if (!recordingStopped || !readerDetached)
                 sendStatus(id, "camera_recovering", "camera consumer retained until host detach or producer closure is confirmed");
-            holdCpu(false);
+            applyEligibilityChange(id, sessionRuntime.advance(SystemClock.elapsedRealtime()));
+            if (!sessionRuntime.arming() && !sessionRuntime.armed() && !warning
+                    && (recorder == null || !recorder.isRecording())) holdCpu(false);
+            requestTelemetryRefresh();
         } catch (Throwable error) {
             fail(id, "camera_source_lost", error);
         }
@@ -1464,6 +1607,7 @@ public final class MotionDetectorShellMain {
             if (!recordingStopRequested) blockRecordingRetry(id, detail);
             if (teardownPending) continuePendingTeardown();
             else stopRecording(detail.substring("input_release_required:".length()));
+            updateCameraDemand();
             return;
         }
         if (detail != null && detail.startsWith("stopped:")) {
@@ -1481,6 +1625,7 @@ public final class MotionDetectorShellMain {
             if (teardownPending) continuePendingTeardown();
             else if (sameSession(id) && eligible && config != null && config.recordingEnabled)
                 startRecording(id);
+            updateCameraDemand();
             return;
         }
         if (!sameSession(id) || generation != recordingGeneration) return;
@@ -1513,6 +1658,7 @@ public final class MotionDetectorShellMain {
             state = "recording_teardown_pending";
             sendStatus(id, state, "camera host has not confirmed encoder drain; consumer resources retained");
         }
+        updateCameraDemand();
     }
 
     private boolean stopRecording(String reason, boolean surfacesDrained) {
@@ -1540,6 +1686,7 @@ public final class MotionDetectorShellMain {
                     if (composer != oldComposer || !sameSession(id)) return;
                     if (teardownPending) continuePendingTeardown();
                     else stopRecording(reason);
+                    updateCameraDemand();
                 }));
                 composer = null;
             } catch (Throwable error) {
@@ -1608,6 +1755,9 @@ public final class MotionDetectorShellMain {
         if (check != null) completeCheck(check, MotionCheckupClient.NOT_CHECKED, "cancelled", reason, false);
         if (teardownPending && sameSession(id)) return;
         teardownPending = true;
+        cameraPreparation.stop();
+        control.removeCallbacks(telemetryRefresh);
+        telemetryRefreshQueued = false;
         teardownNotifyHost = notifyHost;
         teardownHostShutdown = hostShutdown;
         teardownSurfacesDrained = surfacesDrained;
@@ -1671,10 +1821,10 @@ public final class MotionDetectorShellMain {
                 && (!recordingAttached && !attached);
         boolean hostReleased = !workerBound || !teardownNotifyHost || teardownHostUnbound
                 || teardownHostShutdown && teardownSurfacesDrained;
-        if (!resourcesSafe || !hostReleased) {
+        if (!resourcesSafe || !hostReleased || !cameraPreparation.stopped()) {
             state = "teardown_pending";
             if (!lastError.isEmpty()) sendStatus(id, state, lastError);
-            else sendStatus(id, state, "Motion surfaces or encoder drain are awaiting a confirmed host release");
+            else sendStatus(id, state, "Motion surfaces, encoder or OEM stream request are awaiting confirmed release");
             return;
         }
 

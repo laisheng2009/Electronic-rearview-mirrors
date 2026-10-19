@@ -38,9 +38,12 @@ final class MotionTelemetryState {
     }
 
     boolean eligible(MotionConfig config) {
+        return readyFor(config) && config.eligible(power, lock);
+    }
+
+    boolean readyFor(MotionConfig config) {
         return config != null && powerBaseline && power >= 0
-                && (config.lockCondition == 0 ? config.eligible(power, -1)
-                    : lockBaseline && config.eligible(power, lock));
+                && (config.lockCondition == 0 || lockBaseline && (lock == 1 || lock == 2));
     }
 
     int power() { return power; }

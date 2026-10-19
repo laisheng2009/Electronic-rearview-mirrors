@@ -91,6 +91,16 @@ final class MotionSessionRuntime {
         armed = false;
     }
 
+    void cameraLost() {
+        // A camera error does not invalidate independently observed Power/Lock.
+        armDeadlineMs = 0L;
+        armed = false;
+    }
+
+    boolean needsTelemetry() {
+        return !suspended && config != null && config.anyEnabled() && !telemetry.readyFor(config);
+    }
+
     String sessionId() { return sessionId; }
     String sourceEpoch() { return sourceEpoch; }
     MotionConfig config() { return config; }

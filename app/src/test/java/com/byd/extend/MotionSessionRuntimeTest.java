@@ -4,6 +4,41 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class MotionSessionRuntimeTest {
+    @Test public void cameraLossRearmsFromValidTelemetryWithoutWaitingForAnotherBaseline() throws Exception {
+        MotionSessionRuntime runtime = new MotionSessionRuntime();
+        runtime.configure("0123456789abcdef0123456789abcdef",
+                MotionConfig.parse("{\"enabled\":true,\"lock\":1}"));
+        runtime.telemetry("epoch", "power", 0, true, 1_000);
+        runtime.telemetry("epoch", "lock", 2, true, 1_000);
+        assertEquals(MotionSessionRuntime.Change.ARMED, runtime.advance(3_500));
+
+        runtime.cameraLost();
+        assertFalse(runtime.needsTelemetry());
+        assertEquals(MotionSessionRuntime.Change.ARMING, runtime.advance(4_000));
+        assertEquals(MotionSessionRuntime.Change.ARMED, runtime.advance(6_500));
+        assertEquals(0, runtime.power());
+        assertEquals(2, runtime.lock());
+
+        runtime.telemetry("epoch", "power", -1, true, 7_000);
+        runtime.cameraLost();
+        assertTrue(runtime.needsTelemetry());
+        assertEquals(MotionSessionRuntime.Change.NONE, runtime.advance(70_000));
+        assertEquals(MotionSessionRuntime.Change.ARMING,
+                runtime.telemetry("epoch", "power", 0, true, 70_100));
+        runtime.telemetry("epoch", "lock", 1, false, 70_200);
+        assertEquals(MotionSessionRuntime.Change.NONE, runtime.advance(80_000));
+    }
+
+    @Test public void cameraReadinessRejectsTheStaleStreamFlagSeenWhileIdcWasOffline() {
+        assertFalse(MotionCameraPreparation.sourceReady(0, 0, 1));
+        assertFalse(MotionCameraPreparation.sourceReady(0, 1, 0));
+        assertFalse(MotionCameraPreparation.sourceReady(0, -10011, 1));
+        assertFalse(MotionCameraPreparation.sourceReady(0, 1, -10011));
+        assertFalse(MotionCameraPreparation.sourceReady(-1, 1, 1));
+        assertFalse(MotionCameraPreparation.sourceReady(2, 1, 1));
+        assertTrue(MotionCameraPreparation.sourceReady(0, 1, 1));
+    }
+
     @Test public void telemetryCompletesArmingAtTheOriginalDeadlineWithoutWaitingForTheTimer() throws Exception {
         MotionSessionRuntime runtime = new MotionSessionRuntime();
         runtime.configure("0123456789abcdef0123456789abcdef",
