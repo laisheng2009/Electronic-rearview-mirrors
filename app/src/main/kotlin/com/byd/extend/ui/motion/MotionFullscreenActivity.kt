@@ -71,7 +71,9 @@ class MotionFullscreenActivity : ComponentActivity() {
             else -> UiLanguage.English
         }
         val strings = UiStrings(language, this)
-        Toast.makeText(this, strings.resource(com.byd.extend.R.string.motion_fullscreen_hint), Toast.LENGTH_LONG).show()
+        if (!activeRuntimeWarning) {
+            Toast.makeText(this, strings.resource(com.byd.extend.R.string.motion_fullscreen_hint), Toast.LENGTH_LONG).show()
+        }
         setContent {
             val drawGeneration = renderGeneration
             val drawSession = sessionId

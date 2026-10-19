@@ -14,6 +14,35 @@ import java.nio.file.Files;
 import java.util.List;
 
 public final class MotionMediaIndexTest {
+    @Test public void interruptedClipKeepsOnlyCapturedMarkerIntervalsAcrossReopen() throws Exception {
+        File directory = Files.createTempDirectory("motion-index-interrupted-").toFile();
+        File file = new File(directory, "library.json");
+        MotionMediaIndex index = new MotionMediaIndex(file);
+        MotionMediaIndex.Record record = new MotionMediaIndex.Record(
+                "content://media/external_primary/video/media/45", "external_primary",
+                "Motion_interrupted.mp4", "segment-45", 5_000L,
+                1_000L, 1920, 1080, MotionMediaIndex.RECORDING);
+        index.put(record);
+        index.upsertMarker(record.uri, new MotionMediaIndex.Marker(
+                "yellow", 500L, 4_500L, 3_500L, 7_500L, 1));
+        index.upsertMarker(record.uri, new MotionMediaIndex.Marker(
+                "red", 2_000L, 6_000L, 4_000L, 8_000L, 2));
+        index.upsertMarker(record.uri, new MotionMediaIndex.Marker(
+                "uncaptured", 4_000L, 8_000L, 5_000L, 9_000L, 1));
+        assertTrue(index.finishRecording(record.uri, MotionMediaIndex.INTERRUPTED, 2_000L, 100_000L));
+
+        MotionMediaIndex.Record saved = new MotionMediaIndex(file).find(record.uri);
+        assertEquals(MotionMediaIndex.INTERRUPTED, saved.status);
+        assertEquals(2, saved.markers.size());
+        assertEquals(1_000L, saved.markers.get(0).elapsedRealtimeMs);
+        assertEquals(5_000L, saved.markers.get(0).wallTimeMs);
+        assertEquals(3_000L, saved.markers.get(0).endElapsedRealtimeMs);
+        assertEquals(7_000L, saved.markers.get(0).endWallTimeMs);
+        assertEquals(2, saved.markers.get(1).level);
+        assertEquals(2_000L, saved.markers.get(1).elapsedRealtimeMs);
+        assertEquals(3_000L, saved.markers.get(1).endElapsedRealtimeMs);
+    }
+
     @Test public void finishedClipAndDetectionMarkersSurviveReopen() throws Exception {
         File directory = Files.createTempDirectory("motion-index-").toFile();
         File indexFile = new File(directory, "library.json");

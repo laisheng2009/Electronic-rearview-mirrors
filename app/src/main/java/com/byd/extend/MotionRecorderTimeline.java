@@ -26,6 +26,10 @@ final class MotionRecorderTimeline {
         return eventElapsedMs + bounded * 1000L;
     }
 
+    static boolean postRollRecorded(long lastVideoMs, long deadlineMs) {
+        return deadlineMs != Long.MIN_VALUE && lastVideoMs >= deadlineMs;
+    }
+
     static boolean startsSegmentAt(long segmentStartMs, long frameElapsedMs, boolean keyframe) {
         return keyframe && frameElapsedMs - segmentStartMs >= SEGMENT_MILLIS;
     }

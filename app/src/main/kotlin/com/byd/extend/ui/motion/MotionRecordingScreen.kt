@@ -1071,7 +1071,8 @@ private fun MotionPlayerDialog(
                 }) {
                 val progressX = size.width * (position.toDouble() / duration).toFloat().coerceIn(0f, 1f)
                 drawRect(colors.accent.copy(alpha = .55f), size = Size(progressX, size.height))
-                entry.markers.filter { it.level == 1 || it.level == 2 }.forEach { marker ->
+                entry.markers.filter { (it.level == 1 || it.level == 2) && it.positionMs < duration }
+                    .sortedBy { it.level }.forEach { marker ->
                     val startMs = marker.positionMs.coerceIn(0L, duration)
                     val intervalMs = marker.durationMs.coerceAtLeast(0L).coerceAtMost(duration - startMs)
                     val startX = size.width * (startMs.toDouble() / duration).toFloat()

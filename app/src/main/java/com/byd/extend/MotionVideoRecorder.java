@@ -102,6 +102,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private final MotionMediaLibrary library;
     private final BlockingQueue<Detection> detections = new ArrayBlockingQueue<>(256);
     private final BlockingQueue<EncodedPacket> audioPackets = new ArrayBlockingQueue<>(512);
+    private final ArrayDeque<EncodedPacket> videoPackets = new ArrayDeque<>();
+    private long queuedVideoBytes;
     private final ArrayList<EncodedPacket> ring = new ArrayList<>(); // Only encoded samples; hard byte/time bounded.
     private final ArrayDeque<Detection> pendingDetections = new ArrayDeque<>();
     private final ArrayList<TimelineItem> iteration = new ArrayList<>();
@@ -116,6 +118,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private volatile MediaFormat audioFormat;
     private volatile Thread workerThread;
     private volatile Thread audioThread;
+    private volatile Thread videoDrainThread;
+    private volatile boolean videoFailed;
     private volatile MediaCodec videoEncoder;
     private volatile Surface inputSurface;
     private volatile long requestedFinishDeadlineMs = Long.MIN_VALUE;
@@ -124,7 +128,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private MotionConfig config;
     private MotionMediaIndex index;
     private MotionStorage storage;
-    private MediaFormat videoFormat;
+    private volatile MediaFormat videoFormat;
     private Clip activeClip;
     private long ringBytes;
     private long latestRingElapsedUs = Long.MIN_VALUE;
@@ -135,10 +139,10 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private long elapsedAnchorMs;
     private long videoPtsOffsetUs = Long.MIN_VALUE;
     private long audioPtsOffsetUs = Long.MIN_VALUE;
-    private long lastVideoElapsedUs = Long.MIN_VALUE;
+    private volatile long lastVideoElapsedUs = Long.MIN_VALUE;
     private long lastAudioElapsedUs = Long.MIN_VALUE;
     private final HashMap<Integer, Episode> episodesByLevel = new HashMap<>();
-    private boolean videoEos;
+    private volatile boolean videoEos;
     private boolean closed;
     private boolean firstVideoSampleLogged;
     private boolean firstKeyframeLogged;
@@ -210,6 +214,10 @@ public final class MotionVideoRecorder implements AutoCloseable {
             pendingDetections.clear();
             detections.clear();
             audioPackets.clear();
+            synchronized (videoPackets) {
+                videoPackets.clear();
+                queuedVideoBytes = 0;
+            }
             ringBytes = 0;
             latestRingElapsedUs = Long.MIN_VALUE;
             finishDeadlineMs = Long.MIN_VALUE;
@@ -228,6 +236,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
             firstKeyframeLogged = false;
             firstDetectionLogged = false;
             videoEos = false;
+            videoFailed = false;
             stopRequested = false;
             stopReason = null;
             wallAnchorMs = System.currentTimeMillis();
@@ -249,12 +258,15 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 videoEncoder = encoder;
                 inputSurface = surface;
                 buffering = true;
+                if (next.audioEnabled) startAudioCapture();
+                Thread drain = new Thread(this::runVideoDrain, "motion-video-drain");
+                videoDrainThread = drain;
+                drain.start();
                 Thread worker = new Thread(this::runVideoLoop, "motion-video-recorder");
                 workerThread = worker;
                 worker.start();
                 logDiagnostic("encoder_started", "size=" + next.width() + "x" + next.height()
                         + " audio=" + next.audioEnabled);
-                if (next.audioEnabled) startAudioCapture();
             } catch (IOException | RuntimeException failure) {
                 if (surface != null) try { surface.release(); } catch (RuntimeException ignored) { }
                 if (encoder != null) {
@@ -293,7 +305,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
 
     /** Records an event level 1 (yellow) or 2 (red), timestamped on elapsedRealtime. */
     public void onDetection(int level, long elapsedMs) {
-        if (!buffering || (level != 1 && level != 2) || elapsedMs < 0) return;
+        if (!buffering || stopRequested || (level != 1 && level != 2) || elapsedMs < 0) return;
         if (!firstDetectionLogged) {
             firstDetectionLogged = true;
             logDiagnostic("first_detection", "level=" + level + " elapsed_ms=" + elapsedMs);
@@ -312,7 +324,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
         Thread worker;
         synchronized (this) {
             if (!buffering) return;
-            stopReason = reason == null ? "stopped" : reason;
+            if (!videoFailed) stopReason = reason == null ? "stopped" : reason;
             stopRequested = true;
             audioRunning = false;
             AudioRecord recorder = audioRecord;
@@ -539,7 +551,6 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private void requestStopForAudioPermissionRevocation() {
         stopReason = "record_audio_permission_revoked";
         stopRequested = true;
-        signalVideoEndOfStream();
     }
 
     private boolean drainAudio(MediaCodec encoder, MediaCodec.BufferInfo info) {
@@ -572,7 +583,6 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private void runVideoLoop() {
-        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         long nextPermissionCheckMs = SystemClock.elapsedRealtime();
         try {
             while (!stopRequested) {
@@ -586,27 +596,20 @@ public final class MotionVideoRecorder implements AutoCloseable {
                         continue;
                     }
                 }
-                collectTimelineItems(info);
+                collectTimelineItems();
                 processTimelineItems();
                 applyFinishRequest();
                 tryOpenPendingDetection();
                 trimRing();
-                if (activeClip != null && finishDeadlineMs != Long.MIN_VALUE
-                        && SystemClock.elapsedRealtime() >= finishDeadlineMs) closeActiveClip();
+                if (activeClip != null && MotionRecorderTimeline.postRollRecorded(
+                        activeClip.lastVideoElapsedMs, finishDeadlineMs)) closeActiveClip();
                 expireOutputRestart(SystemClock.elapsedRealtime());
                 Thread.sleep(5L);
             }
             stopAudioCapture();
-            signalVideoEndOfStream();
-            long drainUntil = SystemClock.elapsedRealtime() + 1_500L;
-            while (!videoEos && SystemClock.elapsedRealtime() < drainUntil) {
-                collectTimelineItems(info);
-                processTimelineItems();
-                tryOpenPendingDetection();
-                Thread.sleep(5L);
-            }
+            joinVideoDrain();
             joinAudioThread();
-            collectTimelineItems(info);
+            collectTimelineItems();
             processTimelineItems();
             if (activeClip != null) closeActiveClip();
         } catch (InterruptedException interrupted) {
@@ -616,12 +619,12 @@ public final class MotionVideoRecorder implements AutoCloseable {
             }
             if (activeClip != null) closeActiveClip();
         } catch (RuntimeException failure) {
-            Log.e(TAG, "video_encoder_loop_failed", failure);
-            stopReason = "video_encoder_failed";
-            notifyState("video_encoder_failed:" + failure.getClass().getSimpleName());
+            failVideo("video_encoder_failed", failure);
             if (activeClip != null) closeActiveClip();
         } finally {
+            stopRequested = true;
             stopAudioCapture();
+            joinVideoDrain();
             try { joinAudioThread(); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             if (inputSurfaceLease.beginRelease()) {
@@ -649,6 +652,51 @@ public final class MotionVideoRecorder implements AutoCloseable {
         }
     }
 
+    private void joinVideoDrain() {
+        Thread drain = videoDrainThread;
+        if (drain == null || drain == Thread.currentThread()) return;
+        boolean interrupted = false;
+        while (drain.isAlive()) {
+            try { drain.join(); }
+            catch (InterruptedException ignored) { interrupted = true; }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    private void runVideoDrain() {
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        try {
+            while (!stopRequested && !videoEos) {
+                drainVideoPackets(info);
+                if (!stopRequested) Thread.sleep(5L);
+            }
+            if (videoEos && !stopRequested)
+                failVideo("video_encoder_ended", new IllegalStateException("Unexpected video end of stream"));
+            if (!videoFailed) {
+                signalVideoEndOfStream();
+                long until = SystemClock.elapsedRealtime() + 1_500L;
+                while (!videoFailed && !videoEos && SystemClock.elapsedRealtime() < until) {
+                    drainVideoPackets(info);
+                    Thread.sleep(5L);
+                }
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException failure) {
+            failVideo("video_encoder_read_failed", failure);
+        }
+    }
+
+    private void failVideo(String reason, RuntimeException failure) {
+        if (videoFailed) return;
+        videoFailed = true;
+        stopReason = reason;
+        stopRequested = true;
+        Log.e(TAG, reason, failure);
+        logDiagnostic("video_encoder_failed", "reason=" + reason + " error=" + failure);
+        notifyState("video_encoder_failed:" + reason);
+    }
+
     private void joinAudioThread() throws InterruptedException {
         Thread audio = audioThread;
         if (audio == null || audio == Thread.currentThread()) return;
@@ -660,17 +708,14 @@ public final class MotionVideoRecorder implements AutoCloseable {
         if (audio.isAlive()) logDiagnostic("audio_worker_still_alive", "stop_requested=" + stopRequested);
     }
 
-    private void collectTimelineItems(MediaCodec.BufferInfo info) {
-        iteration.clear();
+    private void drainVideoPackets(MediaCodec.BufferInfo info) {
         MediaCodec encoder = videoEncoder;
         if (encoder != null) {
-            while (true) {
+            for (int drained = 0; drained < 64 && !videoFailed && !videoEos; drained++) {
                 int outputIndex;
                 try { outputIndex = encoder.dequeueOutputBuffer(info, 0); }
                 catch (RuntimeException failure) {
-                    stopReason = "video_encoder_read_failed";
-                    stopRequested = true;
-                    notifyState(stopReason);
+                    failVideo("video_encoder_read_failed", failure);
                     break;
                 }
                 if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) break;
@@ -679,8 +724,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
                     continue;
                 }
                 if (outputIndex < 0) continue;
-                ByteBuffer output = encoder.getOutputBuffer(outputIndex);
                 try {
+                    ByteBuffer output = encoder.getOutputBuffer(outputIndex);
                     if (output != null && info.size > 0
                             && (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
                         long elapsedUs = mapVideoPts(info.presentationTimeUs);
@@ -697,8 +742,15 @@ public final class MotionVideoRecorder implements AutoCloseable {
                                         + " bytes=" + info.size);
                             }
                             byte[] bytes = copyBytes(output, info.offset, info.size);
-                            iteration.add(TimelineItem.packet(new EncodedPacket(VIDEO_TRACK, elapsedUs,
-                                    info.flags, bytes)));
+                            synchronized (videoPackets) {
+                                if (queuedVideoBytes + bytes.length > MAX_RING_BYTES) {
+                                    failVideo("video_writer_queue_full",
+                                            new IllegalStateException("Motion storage is not keeping up with video"));
+                                    return;
+                                }
+                                videoPackets.addLast(new EncodedPacket(VIDEO_TRACK, elapsedUs, info.flags, bytes));
+                                queuedVideoBytes += bytes.length;
+                            }
                             lastVideoElapsedUs = elapsedUs;
                         }
                     }
@@ -707,6 +759,15 @@ public final class MotionVideoRecorder implements AutoCloseable {
                     encoder.releaseOutputBuffer(outputIndex, false);
                 }
             }
+        }
+    }
+
+    private void collectTimelineItems() {
+        iteration.clear();
+        synchronized (videoPackets) {
+            EncodedPacket video;
+            while ((video = videoPackets.pollFirst()) != null) iteration.add(TimelineItem.packet(video));
+            queuedVideoBytes = 0;
         }
         EncodedPacket audio;
         while ((audio = audioPackets.poll()) != null) iteration.add(TimelineItem.packet(audio));
@@ -718,14 +779,18 @@ public final class MotionVideoRecorder implements AutoCloseable {
         iteration.sort(Comparator.comparingLong(TimelineItem::elapsedUs)
                 .thenComparingInt(item -> item.detection == null ? 0 : 1));
         for (TimelineItem item : iteration) {
-            if (item.detection != null) processDetection(item.detection);
+            if (item.detection != null) {
+                if (!stopRequested) processDetection(item.detection);
+            }
             else handlePacket(item.packet);
         }
     }
 
     private void processDetection(Detection detection) {
         updateEpisode(detection);
-        if (activeClip != null && detection.elapsedMs > finishDeadlineMs) closeActiveClip();
+        if (activeClip != null && detection.elapsedMs > finishDeadlineMs
+                && MotionRecorderTimeline.postRollRecorded(activeClip.lastVideoElapsedMs, finishDeadlineMs))
+            closeActiveClip();
         if (activeClip != null) {
             if (detection.elapsedMs >= activeClip.startElapsedMs) persistEpisode(activeClip, detection);
             else persistMarkerInFinishedClip(detection);
@@ -746,7 +811,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private void tryOpenPendingDetection() {
-        if (activeClip != null || pendingDetections.isEmpty() || videoFormat == null) return;
+        if (stopRequested || activeClip != null || pendingDetections.isEmpty() || videoFormat == null) return;
         Detection first = pendingDetections.peekFirst();
         long nowMs = SystemClock.elapsedRealtime();
         boolean audioRequested = config.audioEnabled && !audioFailed;
@@ -797,7 +862,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
             } else stopRequested = true;
         }
         expireOutputRestart(nowMs);
-        if (activeClip == null && outputRestartActive(nowMs)
+        if (!stopRequested && activeClip == null && outputRestartActive(nowMs)
                 && packet.track == VIDEO_TRACK && packet.isKeyFrame()) {
             long durationMs = Math.max(0, Math.min(MotionRecorderTimeline.SEGMENT_MILLIS,
                     outputRestartUntilElapsedMs - packetElapsedMs));
@@ -806,10 +871,10 @@ public final class MotionVideoRecorder implements AutoCloseable {
             openSegment(packetElapsedMs, Collections.emptyList(), requiredBytes, outputRestartVolumeId);
         }
         if (activeClip == null || packet.elapsedUs < activeClip.startElapsedMs * 1_000L) return;
-        if (packet.track == VIDEO_TRACK && MotionRecorderTimeline.startsSegmentAt(
+        if (!stopRequested && packet.track == VIDEO_TRACK && MotionRecorderTimeline.startsSegmentAt(
                 activeClip.startElapsedMs, packet.elapsedUs / 1_000L, packet.isKeyFrame())) {
             String endedVolumeId = activeClip.output.volumeId;
-            closeActiveClip();
+            closeActiveClip(true);
             long startMs = packet.elapsedUs / 1_000L;
             long durationMs = Math.max(0, Math.min(MotionRecorderTimeline.SEGMENT_MILLIS,
                     finishDeadlineMs - startMs));
@@ -869,7 +934,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
 
     private boolean openSegment(long startElapsedMs, List<EncodedPacket> initialPackets, long requiredBytes,
             String firstAttemptVolumeId) {
-        if (videoFormat == null) return false;
+        if (stopRequested || videoFormat == null) return false;
         String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
                 .format(new Date(wallFromElapsed(startElapsedMs)));
         String name = "Motion_" + timestamp + "_" + UUID.randomUUID().toString().substring(0, 8) + ".mp4";
@@ -879,9 +944,13 @@ public final class MotionVideoRecorder implements AutoCloseable {
         String segmentId = UUID.randomUUID().toString().replace("-", "");
         String uri = null;
         String preferred = library.selectedVolumeId(config.primarySd);
+        long preparationStarted = SystemClock.elapsedRealtime();
         try {
             output = storage.createOutput(preferred, config.fallbackEnabled, name, checkup ? null : config,
                     checkup ? null : library, requiredBytes, firstAttemptVolumeId);
+            logDiagnostic("output_prepared", "elapsed_ms="
+                    + (SystemClock.elapsedRealtime() - preparationStarted));
+            if (stopRequested) throw new IOException("recording stopped during output preparation");
             uri = output.uri.toString();
             logDiagnostic("mp4_create", "volume=" + output.volumeId + " name=" + output.displayName
                     + " media_id=" + (output.uri.getLastPathSegment() == null ? "unknown" : output.uri.getLastPathSegment()));
@@ -953,6 +1022,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private void writePacket(Clip clip, EncodedPacket packet) {
+        if (videoFailed && packet.track == AUDIO_TRACK && packet.elapsedUs > lastVideoElapsedUs) return;
         int track = packet.track == VIDEO_TRACK ? clip.videoTrack : clip.audioTrack;
         if (track < 0 || (packet.track == AUDIO_TRACK && !clip.audioIncluded)) return;
         long presentation = packet.elapsedUs - clip.startElapsedMs * 1_000L;
@@ -976,10 +1046,15 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private void closeActiveClip() {
+        closeActiveClip(false);
+    }
+
+    private void closeActiveClip(boolean segmentBoundary) {
         Clip clip = activeClip;
         if (clip == null) return;
-        boolean checkupDurationComplete = checkup && !stopRequested
-                && finishDeadlineMs != Long.MIN_VALUE && SystemClock.elapsedRealtime() >= finishDeadlineMs;
+        boolean postRollComplete = MotionRecorderTimeline.postRollRecorded(
+                clip.lastVideoElapsedMs, finishDeadlineMs);
+        boolean checkupDurationComplete = checkup && !videoFailed && postRollComplete;
         activeClip = null;
         recording = false;
         persistCurrentEpisode(clip, true);
@@ -1003,11 +1078,13 @@ public final class MotionVideoRecorder implements AutoCloseable {
                         ? sizeOf(clip.output.uri) : Math.max(0, clip.output.temporaryFile.length());
                 storage.publish(clip.output);
                 long durationMs = Math.max(1L, clip.lastVideoElapsedMs - clip.startElapsedMs + 34L);
-                index.update(clip.record.uri, MotionMediaIndex.COMPLETE, durationMs, size);
+                String status = !videoFailed && (segmentBoundary || postRollComplete)
+                        ? MotionMediaIndex.COMPLETE : MotionMediaIndex.INTERRUPTED;
+                index.finishRecording(clip.record.uri, status, durationMs, size);
                 logDiagnostic("mp4_finalize_complete", "volume=" + clip.output.volumeId
                         + " name=" + clip.output.displayName + " size_bytes=" + size
                         + " duration_ms=" + durationMs + " video_samples=" + clip.videoSamples
-                        + " audio_samples=" + clip.audioSamples);
+                        + " audio_samples=" + clip.audioSamples + " status=" + status);
                 if (checkup) checkupSavedAndDeleted = checkupDurationComplete;
             } else if (clip.videoSamples == 0) {
                 if (!checkup) storage.discard(clip.output);

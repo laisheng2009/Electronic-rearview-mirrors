@@ -27,7 +27,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -46,7 +46,10 @@ public final class MotionStorage {
     private final String ownerPackage;
     private final String pendingOwnerPackage;
     private final StorageManager manager;
-    private final Map<String, String> reportedVolumeMappings = new HashMap<>();
+    private final Map<String, String> reportedVolumeMappings = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, Long> pendingOemCleanup = new LinkedHashMap<>();
+    private Thread cleanupThread;
+    private volatile boolean closed;
 
     public static final class Volume {
         public final String id;
@@ -127,8 +130,46 @@ public final class MotionStorage {
     }
 
     void close() {
+        synchronized (pendingOemCleanup) {
+            closed = true;
+            pendingOemCleanup.clear();
+            if (cleanupThread != null) cleanupThread.interrupt();
+        }
         mediaProvider.close();
         oemRecorderProvider.close();
+    }
+
+    private void requestOemCleanup(String volumeId, long limitBytes) {
+        synchronized (pendingOemCleanup) {
+            if (closed) return;
+            pendingOemCleanup.put(volumeId, limitBytes);
+            if (cleanupThread != null) return;
+            cleanupThread = new Thread(() -> {
+                while (true) {
+                    String nextVolume;
+                    long nextLimit;
+                    synchronized (pendingOemCleanup) {
+                        if (closed || pendingOemCleanup.isEmpty()) {
+                            cleanupThread = null;
+                            return;
+                        }
+                        nextVolume = pendingOemCleanup.keySet().iterator().next();
+                        nextLimit = pendingOemCleanup.remove(nextVolume);
+                    }
+                    long started = android.os.SystemClock.elapsedRealtime();
+                    try {
+                        CleanupResult result = cleanOemNormalToLimit(nextVolume, nextLimit);
+                        Log.i(TAG, "oem_cleanup_finished volume=" + nextVolume
+                                + " elapsed_ms=" + (android.os.SystemClock.elapsedRealtime() - started)
+                                + " complete=" + result.complete + " deleted_bytes=" + result.deletedBytes
+                                + " reason=" + result.reason);
+                    } catch (RuntimeException failure) {
+                        Log.w(TAG, "oem_cleanup_failed volume=" + nextVolume, failure);
+                    }
+                }
+            }, "motion-oem-cleanup");
+            cleanupThread.start();
+        }
     }
 
     public List<Volume> volumes() {
@@ -492,6 +533,8 @@ public final class MotionStorage {
             if (pathColumn < 0 || nameColumn < 0) return CleanupResult.unavailable("cdr_normal_schema_unrecognized");
             while (cursor.moveToNext()) {
                 String path = cursor.getString(pathColumn);
+                if (closed || Thread.currentThread().isInterrupted())
+                    return CleanupResult.unavailable("cleanup_cancelled");
                 String indexedName = cursor.getString(nameColumn);
                 CdrNormalRow row = cdrNormalRow(volume, path);
                 if (row != null && row.file.getName().equals(indexedName)) rows.add(row);
@@ -506,6 +549,8 @@ public final class MotionStorage {
         rows.sort(Comparator.comparingLong(row -> row.timestampMs));
         long deleted = 0;
         for (CdrNormalRow row : rows) {
+            if (closed || Thread.currentThread().isInterrupted())
+                return CleanupResult.failure(deleted, currentBytes, "cleanup_cancelled");
             if (currentBytes <= maximumArchiveBytes) break;
             File file = row.file;
             if (!file.isFile() || file.length() <= 0 || !validVideoFile(file)) continue;
@@ -709,14 +754,9 @@ public final class MotionStorage {
                     throw new IOException("motion_free_space_unavailable");
                 if (queryOwnedBytes(volume) < 0)
                     throw new IOException("motion_archive_accounting_unavailable");
-                if (oemCleanupEnabled(config)) {
-                    CleanupResult cleanup = cleanOemNormalToLimit(volume.id,
-                            config.oemLimitGb * MotionStoragePolicy.GB);
-                    if (!cleanup.complete) {
-                        android.util.Log.w(TAG, "oem_cleanup_not_complete volume=" + volume.id
-                                + " reason=" + cleanup.reason);
-                    }
-                }
+                // OEM validation can take minutes; it must not hold up a live event's output.
+                if (oemCleanupEnabled(config))
+                    requestOemCleanup(volume.id, config.oemLimitGb * MotionStoragePolicy.GB);
                 long baseOwnBytes = -1;
                 long ownAllowance = Long.MAX_VALUE;
                 if (library != null) {
@@ -977,6 +1017,7 @@ public final class MotionStorage {
         if (children == null) return -1;
         long total = 0;
         for (File child : children) {
+            if (closed || Thread.currentThread().isInterrupted()) return -1;
             if (!includeHidden && child.getName().startsWith(".")) continue;
             if (child.isDirectory()) {
                 long nested = scanTree(child, allowedRoot, includeHidden);

@@ -178,6 +178,26 @@ final class MotionMediaIndex {
         return true;
     }
 
+    synchronized boolean finishRecording(String uri, String status, long durationMs, long sizeBytes) throws IOException {
+        int index = indexOf(uri);
+        if (index < 0) return false;
+        Record record = records.get(index);
+        long start = record.startElapsedRealtimeMs;
+        long end = start + Math.max(0, durationMs);
+        ArrayList<Marker> captured = new ArrayList<>();
+        for (Marker marker : record.markers) {
+            if (marker.elapsedRealtimeMs >= end || marker.endElapsedRealtimeMs < start) continue;
+            long boundedStart = Math.max(start, marker.elapsedRealtimeMs);
+            long boundedEnd = Math.min(end, marker.endElapsedRealtimeMs);
+            captured.add(new Marker(marker.eventId, boundedStart,
+                    marker.wallTimeMs + boundedStart - marker.elapsedRealtimeMs, boundedEnd,
+                    marker.endWallTimeMs - (marker.endElapsedRealtimeMs - boundedEnd), marker.level));
+        }
+        record.markers.clear();
+        record.markers.addAll(captured);
+        return update(uri, status, durationMs, sizeBytes);
+    }
+
     synchronized boolean remove(String uri) throws IOException {
         int index = indexOf(uri);
         if (index < 0) return false;

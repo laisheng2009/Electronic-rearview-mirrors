@@ -27,5 +27,10 @@ public final class MotionRecorderTimelineTest {
         assertFalse(MotionRecorderTimeline.startsSegmentAt(1_000L, 120_000L, false));
         assertTrue(MotionRecorderTimeline.startsSegmentAt(1_000L, 121_000L, true));
         assertFalse(MotionRecorderTimeline.startsSegmentAt(1_000L, 120_999L, true));
+        long deadline = MotionRecorderTimeline.finishDeadline(30_000L, 10);
+        assertFalse(MotionRecorderTimeline.postRollRecorded(30_000L, deadline));
+        assertFalse(MotionRecorderTimeline.postRollRecorded(39_999L, deadline));
+        assertTrue(MotionRecorderTimeline.postRollRecorded(40_000L, deadline));
+        assertFalse(MotionRecorderTimeline.postRollRecorded(40_000L, Long.MIN_VALUE));
     }
 }
