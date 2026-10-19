@@ -61,6 +61,11 @@
     <string name="motion_archive_all">"全部存储位置"</string>
     <string name="motion_archive_newest">"最新优先"</string>
     <string name="motion_archive_oldest">"最早优先"</string>
+    <string name="motion_archive_all_short">"全部"</string>
+    <string name="motion_archive_multiselect">"选择多个录像"</string>
+    <string name="motion_archive_selected">"已选择：%1$d"</string>
+    <string name="motion_archive_count">"录像数量：%1$d"</string>
+    <string name="motion_archive_thumbnail_unavailable">"预览不可用"</string>
     <string name="motion_archive_empty">"此日期和筛选条件下没有运动录像。"</string>
     <string name="motion_archive_no_storage">"没有已挂载的录像存储设备。连接存储后即可录像或浏览片段。"</string>
     <string name="motion_archive_unavailable">"此录像当前不可用。"</string>
@@ -74,6 +79,7 @@
     <string name="motion_archive_recording">"录制中"</string>
     <string name="motion_archive_interrupted">"已中断"</string>
     <string name="motion_archive_unknown">"状态未知"</string>
+    <string name="motion_archive_protected_short">"受保护"</string>
     <string name="motion_archive_protected">"受保护或正在录制的文件不可删除。"</string>
     <string name="motion_audio_permission_denied">"录制车内声音需要麦克风权限。"</string>
     <string name="motion_date">"日期筛选"</string>
@@ -89,11 +95,12 @@
     <string name="motion_archive_to">"结束"</string>
     <string name="motion_archive_choose">"选择"</string>
     <string name="motion_archive_clear_range">"清除范围"</string>
-    <string name="motion_archive_range_incomplete">"选择开始和结束时间后应用日期/时间范围。"</string>
-    <string name="motion_archive_range_invalid">"开始时间必须早于结束时间。"</string>
+    <string name="motion_archive_range_incomplete">"请选择范围的开始和结束日期。"</string>
+    <string name="motion_archive_range_invalid">"结束日期不能早于开始日期。"</string>
     <string name="motion_player_fullscreen">"全屏"</string>
     <string name="motion_player_windowed">"退出全屏"</string>
     <string name="motion_player_error">"无法播放此录像。"</string>
+    <string name="motion_player_composition">"组合画面"</string>
     <string name="motion_storage_ready">"就绪"</string>
     <string name="motion_storage_numbers_unknown">"容量和用量不可用。"</string>
     <string name="motion_storage_unallocated">"未分配"</string>

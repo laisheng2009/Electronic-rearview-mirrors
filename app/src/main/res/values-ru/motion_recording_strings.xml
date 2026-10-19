@@ -61,6 +61,11 @@
     <string name="motion_archive_all">"Все хранилища"</string>
     <string name="motion_archive_newest">"Сначала новые"</string>
     <string name="motion_archive_oldest">"Сначала старые"</string>
+    <string name="motion_archive_all_short">"Все"</string>
+    <string name="motion_archive_multiselect">"Выбрать несколько записей"</string>
+    <string name="motion_archive_selected">"Выбрано: %1$d"</string>
+    <string name="motion_archive_count">"Записей: %1$d"</string>
+    <string name="motion_archive_thumbnail_unavailable">"Предпросмотр недоступен"</string>
     <string name="motion_archive_empty">"Для этой даты и фильтра нет записей движения."</string>
     <string name="motion_archive_no_storage">"Нет подключённого хранилища архива. Подключите его для записи и просмотра видео."</string>
     <string name="motion_archive_unavailable">"Эта запись сейчас недоступна."</string>
@@ -74,6 +79,7 @@
     <string name="motion_archive_recording">"Записывается"</string>
     <string name="motion_archive_interrupted">"Прервано"</string>
     <string name="motion_archive_unknown">"Статус неизвестен"</string>
+    <string name="motion_archive_protected_short">"Защищено"</string>
     <string name="motion_archive_protected">"Защищённые и текущие файлы нельзя удалить."</string>
     <string name="motion_audio_permission_denied">"Для записи звука в салоне нужен доступ к микрофону."</string>
     <string name="motion_date">"Фильтр по дате"</string>
@@ -89,11 +95,12 @@
     <string name="motion_archive_to">"По"</string>
     <string name="motion_archive_choose">"Выбрать"</string>
     <string name="motion_archive_clear_range">"Очистить диапазон"</string>
-    <string name="motion_archive_range_incomplete">"Чтобы применить диапазон даты и времени, выберите начало и конец."</string>
-    <string name="motion_archive_range_invalid">"Начало должно быть раньше конца."</string>
+    <string name="motion_archive_range_incomplete">"Выберите обе даты диапазона."</string>
+    <string name="motion_archive_range_invalid">"Конечная дата не может быть раньше начальной."</string>
     <string name="motion_player_fullscreen">"На весь экран"</string>
     <string name="motion_player_windowed">"Выйти из полноэкранного режима"</string>
     <string name="motion_player_error">"Не удалось воспроизвести эту запись."</string>
+    <string name="motion_player_composition">"Композиция"</string>
     <string name="motion_storage_ready">"Готово"</string>
     <string name="motion_storage_numbers_unknown">"Ёмкость и использование недоступны."</string>
     <string name="motion_storage_unallocated">"Нераспределённое"</string>

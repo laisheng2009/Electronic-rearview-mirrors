@@ -5,6 +5,12 @@ import java.util.List;
 /** Pure timestamp policy shared by the real encoder loop and JVM tests. */
 final class MotionRecorderTimeline {
     static final long SEGMENT_MILLIS = 120_000L;
+    static final long MERGE_HEADROOM_MILLIS = 2_000L;
+
+    interface Sample {
+        int track();
+        long elapsedUs();
+    }
 
     private MotionRecorderTimeline() { }
 
@@ -24,6 +30,37 @@ final class MotionRecorderTimeline {
     static long finishDeadline(long eventElapsedMs, int afterSeconds) {
         int bounded = Math.max(1, Math.min(30, afterSeconds));
         return eventElapsedMs + bounded * 1000L;
+    }
+
+    static long eventWindowStart(long eventElapsedMs, int beforeSeconds) {
+        return Math.max(0L, eventElapsedMs - Math.max(0, Math.min(30, beforeSeconds)) * 1000L);
+    }
+
+    static boolean windowsOverlap(long firstStartMs, long firstEndMs,
+            long secondStartMs, long secondEndMs) {
+        return firstStartMs <= secondEndMs && secondStartMs <= firstEndMs;
+    }
+
+    static long mergeCloseDeadline(long contentEndMs, int beforeSeconds) {
+        long preRollMs = Math.max(0, Math.min(30, beforeSeconds)) * 1000L;
+        long waitMs = preRollMs + MERGE_HEADROOM_MILLIS;
+        return contentEndMs > Long.MAX_VALUE - waitMs ? Long.MAX_VALUE : contentEndMs + waitMs;
+    }
+
+    static long firstVideoAtOrAfter(List<? extends Sample> samples, int videoTrack, long deadlineUs) {
+        long boundary = Long.MAX_VALUE;
+        for (Sample sample : samples) {
+            if (sample.track() == videoTrack && sample.elapsedUs() >= deadlineUs)
+                boundary = Math.min(boundary, sample.elapsedUs());
+        }
+        return boundary;
+    }
+
+    static boolean shouldAppendSample(int track, long elapsedUs, int videoTrack, int audioTrack,
+            long lastVideoUs, long lastAudioUs, long throughUs) {
+        if (elapsedUs > throughUs) return false;
+        if (track == videoTrack) return elapsedUs > lastVideoUs;
+        return track == audioTrack && elapsedUs > lastAudioUs;
     }
 
     static boolean postRollRecorded(long lastVideoMs, long deadlineMs) {

@@ -2,7 +2,6 @@ package com.byd.extend.ui.motion
 
 import android.Manifest
 import android.app.DatePickerDialog
-import android.app.TimePickerDialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -10,22 +9,26 @@ import android.os.Build
 import android.os.LocaleList
 import android.util.Log
 import android.view.ContextThemeWrapper
-import android.widget.MediaController
 import android.widget.Toast
-import android.widget.VideoView
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -42,6 +45,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -58,12 +62,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogWindowProvider
@@ -84,8 +91,8 @@ import com.byd.extend.MotionRuntime
 import com.byd.extend.AppLanguage
 import com.byd.extend.R
 import com.byd.extend.ui.ActionButton as ProductionActionButton
-import com.byd.extend.ui.ChoiceField
 import com.byd.extend.ui.NumericSetting
+import com.byd.extend.ui.ChoiceField
 import com.byd.extend.ui.Segmented
 import com.byd.extend.ui.Section
 import com.byd.extend.ui.SwitchLine
@@ -102,7 +109,6 @@ import kotlinx.coroutines.withContext
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -621,6 +627,7 @@ private fun DrawScope.motionHatch(color: Color, left: Float, right: Float) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MotionArchiveDialog(
     library: MotionMediaLibrary,
@@ -633,6 +640,8 @@ private fun MotionArchiveDialog(
     val context = LocalContext.current
     val locale = motionLocale(context)
     val zone = ZoneId.systemDefault()
+    val thumbnailLoader = remember(context) { MotionThumbnailLoader(context.applicationContext) }
+    DisposableEffect(thumbnailLoader) { onDispose { thumbnailLoader.close() } }
     val pickerContext = remember(context, locale) {
         ContextThemeWrapper(context, context.theme).apply {
             applyOverrideConfiguration(Configuration().apply { setLocales(LocaleList(locale)) })
@@ -640,34 +649,61 @@ private fun MotionArchiveDialog(
     }
     var month by remember { mutableStateOf(YearMonth.now()) }
     var selectedDate by remember { mutableStateOf<LocalDate?>(null) }
-    var rangeFrom by remember { mutableStateOf<LocalDateTime?>(null) }
-    var rangeTo by remember { mutableStateOf<LocalDateTime?>(null) }
+    var rangeFrom by remember { mutableStateOf<LocalDate?>(null) }
+    var rangeTo by remember { mutableStateOf<LocalDate?>(null) }
     var monthDays by remember { mutableStateOf(emptyList<MotionMediaLibrary.Day>()) }
     var entries by remember { mutableStateOf(emptyList<MotionMediaLibrary.Entry>()) }
     var stats by remember { mutableStateOf(initialStats) }
-    var volumeId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedVolumeId by rememberSaveable { mutableStateOf<String?>(null) }
     var sort by rememberSaveable { mutableIntStateOf(0) }
     var selectedForDelete by remember { mutableStateOf(emptySet<String>()) }
     var confirmDelete by remember { mutableStateOf(false) }
     var playerEntry by remember { mutableStateOf<MotionMediaLibrary.Entry?>(null) }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
     var loadFailed by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableIntStateOf(0) }
+    val gridState = rememberLazyGridState()
     var deleteResult by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<List<MotionMediaLibrary.Entry>?>(null) }
     var pendingDeletePermission by remember { mutableStateOf<List<MotionMediaLibrary.Entry>?>(null) }
     val rangeIncomplete = (rangeFrom == null) != (rangeTo == null)
-    val rangeBounds = if (rangeFrom != null && rangeTo != null) motionArchiveTimeRange(rangeFrom!!, rangeTo!!, zone) else null
+    val rangeBounds = if (rangeFrom != null && rangeTo != null) motionArchiveDateRange(rangeFrom!!, rangeTo!!, zone) else null
     val rangeInvalid = rangeFrom != null && rangeTo != null && rangeBounds == null
     val rangeFormatter = remember(locale, zone) {
-        DateTimeFormatter.ofPattern("d MMM yyyy · HH:mm", locale)
+        DateTimeFormatter.ofPattern("dd.MM.yyyy", locale)
     }
+    val availableVolumes = stats?.volumes.orEmpty().filter { it.mounted }
+    val volumeLabels = availableVolumes.map { volume ->
+        when {
+            volume.primary -> strings.motionText(R.string.tablet)
+            volume.label.isNotBlank() -> volume.label
+            volume.removable -> strings.motionText(R.string.motion_storage_sd)
+            else -> volume.id
+        }
+    }
+    val duplicateVolumeLabels = volumeLabels.groupingBy { it }.eachCount()
+    val storageFilterOptions = buildList {
+        add(null to strings.motionText(R.string.motion_archive_all_short))
+        availableVolumes.forEachIndexed { index, volume ->
+            val label = volumeLabels[index]
+            val uniqueLabel = if ((duplicateVolumeLabels[label] ?: 0) > 1)
+                "$label · ${volume.id.takeLast(4)}" else label
+            add(volume.id to uniqueLabel)
+        }
+    }
+    val volumeId = selectedVolumeId?.takeIf { selectedId -> availableVolumes.any { it.id == selectedId } }
+    val storageFilterUnavailable = selectedVolumeId != null && volumeId == null
+    SideEffect {
+        if (storageFilterUnavailable) selectedVolumeId = null
+    }
+    val selectedStorageFilter = storageFilterOptions.indexOfFirst { it.first == volumeId }.coerceAtLeast(0)
     val dayFormatter = remember(locale) { DateTimeFormatter.ofPattern("d MMM yyyy", locale) }
     var datePicker by remember { mutableStateOf<DatePickerDialog?>(null) }
-    var timePicker by remember { mutableStateOf<TimePickerDialog?>(null) }
     DisposableEffect(Unit) {
-        onDispose { datePicker?.dismiss(); timePicker?.dismiss() }
+        onDispose { datePicker?.dismiss() }
     }
+    BackHandler(enabled = selectionMode) { selectionMode = false; selectedForDelete = emptySet() }
 
     val legacyDeletePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val chosen = pendingDeletePermission
@@ -678,19 +714,13 @@ private fun MotionArchiveDialog(
     }
 
     fun showRangePicker(isStart: Boolean) {
-        val fallback = if (isStart) {
-            selectedDate?.atStartOfDay() ?: month.atDay(1).atStartOfDay()
-        } else {
-            selectedDate?.plusDays(1)?.atStartOfDay() ?: month.plusMonths(1).atDay(1).atStartOfDay()
-        }
+        val fallback = selectedDate ?: month.atDay(1)
         val initial = (if (isStart) rangeFrom else rangeTo) ?: fallback
         datePicker = DatePickerDialog(pickerContext, { _, year, monthIndex, day ->
-            val date = LocalDate.of(year, monthIndex + 1, day)
-            timePicker = TimePickerDialog(pickerContext, { _, hour, minute ->
-                val chosen = date.atTime(hour, minute)
-                selectedDate = null
-                if (isStart) rangeFrom = chosen else rangeTo = chosen
-            }, initial.hour, initial.minute, true).also { it.show() }
+            val chosen = LocalDate.of(year, monthIndex + 1, day)
+            selectedDate = null
+            month = YearMonth.from(chosen)
+            if (isStart) rangeFrom = chosen else rangeTo = chosen
         }, initial.year, initial.monthValue - 1, initial.dayOfMonth).also { it.show() }
     }
     LaunchedEffect(library) {
@@ -710,7 +740,11 @@ private fun MotionArchiveDialog(
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { loadFailed = true }
     }
-    LaunchedEffect(month, volumeId, sort, refreshKey) {
+    LaunchedEffect(month, volumeId, storageFilterUnavailable, sort, refreshKey) {
+        if (storageFilterUnavailable) {
+            monthDays = emptyList()
+            return@LaunchedEffect
+        }
         val bounds = motionArchiveBounds(month, null, null, null, zone) ?: return@LaunchedEffect
         try {
             monthDays = withContext(Dispatchers.IO) {
@@ -721,12 +755,13 @@ private fun MotionArchiveDialog(
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { loadFailed = true }
     }
-    LaunchedEffect(month, selectedDate, rangeFrom, rangeTo, volumeId, sort, refreshKey) {
+    LaunchedEffect(month, selectedDate, rangeFrom, rangeTo, volumeId, storageFilterUnavailable, sort, refreshKey) {
         loading = true
+        entries = emptyList()
         val bounds = motionArchiveBounds(month, selectedDate, rangeFrom, rangeTo, zone)
-        if (bounds == null) {
-            entries = emptyList()
+        if (bounds == null || storageFilterUnavailable) {
             selectedForDelete = emptySet()
+            loadFailed = false
             loading = false
             return@LaunchedEffect
         }
@@ -738,7 +773,7 @@ private fun MotionArchiveDialog(
             selectedForDelete = selectedForDelete.intersect(entries.filter(::canDelete).map { it.contentUri.toString() }.toSet())
             loadFailed = false
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { loadFailed = true; entries = emptyList() }
+        catch (_: Exception) { loadFailed = true; entries = emptyList(); selectedForDelete = emptySet() }
         finally { loading = false }
     }
     LaunchedEffect(pendingDelete) {
@@ -756,7 +791,16 @@ private fun MotionArchiveDialog(
         finally { pendingDelete = null }
     }
 
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    val deletableIds = if (loading) emptySet() else entries.filter(::canDelete)
+        .map { it.contentUri.toString() }.toSet()
+    val visibleSelection = selectedForDelete.intersect(deletableIds)
+
+    Dialog(onDismissRequest = {
+        if (selectionMode) {
+            selectionMode = false
+            selectedForDelete = emptySet()
+        } else onClose()
+    }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.fillMaxSize(.97f).clip(RoundedCornerShape(10.dp)).background(colors.surface)
             .border(1.dp, colors.borderStrong, RoundedCornerShape(10.dp)).padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -769,22 +813,25 @@ private fun MotionArchiveDialog(
                 ActionButton(strings.motionText(R.string.motion_close), colors = colors, onClick = onClose)
             }
             BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
-                val calendarWidth = minOf(280.dp, maxWidth / 3)
+                val calendarWidth = minOf(196.dp, maxWidth * .233f)
+                val columns = if (maxWidth - calendarWidth >= 780.dp) 3 else 2
                 Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Column(Modifier.width(calendarWidth).fillMaxHeight().verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.width(calendarWidth).fillMaxHeight(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         CalendarPicker(month, selectedDate, monthDays.map { it.date }.toSet(), locale, colors, strings,
                             onMonth = { month = it; selectedDate = null; rangeFrom = null; rangeTo = null },
                             onDate = { selectedDate = it; rangeFrom = null; rangeTo = null })
                         Text(strings.motionText(R.string.motion_archive_days_hint), color = colors.muted, fontSize = 12.sp)
                         ActionButton(strings.motionText(R.string.motion_archive_month), colors = colors,
-                            modifier = Modifier.fillMaxWidth()) { selectedDate = null; rangeFrom = null; rangeTo = null }
-                        ActionButton("${strings.motionText(R.string.motion_archive_from)}: ${rangeFrom?.format(rangeFormatter) ?: "—"}",
-                            colors = colors, modifier = Modifier.fillMaxWidth(), maxLines = 2) { showRangePicker(true) }
-                        ActionButton("${strings.motionText(R.string.motion_archive_to)}: ${rangeTo?.format(rangeFormatter) ?: "—"}",
-                            colors = colors, modifier = Modifier.fillMaxWidth(), maxLines = 2) { showRangePicker(false) }
+                            modifier = Modifier.fillMaxWidth(), height = 36.dp) { selectedDate = null; rangeFrom = null; rangeTo = null }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ActionButton("${strings.motionText(R.string.motion_archive_from)}\n${rangeFrom?.format(rangeFormatter) ?: "—"}",
+                                colors = colors, modifier = Modifier.weight(1f), height = 48.dp, maxLines = 2) { showRangePicker(true) }
+                            ActionButton("${strings.motionText(R.string.motion_archive_to)}\n${rangeTo?.format(rangeFormatter) ?: "—"}",
+                                colors = colors, modifier = Modifier.weight(1f), height = 48.dp, maxLines = 2) { showRangePicker(false) }
+                        }
                         ActionButton(strings.motionText(R.string.motion_archive_clear_range), colors = colors,
-                            modifier = Modifier.fillMaxWidth(), enabled = rangeFrom != null || rangeTo != null) {
+                            modifier = Modifier.fillMaxWidth(), height = 36.dp, enabled = rangeFrom != null || rangeTo != null) {
                             rangeFrom = null; rangeTo = null
                         }
                         if (rangeIncomplete || rangeInvalid) Text(strings.motionText(
@@ -792,19 +839,29 @@ private fun MotionArchiveDialog(
                             color = colors.yellow, fontSize = 12.sp)
                     }
                     Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val volumeChoices: List<Pair<String?, String>> = listOf(null to strings.motionText(R.string.motion_archive_all)) +
-                            stats?.volumes.orEmpty().map { volume ->
-                                val label = when {
-                                    volume.primary -> strings.motionText(R.string.motion_storage_internal)
-                                    volume.removable -> strings.motionText(R.string.motion_storage_sd)
-                                    else -> volume.label
-                                }
-                                volume.id to label
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ChoiceField("", storageFilterOptions.map { it.second }, selectedStorageFilter,
+                                onSelect = { index -> selectedVolumeId = storageFilterOptions.getOrNull(index)?.first },
+                                colors = colors, modifier = Modifier.weight(1f), hudCompact = true)
+                            ActionButton("${strings.motionText(if (sort == 0) R.string.motion_archive_newest
+                                else R.string.motion_archive_oldest)} ${if (sort == 0) "↓" else "↑"}",
+                                colors = colors, modifier = Modifier.width(166.dp), height = 42.dp) { sort = 1 - sort }
+                            ActionButton(if (selectionMode) "✓" else "☷", colors = colors,
+                                modifier = Modifier.width(42.dp).semantics {
+                                    contentDescription = strings.motionText(R.string.motion_archive_multiselect)
+                                    selected = selectionMode
+                                }, primary = selectionMode, height = 42.dp) {
+                                selectionMode = !selectionMode
+                                selectedForDelete = emptySet()
                             }
-                        Segmented(volumeChoices.map { it.second }, volumeChoices.indexOfFirst { it.first == volumeId }.coerceAtLeast(0),
-                            colors, Modifier.fillMaxWidth()) { volumeId = volumeChoices[it].first }
-                        Segmented(listOf(strings.motionText(R.string.motion_archive_newest), strings.motionText(R.string.motion_archive_oldest)),
-                            sort, colors, Modifier.fillMaxWidth()) { sort = it }
+                            ActionButton("", Icons.Outlined.Delete, colors,
+                                Modifier.width(42.dp).semantics {
+                                    contentDescription = strings.motionText(R.string.motion_delete)
+                                }, destructive = true, enabled = visibleSelection.isNotEmpty(), height = 42.dp) {
+                                confirmDelete = true
+                            }
+                        }
                         val activeRange = rangeFrom != null || rangeTo != null
                         val heading = when {
                             rangeBounds != null -> "${rangeFrom!!.format(rangeFormatter)} — ${rangeTo!!.format(rangeFormatter)}"
@@ -813,7 +870,14 @@ private fun MotionArchiveDialog(
                             selectedDate != null -> selectedDate!!.format(dayFormatter)
                             else -> month.format(DateTimeFormatter.ofPattern("LLLL yyyy", locale))
                         }
-                        Text(heading, color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text(heading, Modifier.weight(1f), color = colors.text, fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold, maxLines = 1)
+                            Text(strings.motionText(if (selectionMode) R.string.motion_archive_selected
+                                else R.string.motion_archive_count, if (selectionMode) visibleSelection.size else entries.size),
+                                Modifier.width(130.dp), color = colors.muted, fontSize = 13.sp, textAlign = TextAlign.End)
+                        }
                         selectedDate?.let { date -> monthDays.firstOrNull { it.date == date }?.let { day ->
                             Text(strings.motionText(R.string.motion_archive_events,
                                 day.entryCount, day.yellowEvents, day.redEvents), color = colors.muted, fontSize = 13.sp)
@@ -823,37 +887,42 @@ private fun MotionArchiveDialog(
                             color = colors.yellow, fontSize = 14.sp)
                         if (loadFailed) Text(strings.motionText(R.string.motion_storage_unreadable), color = colors.yellow, fontSize = 14.sp)
                         deleteResult?.let { Text(it, color = colors.muted, fontSize = 12.sp) }
-                        if (selectedForDelete.isNotEmpty()) {
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text(strings.motionText(R.string.motion_archive_protected), Modifier.weight(1f),
-                                    color = colors.muted, fontSize = 12.sp)
-                                ActionButton(strings.motionText(R.string.motion_delete), Icons.Outlined.Delete, colors,
-                                    destructive = true) { confirmDelete = true }
-                            }
-                        }
                         if (entries.isEmpty()) {
                             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                                 Text(when {
                                     loading -> strings.motionText(R.string.motion_storage_loading)
                                     rangeIncomplete -> strings.motionText(R.string.motion_archive_range_incomplete)
                                     rangeInvalid -> strings.motionText(R.string.motion_archive_range_invalid)
+                                    loadFailed -> strings.motionText(R.string.motion_storage_unreadable)
                                     else -> strings.motionText(R.string.motion_archive_empty)
                                 }, color = colors.muted, fontSize = 15.sp, textAlign = TextAlign.Center)
                             }
-                        } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        } else LazyVerticalGrid(GridCells.Fixed(columns), Modifier.weight(1f).fillMaxWidth(),
+                            state = gridState, horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             items(entries, key = { it.contentUri.toString() }) { entry ->
-                                MotionArchiveRow(entry, selectedForDelete.contains(entry.contentUri.toString()), colors, strings,
-                                    onPlay = {
-                                        if (entry.available) playerEntry = entry
-                                        else Toast.makeText(context, strings.motionText(R.string.motion_archive_unavailable), Toast.LENGTH_SHORT).show()
-                                    }, onToggleDelete = {
-                                        val id = entry.contentUri.toString()
-                                        selectedForDelete = if (id in selectedForDelete) selectedForDelete - id else selectedForDelete + id
-                                    }, locale = locale, zone = zone)
+                                val id = entry.contentUri.toString()
+                                val volume = stats?.volumes?.firstOrNull { it.id == entry.volumeId }
+                                MotionArchiveCard(entry, id in visibleSelection, selectionMode, thumbnailLoader,
+                                    volume?.removable == true,
+                                    colors, strings, locale, zone,
+                                    onClick = {
+                                        if (selectionMode) {
+                                            if (canDelete(entry)) selectedForDelete = if (id in selectedForDelete)
+                                                selectedForDelete - id else selectedForDelete + id
+                                        } else if (entry.available) playerEntry = entry
+                                        else Toast.makeText(context, strings.motionText(R.string.motion_archive_unavailable),
+                                            Toast.LENGTH_SHORT).show()
+                                    }, onLongClick = {
+                                        if (canDelete(entry)) {
+                                            selectionMode = true
+                                            selectedForDelete = selectedForDelete + id
+                                        }
+                                    })
                             }
                         }
                         if (confirmDelete) {
-                            val chosen = entries.filter { it.contentUri.toString() in selectedForDelete && canDelete(it) }
+                            val chosen = entries.filter { it.contentUri.toString() in visibleSelection && canDelete(it) }
                             Dialog(onDismissRequest = { confirmDelete = false }) {
                                 Column(Modifier.fillMaxWidth(.85f).clip(RoundedCornerShape(10.dp)).background(colors.surface)
                                     .border(1.dp, colors.borderStrong, RoundedCornerShape(10.dp)).padding(18.dp),
@@ -907,7 +976,7 @@ private fun CalendarPicker(
     listOf(month.year.toString() to 12L, month.month.getDisplayName(TextStyle.FULL_STANDALONE, locale) to 1L)
         .forEachIndexed { index, (heading, step) ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                ActionButton("‹", colors = colors, height = 40.dp, modifier = Modifier.width(40.dp)
+                ActionButton("‹", colors = colors, height = 36.dp, modifier = Modifier.width(40.dp)
                     .semantics { contentDescription = strings.motionText(
                         if (index == 0) R.string.motion_archive_prev_year else R.string.motion_archive_prev_month) }) {
                     onMonth(month.minusMonths(step))
@@ -915,7 +984,7 @@ private fun CalendarPicker(
                 Text(if (index == 0) yearFormatter.format(month.atDay(1)) else heading,
                     Modifier.weight(1f), color = colors.text, fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
-                ActionButton("›", colors = colors, height = 40.dp, modifier = Modifier.width(40.dp)
+                ActionButton("›", colors = colors, height = 36.dp, modifier = Modifier.width(40.dp)
                     .semantics { contentDescription = strings.motionText(
                         if (index == 0) R.string.motion_archive_next_year else R.string.motion_archive_next_month) }) {
                     onMonth(month.plusMonths(step))
@@ -933,7 +1002,7 @@ private fun CalendarPicker(
             week.forEach { date ->
                 val active = date != null && date in activeDays
                 val chosen = date != null && date == selectedDate
-                Column(Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(5.dp))
+                Column(Modifier.weight(1f).height(32.dp).clip(RoundedCornerShape(5.dp))
                     .background(if (chosen) colors.accent else Color.Transparent)
                     .then(if (date == null || !active) Modifier else Modifier.clickable(role = Role.Button) { onDate(date) }
                         .semantics { contentDescription = date.format(DateTimeFormatter.ISO_LOCAL_DATE); selected = chosen }),
@@ -950,18 +1019,22 @@ private fun CalendarPicker(
 }
 
 @Composable
-private fun MotionArchiveRow(
+@OptIn(ExperimentalFoundationApi::class)
+private fun MotionArchiveCard(
     entry: MotionMediaLibrary.Entry,
     selected: Boolean,
+    selectionMode: Boolean,
+    thumbnailLoader: MotionThumbnailLoader,
+    removableVolume: Boolean,
     colors: UiPalette,
     strings: UiStrings,
-    onPlay: () -> Unit,
-    onToggleDelete: () -> Unit,
     locale: Locale,
     zone: ZoneId,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     val time = remember(entry.recordedAtMillis, locale, zone) {
-        DateTimeFormatter.ofPattern("EEE, d MMM yyyy · HH:mm", locale)
+        DateTimeFormatter.ofPattern("dd.MM.yyyy · HH:mm", locale)
             .withZone(zone).format(java.time.Instant.ofEpochMilli(entry.recordedAtMillis))
     }
     val status = when (entry.status) {
@@ -970,25 +1043,48 @@ private fun MotionArchiveRow(
         MotionMediaLibrary.Status.INTERRUPTED -> R.string.motion_archive_interrupted
         else -> R.string.motion_archive_unknown
     }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(colors.panelAlt)
-        .border(1.dp, colors.border, RoundedCornerShape(7.dp)).padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Column(Modifier.weight(1f).clickable(onClick = onPlay)) {
-            Text(entry.title.ifBlank { time }, color = colors.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                maxLines = 1)
-            Text("$time · ${formatDuration(entry.durationMs)} · ${formatSize(entry.sizeBytes)} · ${strings.motionText(status)}",
-                color = colors.muted, fontSize = 12.sp, maxLines = 2)
-            if (entry.markers.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                val yellow = entry.markers.count { it.level == 1 }
-                val red = entry.markers.count { it.level == 2 }
-                if (yellow > 0) Text("${strings.motionText(R.string.motion_archive_yellow)}: $yellow",
-                    color = colors.yellow, fontSize = 11.sp)
-                if (red > 0) Text("${strings.motionText(R.string.motion_archive_red)}: $red",
-                    color = colors.red, fontSize = 11.sp)
+    val deletable = canDelete(entry)
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp))
+        .background(if (selected) colors.active else colors.panelAlt)
+        .border(if (selected) 2.dp else 1.dp, if (selected) colors.accent else colors.border, RoundedCornerShape(7.dp))
+        .combinedClickable(enabled = !selectionMode || deletable,
+            role = if (selectionMode && deletable) Role.Checkbox else Role.Button,
+            onLongClickLabel = strings.motionText(R.string.motion_archive_multiselect),
+            onClick = onClick, onLongClick = onLongClick)
+        .semantics(mergeDescendants = true) {
+            if (selectionMode && deletable) toggleableState = ToggleableState(selected) else this.selected = selected
+            contentDescription = "${entry.title.ifBlank { time }}, $time, ${formatDuration(entry.durationMs)}, " +
+                strings.motionText(status) + ", " + strings.motionText(
+                    if (removableVolume) R.string.motion_storage_sd else R.string.motion_storage_internal) +
+                if (entry.protectedFile) ", ${strings.motionText(R.string.motion_archive_protected_short)}" else ""
+        }.padding(8.dp)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(5.dp))) {
+            MotionArchiveThumbnail(entry, thumbnailLoader, colors, strings, Modifier.fillMaxSize())
+            Text(strings.motionText(status), Modifier.align(Alignment.TopStart).padding(4.dp)
+                .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(6.dp)).padding(4.dp),
+                color = Color.White, fontSize = 11.sp, maxLines = 1)
+            if (entry.protectedFile) {
+                Text(strings.motionText(R.string.motion_archive_protected_short), Modifier.align(Alignment.TopEnd)
+                    .padding(4.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(6.dp)).padding(4.dp),
+                    color = colors.yellow, fontSize = 11.sp, maxLines = 1)
+            } else if (selectionMode && deletable) {
+                Text(if (selected) "☑" else "☐", Modifier.align(Alignment.TopEnd)
+                    .padding(4.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(6.dp)).padding(4.dp),
+                    color = Color.White, fontSize = 22.sp, lineHeight = 24.sp)
+            } else if (!selectionMode && entry.available) {
+                Text("▶", Modifier.align(Alignment.Center).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(6.dp))
+                    .padding(8.dp), color = Color.White, fontSize = 22.sp)
             }
         }
-        ActionButton(if (selected) "✓" else "□", colors = colors, modifier = Modifier.size(42.dp),
-            enabled = canDelete(entry), destructive = selected, onClick = onToggleDelete)
+        Row(Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(time, Modifier.weight(1f), color = colors.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(formatDuration(entry.durationMs), color = colors.muted, fontSize = 13.sp)
+            Image(painterResource(if (removableVolume) R.drawable.ic_archive_sd_card else R.drawable.ic_archive_tablet),
+                contentDescription = strings.motionText(if (removableVolume) R.string.motion_storage_sd else R.string.motion_storage_internal),
+                modifier = Modifier.size(20.dp), colorFilter = ColorFilter.tint(colors.muted))
+        }
     }
 }
 
@@ -1001,15 +1097,47 @@ private fun MotionPlayerDialog(
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
-    var video by remember(entry.contentUri) { mutableStateOf<VideoView?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val hostState = remember(entry.contentUri) { mutableStateOf<MotionTexturePlayer?>(null) }
+    var lifecycleActive by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
     var position by remember(entry.contentUri) { mutableIntStateOf(0) }
+    var playerDuration by remember(entry.contentUri) { mutableLongStateOf(entry.durationMs.coerceAtLeast(1L)) }
+    var selectedDirection by rememberSaveable(entry.contentUri.toString()) { mutableIntStateOf(-1) }
     var fullScreen by rememberSaveable(entry.contentUri.toString()) { mutableStateOf(false) }
     var playbackFailed by remember(entry.contentUri) { mutableStateOf(false) }
-    val duration = entry.durationMs.coerceAtLeast(1L)
-    DisposableEffect(entry.contentUri) { onDispose { video?.stopPlayback() } }
+    val duration = playerDuration.coerceAtLeast(1L)
+    val cameraLabels = listOf(R.string.motion_player_composition, R.string.motion_camera_front,
+        R.string.motion_camera_rear, R.string.motion_camera_left, R.string.motion_camera_right)
+    val canCrop = remember(entry.cameraOrder?.toList()) {
+        (0..3).map { direction ->
+            com.byd.extend.MotionCompositionLayout.cameraRectForDirection(
+                direction, entry.cameraOrder, 1920, 1080) != null
+        }
+    }
+    DisposableEffect(hostState) { onDispose { hostState.value?.release() } }
+    DisposableEffect(lifecycleOwner, hostState) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    lifecycleActive = true
+                    hostState.value?.setPlaybackAllowed(true)
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    lifecycleActive = false
+                    hostState.value?.setPlaybackAllowed(false)
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        hostState.value?.setPlaybackAllowed(lifecycleActive)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     LaunchedEffect(entry.contentUri) {
         while (isActive) {
-            position = video?.currentPosition?.coerceAtLeast(0) ?: 0
+            position = hostState.value?.currentPositionOrZero() ?: 0
             delay(250)
         }
     }
@@ -1034,39 +1162,55 @@ private fun MotionPlayerDialog(
                     onClick = { fullScreen = !fullScreen })
                 ActionButton(strings.motionText(R.string.motion_close), colors = colors, onClick = onClose)
             }
-            AndroidView(factory = { viewContext ->
-                VideoView(viewContext).also { player ->
-                    val controller = MediaController(viewContext)
-                    controller.setAnchorView(player)
-                    player.setMediaController(controller)
-                    player.setOnPreparedListener { it.isLooping = false; player.start() }
-                    player.setOnErrorListener { _, what, extra ->
-                        Log.e(MOTION_PLAYER_TAG, "Playback failed for ${entry.contentUri}: what=$what extra=$extra")
-                        playbackFailed = true
-                        player.stopPlayback()
-                        video = null
-                        Toast.makeText(context, strings.motionText(R.string.motion_player_error), Toast.LENGTH_LONG).show()
-                        true
-                    }
-                    video = player
-                    try {
-                        player.setVideoURI(entry.contentUri)
-                    } catch (error: RuntimeException) {
-                        Log.e(MOTION_PLAYER_TAG, "Could not open Motion media ${entry.contentUri}", error)
-                        playbackFailed = true
-                        player.stopPlayback()
-                        video = null
-                        Toast.makeText(context, strings.motionText(R.string.motion_player_error), Toast.LENGTH_LONG).show()
+            Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.width(128.dp).fillMaxHeight().selectableGroup(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    cameraLabels.forEachIndexed { index, label ->
+                        val direction = index - 1
+                        val enabled = index == 0 || canCrop.getOrElse(direction) { false }
+                        val chosen = selectedDirection == direction
+                        Column(Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(7.dp))
+                            .background(if (chosen) colors.active else colors.panelAlt)
+                            .border(1.dp, if (chosen) colors.accent else colors.border, RoundedCornerShape(7.dp))
+                            .semantics { contentDescription = strings.motionText(label) }
+                            .selectable(chosen, enabled = enabled, role = Role.Tab) { selectedDirection = direction }
+                            .padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center) {
+                            if (direction < 0) CompositionGridGlyph(colors, Modifier.size(28.dp))
+                            else Image(painterResource(MotionDirectionIcon.drawableFor(direction)),
+                                contentDescription = null, modifier = Modifier.size(28.dp))
+                            Text(strings.motionText(label), color = if (enabled) colors.text else colors.muted,
+                                fontSize = 14.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
-            }, modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(6.dp)))
+                key(entry.contentUri) {
+                    AndroidView(factory = { viewContext ->
+                        MotionTexturePlayer(viewContext, entry.contentUri, entry.cameraOrder,
+                            onPrepared = { actualDuration ->
+                                if (actualDuration > 0) playerDuration = actualDuration.toLong()
+                            },
+                            onError = { what, extra ->
+                                Log.e(MOTION_PLAYER_TAG, "Playback failed for ${entry.contentUri}: what=$what extra=$extra")
+                                playbackFailed = true
+                                Toast.makeText(context, strings.motionText(R.string.motion_player_error), Toast.LENGTH_LONG).show()
+                            }).also { host ->
+                            hostState.value = host
+                                host.setPlaybackAllowed(lifecycleActive)
+                            host.showCrop(selectedDirection)
+                        }
+                    }, modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(6.dp)),
+                        update = { it.showCrop(selectedDirection) })
+                }
+            }
             if (playbackFailed) Text(strings.motionText(R.string.motion_player_error),
                 color = colors.yellow, fontSize = 13.sp)
             Canvas(Modifier.fillMaxWidth().height(22.dp).clip(RoundedCornerShape(4.dp))
                 .background(colors.panelAlt).pointerInput(entry.contentUri, duration) {
                     detectTapGestures { point ->
                         val target = (point.x / size.width * duration.toFloat()).toLong().coerceIn(0L, duration)
-                        video?.seekTo(target.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                        hostState.value?.seekTo(target.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
                     }
                 }) {
                 val progressX = size.width * (position.toDouble() / duration).toFloat().coerceIn(0f, 1f)
@@ -1096,6 +1240,19 @@ private fun MotionPlayerDialog(
                 }
                 Text(formatDuration(duration), color = colors.muted, fontSize = 12.sp)
             }
+        }
+    }
+}
+
+@Composable
+private fun CompositionGridGlyph(colors: UiPalette, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val gap = size.minDimension * .12f
+        val tile = (size.minDimension - gap) / 2f
+        for (row in 0..1) for (column in 0..1) {
+            drawRoundRect(colors.text,
+                Offset(column * (tile + gap), row * (tile + gap)), Size(tile, tile),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(tile * .12f))
         }
     }
 }
@@ -1219,6 +1376,3 @@ private fun formatDuration(durationMs: Long): String {
     val seconds = (durationMs / 1000).coerceAtLeast(0)
     return "%d:%02d:%02d".format(Locale.US, seconds / 3600, (seconds / 60) % 60, seconds % 60)
 }
-
-private fun formatSize(bytes: Long): String = "%.1f GB".format(Locale.US,
-    bytes.coerceAtLeast(0).toDouble() / MOTION_GB)

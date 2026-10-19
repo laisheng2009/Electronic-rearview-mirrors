@@ -1,12 +1,15 @@
 package com.byd.extend;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -50,11 +53,12 @@ public final class MotionMediaIndexTest {
         MotionMediaIndex.Record record = new MotionMediaIndex.Record(
                 "content://media/external_primary/video/media/42", "external_primary",
                 "motion_20261017_101112.mp4", "segment-42", 1_797_000_000_000L,
-                57_000L, 1920, 1080, MotionMediaIndex.RECORDING);
+                57_000L, 1920, 1080, MotionMediaIndex.RECORDING, new int[] {2, 0, 3, 1});
         index.put(record);
+        record.cameraOrder[0] = 1;
         assertTrue(index.addMarker(record.uri, new MotionMediaIndex.Marker(58_234L, 1_797_000_001_234L, 1)));
         assertTrue(index.addMarker(record.uri, new MotionMediaIndex.Marker(61_500L, 1_797_000_004_500L, 2)));
-        assertTrue(index.update(record.uri, MotionMediaIndex.COMPLETE, 120_000L, 8_200_000L));
+        assertTrue(index.finishRecording(record.uri, MotionMediaIndex.COMPLETE, 120_000L, 8_200_000L));
 
         MotionMediaIndex reopened = new MotionMediaIndex(indexFile);
         List<MotionMediaIndex.Record> records = reopened.records();
@@ -67,6 +71,7 @@ public final class MotionMediaIndexTest {
         assertEquals(58_234L, saved.markers.get(0).elapsedRealtimeMs);
         assertEquals(1, saved.markers.get(0).level);
         assertEquals(2, saved.markers.get(1).level);
+        assertArrayEquals(new int[] {2, 0, 3, 1}, saved.cameraOrder);
         assertNull(reopened.find("content://media/other/9"));
     }
 
@@ -124,7 +129,7 @@ public final class MotionMediaIndexTest {
         MotionMediaIndex.Record shared = new MotionMediaIndex.Record(
                 "content://media/external_primary/video/media/51", "primary",
                 "Motion_legacy_shared.mp4", "legacy-shared", 1_797_000_000_001L,
-                12_000L, 1920, 1080, MotionMediaIndex.INTERRUPTED);
+                12_000L, 1920, 1080, MotionMediaIndex.INTERRUPTED, new int[] {1, 3, 0, 2});
         shared.durationMs = 9_000L;
         shared.sizeBytes = 123_456L;
         shared.protectedFile = true;
@@ -136,7 +141,7 @@ public final class MotionMediaIndexTest {
         MotionMediaIndex.Record legacyOnly = new MotionMediaIndex.Record(
                 "content://media/external_primary/video/media/52", "primary",
                 "Motion_legacy_only.mp4", "legacy-only", 1_797_000_000_006L,
-                18_000L, 1280, 720, MotionMediaIndex.COMPLETE);
+                18_000L, 1280, 720, MotionMediaIndex.COMPLETE, new int[] {3, 2, 1, 0});
         legacyOnly.durationMs = 7_000L;
         legacyOnly.sizeBytes = 98_765L;
         legacyOnly.markers.add(new MotionMediaIndex.Marker(19_000L, 1_797_000_000_007L, 1));
@@ -179,6 +184,30 @@ public final class MotionMediaIndexTest {
         assertEquals(2, new MotionMediaIndex(sourceFile).records().size());
         assertEquals("legacy-only", afterRepeat.find(legacyOnly.uri).segmentId);
         assertEquals(1, afterRepeat.find(legacyOnly.uri).markers.size());
+        assertArrayEquals(new int[] {3, 2, 1, 0}, afterRepeat.find(legacyOnly.uri).cameraOrder);
+        assertArrayEquals(new int[] {1, 3, 0, 2}, afterRepeat.find(shared.uri).cameraOrder);
+    }
+
+    @Test public void oldOrMalformedCameraOrderKeepsClipWithoutInventingViews() throws Exception {
+        File file = new File(Files.createTempDirectory("motion-index-order-").toFile(), "library.json");
+        MotionMediaIndex index = new MotionMediaIndex(file);
+        MotionMediaIndex.Record record = new MotionMediaIndex.Record(
+                "content://media/external_primary/video/media/62", "primary", "Motion_old.mp4",
+                "old", 5_000L, 1_000L, 1920, 1080, MotionMediaIndex.COMPLETE);
+        index.put(record);
+        assertNull(new MotionMediaIndex(file).find(record.uri).cameraOrder);
+        JSONObject root = new JSONObject(new String(Files.readAllBytes(file.toPath()),
+                java.nio.charset.StandardCharsets.UTF_8));
+        JSONObject row = root.getJSONArray("records").getJSONObject(0);
+        for (String malformed : new String[] {"[0,0,2,3]", "[0,1,2]", "[0,1,2,4]",
+                "[0,1,2,2.5]", "[0,1,2,\"3\"]"}) {
+            row.put("cameraOrder", new JSONArray(malformed));
+            Files.write(file.toPath(), root.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            MotionMediaIndex.Record reopened = new MotionMediaIndex(file).find(record.uri);
+            assertNotNull(reopened);
+            assertEquals("Motion_old.mp4", reopened.name);
+            assertNull(reopened.cameraOrder);
+        }
     }
 
     @Test public void incompleteLegacyMergePersistsRowsWithoutClaimingMigrationComplete() throws Exception {

@@ -61,6 +61,11 @@
     <string name="motion_archive_all">"Усі носії"</string>
     <string name="motion_archive_newest">"Спочатку новіші"</string>
     <string name="motion_archive_oldest">"Спочатку старіші"</string>
+    <string name="motion_archive_all_short">"Усі"</string>
+    <string name="motion_archive_multiselect">"Вибрати кілька записів"</string>
+    <string name="motion_archive_selected">"Вибрано: %1$d"</string>
+    <string name="motion_archive_count">"Записів: %1$d"</string>
+    <string name="motion_archive_thumbnail_unavailable">"Попередній перегляд недоступний"</string>
     <string name="motion_archive_empty">"Для цієї дати та фільтра записів руху немає."</string>
     <string name="motion_archive_no_storage">"Немає змонтованого носія для архіву. Під’єднайте носій, щоб записувати й переглядати відео."</string>
     <string name="motion_archive_unavailable">"Цей запис зараз недоступний."</string>
@@ -74,6 +79,7 @@
     <string name="motion_archive_recording">"Записується"</string>
     <string name="motion_archive_interrupted">"Перервано"</string>
     <string name="motion_archive_unknown">"Невідомий стан"</string>
+    <string name="motion_archive_protected_short">"Захищений"</string>
     <string name="motion_archive_protected">"Захищені та активні файли не можна видаляти."</string>
     <string name="motion_audio_permission_denied">"Для запису звуку салону потрібен дозвіл на мікрофон."</string>
     <string name="motion_date">"Фільтр за датою"</string>
@@ -89,11 +95,12 @@
     <string name="motion_archive_to">"До"</string>
     <string name="motion_archive_choose">"Вибрати"</string>
     <string name="motion_archive_clear_range">"Очистити діапазон"</string>
-    <string name="motion_archive_range_incomplete">"Щоб застосувати діапазон дати й часу, виберіть початок і кінець."</string>
-    <string name="motion_archive_range_invalid">"Початок має передувати кінцю."</string>
+    <string name="motion_archive_range_incomplete">"Оберіть обидві дати проміжку."</string>
+    <string name="motion_archive_range_invalid">"Кінцева дата не може бути раніше початкової."</string>
     <string name="motion_player_fullscreen">"На весь екран"</string>
     <string name="motion_player_windowed">"Вийти з повного екрана"</string>
     <string name="motion_player_error">"Не вдалося відтворити цей запис."</string>
+    <string name="motion_player_composition">"Композиція"</string>
     <string name="motion_storage_ready">"Готово"</string>
     <string name="motion_storage_numbers_unknown">"Місткість і використання недоступні."</string>
     <string name="motion_storage_unallocated">"Нерозподілене"</string>

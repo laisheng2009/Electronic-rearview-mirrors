@@ -139,10 +139,11 @@ public final class MotionMediaLibrary {
         public final List<Marker> markers;
         public final boolean available;
         public final boolean protectedFile;
+        public final int[] cameraOrder;
 
         private Entry(Uri contentUri, String title, String volumeId, long mediaStoreId, String segmentId,
                 long recordedAtMillis, long durationMs, long sizeBytes, Status status,
-                List<Marker> markers, boolean available, boolean protectedFile) {
+                List<Marker> markers, boolean available, boolean protectedFile, int[] cameraOrder) {
             this.contentUri = contentUri;
             this.title = title == null ? "" : title;
             this.volumeId = volumeId;
@@ -155,6 +156,7 @@ public final class MotionMediaLibrary {
             this.markers = Collections.unmodifiableList(markers);
             this.available = available;
             this.protectedFile = protectedFile;
+            this.cameraOrder = MotionMediaIndex.copyCameraOrder(cameraOrder);
         }
     }
 
@@ -334,7 +336,7 @@ public final class MotionMediaLibrary {
             result.add(new Entry(uri, record.name, record.volumeId,
                     storage.mediaStoreId(volume, uri), record.segmentId,
                     record.recordedAtMs, record.durationMs, record.sizeBytes, status, markers,
-                    available, record.protectedFile));
+                    available, record.protectedFile, record.cameraOrder));
         }
         Comparator<Entry> order = Comparator.comparingLong(entry -> entry.recordedAtMillis);
         if (actual.sort == Sort.NEWEST_FIRST) order = order.reversed();
@@ -403,7 +405,8 @@ public final class MotionMediaLibrary {
         return new Entry(uri, row.optString("title", ""), row.getString("volumeId"), mediaStoreId,
                 row.optString("segmentId", ""), row.optLong("recordedAtMillis", 0),
                 row.optLong("durationMs", 0), row.optLong("sizeBytes", 0), entryStatus,
-                markers, row.optBoolean("available", false), row.optBoolean("protectedFile", false));
+                markers, row.optBoolean("available", false), row.optBoolean("protectedFile", false),
+                MotionMediaIndex.readCameraOrder(row.optJSONArray("cameraOrder")));
     }
 
     private static Stats readStats(JSONObject json) throws JSONException {

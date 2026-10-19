@@ -2,9 +2,8 @@ package com.byd.extend.ui.motion
 
 import java.time.DayOfWeek
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.YearMonth
-import java.time.ZoneOffset
+import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -23,31 +22,36 @@ class MotionRecordingModelTest {
         assertTrue(sixWeekMonth.all { it.size == 7 })
     }
 
-    @Test fun archiveBoundsUseHalfOpenDayMonthAndTimeRanges() {
-        val zone = ZoneOffset.UTC
+    @Test fun archiveBoundsUseInclusiveLocalDateRangesAndHalfOpenInstants() {
+        val zone = ZoneId.of("America/New_York")
         val day = LocalDate.of(2026, 10, 18)
         val dayBounds = motionArchiveBounds(YearMonth.from(day), day, null, null, zone)!!
-        assertEquals(day.atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli(), dayBounds.startMillis)
-        assertEquals(day.plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli(), dayBounds.endMillis)
+        assertEquals(day.atStartOfDay(zone).toInstant().toEpochMilli(), dayBounds.startMillis)
+        assertEquals(day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(), dayBounds.endMillis)
 
         val month = motionArchiveBounds(YearMonth.of(2026, 2), null, null, null, zone)!!
-        assertEquals(LocalDate.of(2026, 2, 1).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli(), month.startMillis)
-        assertEquals(LocalDate.of(2026, 3, 1).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli(), month.endMillis)
+        assertEquals(LocalDate.of(2026, 2, 1).atStartOfDay(zone).toInstant().toEpochMilli(), month.startMillis)
+        assertEquals(LocalDate.of(2026, 3, 1).atStartOfDay(zone).toInstant().toEpochMilli(), month.endMillis)
 
-        val range = motionArchiveBounds(YearMonth.of(2026, 2), day,
-            LocalDateTime.of(2026, 2, 3, 10, 15), LocalDateTime.of(2026, 2, 4, 11, 30), zone)!!
-        assertEquals(LocalDateTime.of(2026, 2, 3, 10, 15).toInstant(ZoneOffset.UTC).toEpochMilli(), range.startMillis)
-        assertEquals(LocalDateTime.of(2026, 2, 4, 11, 30).toInstant(ZoneOffset.UTC).toEpochMilli(), range.endMillis)
+        val sameDay = LocalDate.of(2026, 3, 8)
+        val sameDayBounds = motionArchiveBounds(YearMonth.from(sameDay), day, sameDay, sameDay, zone)!!
+        assertEquals(sameDay.atStartOfDay(zone).toInstant().toEpochMilli(), sameDayBounds.startMillis)
+        assertEquals(sameDay.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(), sameDayBounds.endMillis)
+        assertEquals(23 * 60 * 60 * 1000L, sameDayBounds.endMillis - sameDayBounds.startMillis)
+
+        val range = motionArchiveBounds(YearMonth.from(sameDay), day,
+            sameDay.minusDays(1), sameDay.plusDays(1), zone)!!
+        assertEquals(sameDay.minusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(), range.startMillis)
+        assertEquals(sameDay.plusDays(2).atStartOfDay(zone).toInstant().toEpochMilli(), range.endMillis)
+        assertEquals(71 * 60 * 60 * 1000L, range.endMillis - range.startMillis)
     }
 
     @Test fun incompleteOrReversedArchiveRangesDoNotFallBackToMonthOrDay() {
         val month = YearMonth.of(2026, 2)
         val day = LocalDate.of(2026, 2, 8)
-        assertNull(motionArchiveBounds(month, day, LocalDateTime.of(2026, 2, 8, 10, 0), null, ZoneOffset.UTC))
-        assertNull(motionArchiveBounds(month, day,
-            LocalDateTime.of(2026, 2, 8, 12, 0), LocalDateTime.of(2026, 2, 8, 11, 0), ZoneOffset.UTC))
-        assertNull(motionArchiveBounds(month, day,
-            LocalDateTime.of(2026, 2, 8, 12, 0), LocalDateTime.of(2026, 2, 8, 12, 0), ZoneOffset.UTC))
+        val zone = ZoneId.of("UTC")
+        assertNull(motionArchiveBounds(month, day, day, null, zone))
+        assertNull(motionArchiveBounds(month, day, day.plusDays(1), day, zone))
     }
 
     @Test fun recordingStoragePermissionsMatchApiRequirements() {

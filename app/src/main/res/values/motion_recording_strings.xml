@@ -61,6 +61,11 @@
     <string name="motion_archive_all">"All storage"</string>
     <string name="motion_archive_newest">"Newest first"</string>
     <string name="motion_archive_oldest">"Oldest first"</string>
+    <string name="motion_archive_all_short">"All"</string>
+    <string name="motion_archive_multiselect">"Select multiple recordings"</string>
+    <string name="motion_archive_selected">"Selected: %1$d"</string>
+    <string name="motion_archive_count">"Recordings: %1$d"</string>
+    <string name="motion_archive_thumbnail_unavailable">"Preview unavailable"</string>
     <string name="motion_archive_empty">"No Motion recordings are available for this date and filter."</string>
     <string name="motion_archive_no_storage">"No archive storage is mounted. Connect storage to record or browse clips."</string>
     <string name="motion_archive_unavailable">"This recording is currently unavailable."</string>
@@ -74,6 +79,7 @@
     <string name="motion_archive_recording">"Recording"</string>
     <string name="motion_archive_interrupted">"Interrupted"</string>
     <string name="motion_archive_unknown">"Status unknown"</string>
+    <string name="motion_archive_protected_short">"Protected"</string>
     <string name="motion_archive_protected">"Protected or in-progress files cannot be deleted."</string>
     <string name="motion_audio_permission_denied">"Microphone permission is required to record cabin audio."</string>
     <string name="motion_date">"Date filter"</string>
@@ -89,11 +95,12 @@
     <string name="motion_archive_to">"To"</string>
     <string name="motion_archive_choose">"Choose"</string>
     <string name="motion_archive_clear_range">"Clear range"</string>
-    <string name="motion_archive_range_incomplete">"Choose both start and end to apply a date/time range."</string>
-    <string name="motion_archive_range_invalid">"The start must be earlier than the end."</string>
+    <string name="motion_archive_range_incomplete">"Choose both dates to apply a range."</string>
+    <string name="motion_archive_range_invalid">"The end date cannot precede the start date."</string>
     <string name="motion_player_fullscreen">"Full screen"</string>
     <string name="motion_player_windowed">"Exit full screen"</string>
     <string name="motion_player_error">"This recording could not be played."</string>
+    <string name="motion_player_composition">"Composition"</string>
     <string name="motion_storage_ready">"Ready"</string>
     <string name="motion_storage_numbers_unknown">"Capacity and usage are unavailable."</string>
     <string name="motion_storage_unallocated">"Unallocated"</string>

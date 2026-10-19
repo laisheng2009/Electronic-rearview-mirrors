@@ -2,7 +2,6 @@ package com.byd.extend.ui.motion
 
 import java.time.DayOfWeek
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.YearMonth
 import java.time.ZoneId
 
@@ -21,21 +20,22 @@ internal fun motionStoragePermissionsGranted(
     writeGranted: Boolean,
 ) = (!needs.read || readGranted) && (!needs.write || writeGranted)
 
-internal fun motionArchiveTimeRange(from: LocalDateTime, to: LocalDateTime, zone: ZoneId): MotionArchiveBounds? {
-    val start = from.atZone(zone).toInstant()
-    val end = to.atZone(zone).toInstant()
+internal fun motionArchiveDateRange(from: LocalDate, to: LocalDate, zone: ZoneId): MotionArchiveBounds? {
+    if (from.isAfter(to)) return null
+    val start = from.atStartOfDay(zone).toInstant()
+    val end = to.plusDays(1).atStartOfDay(zone).toInstant()
     return if (start.isBefore(end)) MotionArchiveBounds(start.toEpochMilli(), end.toEpochMilli()) else null
 }
 
 internal fun motionArchiveBounds(
     month: YearMonth,
     selectedDate: LocalDate?,
-    from: LocalDateTime?,
-    to: LocalDateTime?,
+    from: LocalDate?,
+    to: LocalDate?,
     zone: ZoneId,
 ): MotionArchiveBounds? = when {
     (from == null) != (to == null) -> null
-    from != null && to != null -> motionArchiveTimeRange(from, to, zone)
+    from != null && to != null -> motionArchiveDateRange(from, to, zone)
     selectedDate != null -> MotionArchiveBounds(
         selectedDate.atStartOfDay(zone).toInstant().toEpochMilli(),
         selectedDate.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(),

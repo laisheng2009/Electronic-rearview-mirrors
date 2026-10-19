@@ -32,6 +32,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -135,8 +136,14 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private long finishDeadlineMs = Long.MIN_VALUE;
     private long outputRestartUntilElapsedMs = Long.MIN_VALUE;
     private String outputRestartVolumeId;
-    private long wallAnchorMs;
-    private long elapsedAnchorMs;
+    private MotionFrameTimestamp frameTimestamp;
+    private long eventWindowStartMs = Long.MIN_VALUE;
+    private long mergeCloseDeadlineMs = Long.MIN_VALUE;
+    private long chainLastVideoElapsedUs = Long.MIN_VALUE;
+    private long chainLastAudioElapsedUs = Long.MIN_VALUE;
+    private boolean bufferedTailUnavailable;
+    private boolean mergeWaitAbandoned;
+    private volatile boolean finishRequested;
     private long videoPtsOffsetUs = Long.MIN_VALUE;
     private long audioPtsOffsetUs = Long.MIN_VALUE;
     private volatile long lastVideoElapsedUs = Long.MIN_VALUE;
@@ -221,6 +228,13 @@ public final class MotionVideoRecorder implements AutoCloseable {
             ringBytes = 0;
             latestRingElapsedUs = Long.MIN_VALUE;
             finishDeadlineMs = Long.MIN_VALUE;
+            eventWindowStartMs = Long.MIN_VALUE;
+            mergeCloseDeadlineMs = Long.MIN_VALUE;
+            chainLastVideoElapsedUs = Long.MIN_VALUE;
+            chainLastAudioElapsedUs = Long.MIN_VALUE;
+            bufferedTailUnavailable = false;
+            mergeWaitAbandoned = false;
+            finishRequested = false;
             outputRestartUntilElapsedMs = Long.MIN_VALUE;
             outputRestartVolumeId = null;
             requestedFinishDeadlineMs = Long.MIN_VALUE;
@@ -239,8 +253,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
             videoFailed = false;
             stopRequested = false;
             stopReason = null;
-            wallAnchorMs = System.currentTimeMillis();
-            elapsedAnchorMs = SystemClock.elapsedRealtime();
+            frameTimestamp = MotionFrameTimestamp.capture();
             MediaCodec encoder = null;
             Surface surface = null;
             try {
@@ -302,6 +315,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     public void releaseInputSurface() { inputSurfaceLease.acknowledgeRelease(); }
     public int width() { return config == null ? MotionConfig.read(context).width() : config.width(); }
     public int height() { return config == null ? MotionConfig.read(context).height() : config.height(); }
+    MotionFrameTimestamp frameTimestamp() { return frameTimestamp; }
 
     /** Records an event level 1 (yellow) or 2 (red), timestamped on elapsedRealtime. */
     public void onDetection(int level, long elapsedMs) {
@@ -316,6 +330,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     /** Extends or sets the current absolute elapsedRealtime deadline; event post-roll is never shortened. */
     public void finishAfter(long deadlineMs) {
         if (!buffering || deadlineMs < 0) return;
+        finishRequested = true;
         requestedFinishDeadlineMs = Math.max(requestedFinishDeadlineMs, deadlineMs);
     }
 
@@ -601,8 +616,25 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 applyFinishRequest();
                 tryOpenPendingDetection();
                 trimRing();
-                if (activeClip != null && MotionRecorderTimeline.postRollRecorded(
-                        activeClip.lastVideoElapsedMs, finishDeadlineMs)) closeActiveClip();
+                if (activeClip != null) {
+                    long finalizeNowMs = SystemClock.elapsedRealtime();
+                    boolean postRollComplete = MotionRecorderTimeline.postRollRecorded(
+                            activeClip.lastVideoElapsedMs, finishDeadlineMs);
+                    recording = !postRollComplete;
+                    boolean mergeWaitActive = !finishRequested && !checkup
+                            && !mergeWaitAbandoned
+                            && eventWindowStartMs != Long.MIN_VALUE
+                            && mergeCloseDeadlineMs != Long.MIN_VALUE;
+                    boolean mergeHorizonExpired = !finishRequested && !checkup
+                            && mergeCloseDeadlineMs != Long.MIN_VALUE
+                            && finalizeNowMs >= mergeCloseDeadlineMs;
+                    boolean requestedFinishExpired = finishRequested
+                            && finishDeadlineMs != Long.MIN_VALUE && finalizeNowMs >= finishDeadlineMs;
+                    boolean finalizeAfterPostRoll = postRollComplete && (!mergeWaitActive || checkup
+                            || finishRequested || bufferedTailUnavailable || mergeHorizonExpired);
+                    if (mergeHorizonExpired || requestedFinishExpired || finalizeAfterPostRoll)
+                        closeActiveClip();
+                }
                 expireOutputRestart(SystemClock.elapsedRealtime());
                 Thread.sleep(5L);
             }
@@ -787,18 +819,55 @@ public final class MotionVideoRecorder implements AutoCloseable {
     }
 
     private void processDetection(Detection detection) {
-        updateEpisode(detection);
-        if (activeClip != null && detection.elapsedMs > finishDeadlineMs
-                && MotionRecorderTimeline.postRollRecorded(activeClip.lastVideoElapsedMs, finishDeadlineMs))
-            closeActiveClip();
-        if (activeClip != null) {
-            if (detection.elapsedMs >= activeClip.startElapsedMs) persistEpisode(activeClip, detection);
+        if (finishRequested || checkup) {
+            updateEpisode(detection);
+            if (activeClip != null && detection.elapsedMs >= activeClip.startElapsedMs)
+                persistEpisode(activeClip, detection);
             else persistMarkerInFinishedClip(detection);
-            extendFinishDeadline(MotionRecorderTimeline.finishDeadline(detection.elapsedMs, config.afterSeconds));
+            return;
+        }
+        long detectionStartMs = alignedEventWindowStart(detection.elapsedMs);
+        long detectionEndMs = MotionRecorderTimeline.finishDeadline(
+                detection.elapsedMs, config.afterSeconds);
+        long activeCoverageEndMs = activeClip == null ? Long.MIN_VALUE
+                : Math.max(finishDeadlineMs, activeClip.lastVideoElapsedMs);
+        boolean overlapsActive = activeClip != null && eventWindowStartMs != Long.MIN_VALUE
+                && !mergeWaitAbandoned
+                && MotionRecorderTimeline.windowsOverlap(eventWindowStartMs, activeCoverageEndMs,
+                        detectionStartMs, detectionEndMs);
+        if (activeClip != null && overlapsActive && bufferedTailUnavailable) {
+            updateEpisode(detection);
+            queuePendingDetection(detection);
+            mergeWaitAbandoned = true;
+            return;
+        }
+        if (activeClip != null && !overlapsActive) {
+            updateEpisode(detection);
+            queuePendingDetection(detection);
+            mergeWaitAbandoned = true;
+            if (MotionRecorderTimeline.postRollRecorded(activeClip.lastVideoElapsedMs, finishDeadlineMs))
+                closeActiveClip();
+            return;
+        }
+        updateEpisode(detection);
+        if (activeClip != null) {
+            if (detection.latestElapsedMs >= activeClip.startElapsedMs) persistEpisode(activeClip, detection);
+            else persistMarkerInFinishedClip(detection);
+            long previousDeadlineMs = finishDeadlineMs;
+            extendFinishDeadline(detectionEndMs);
+            eventWindowStartMs = Math.min(eventWindowStartMs, detectionStartMs);
+            mergeCloseDeadlineMs = MotionRecorderTimeline.mergeCloseDeadline(
+                    finishDeadlineMs, config.beforeSeconds);
+            if (finishDeadlineMs > previousDeadlineMs) appendBufferedTailThroughDeadline();
+            recording = !MotionRecorderTimeline.postRollRecorded(
+                    activeClip == null ? Long.MIN_VALUE : activeClip.lastVideoElapsedMs, finishDeadlineMs);
             return;
         }
         if (persistMarkerInFinishedClip(detection)) return;
-        extendFinishDeadline(MotionRecorderTimeline.finishDeadline(detection.elapsedMs, config.afterSeconds));
+        queuePendingDetection(detection);
+    }
+
+    private void queuePendingDetection(Detection detection) {
         Detection pending = pendingDetections.peekLast();
         if (pending != null && pending.eventId.equals(detection.eventId)) pending.mergeLatest(detection);
         else {
@@ -816,37 +885,71 @@ public final class MotionVideoRecorder implements AutoCloseable {
         long nowMs = SystemClock.elapsedRealtime();
         boolean audioRequested = config.audioEnabled && !audioFailed;
         if (audioRequested && audioFormat == null && nowMs - first.elapsedMs < AUDIO_FORMAT_WAIT_MS) return;
-        long targetMs = first.elapsedMs - config.beforeSeconds * 1_000L;
+        long firstEventStartMs = first.elapsedMs;
+        long firstEventEndMs = Math.max(firstEventStartMs, first.latestElapsedMs);
+        long targetMs = MotionRecorderTimeline.eventWindowStart(firstEventStartMs, config.beforeSeconds);
         ArrayList<Long> keyframes = new ArrayList<>();
         for (EncodedPacket packet : ring) {
             if (packet.track == VIDEO_TRACK && packet.isKeyFrame()) keyframes.add(packet.elapsedUs / 1_000L);
         }
-        long startMs = MotionRecorderTimeline.chooseKeyframeStart(keyframes, targetMs, first.elapsedMs);
+        long startMs = MotionRecorderTimeline.chooseKeyframeStart(keyframes, targetMs, firstEventStartMs);
         if (startMs < 0) {
             if (nowMs - first.elapsedMs < 2_000L) return;
             pendingDetections.removeFirst();
             notifyState("motion_no_keyframe_before_event");
             return;
         }
-        List<EncodedPacket> initialPackets = ringPacketsFrom(startMs);
-        long finishAt = MotionRecorderTimeline.finishDeadline(first.latestElapsedMs, config.afterSeconds);
-        extendFinishDeadline(finishAt);
+        long finishAt = MotionRecorderTimeline.finishDeadline(firstEventEndMs, config.afterSeconds);
+        List<EncodedPacket> initialPackets = ringPacketsThroughDeadline(ringPacketsFrom(startMs), finishAt);
+        finishDeadlineMs = finishAt;
+        eventWindowStartMs = startMs;
+        mergeCloseDeadlineMs = MotionRecorderTimeline.mergeCloseDeadline(finishAt, config.beforeSeconds);
+        chainLastVideoElapsedUs = Long.MIN_VALUE;
+        chainLastAudioElapsedUs = Long.MIN_VALUE;
+        bufferedTailUnavailable = false;
+        mergeWaitAbandoned = false;
         long futureMs = Math.max(0, finishAt - nowMs);
         long requiredBytes = estimateSegmentBytes(initialPackets, futureMs,
                 config.audioEnabled && !audioFailed && audioFormat != null);
         String firstAttemptVolumeId = outputRestartActive(nowMs) ? outputRestartVolumeId : null;
         if (!openSegment(startMs, initialPackets, requiredBytes, firstAttemptVolumeId)) {
             pendingDetections.removeFirst();
+            clearEventWindow();
             return;
         }
         pendingDetections.removeFirst();
-        finishDeadlineMs = Math.max(finishDeadlineMs, finishAt);
         persistInitialEpisode(activeClip, first);
         while (!pendingDetections.isEmpty() && activeClip != null) {
-            Detection queued = pendingDetections.removeFirst();
-            extendFinishDeadline(MotionRecorderTimeline.finishDeadline(queued.latestElapsedMs, config.afterSeconds));
+            Detection queued = pendingDetections.peekFirst();
+            long queuedStartMs = alignedEventWindowStart(queued.elapsedMs);
+            long queuedEndMs = MotionRecorderTimeline.finishDeadline(
+                    queued.latestElapsedMs, config.afterSeconds);
+            if (!MotionRecorderTimeline.windowsOverlap(eventWindowStartMs, finishDeadlineMs,
+                    queuedStartMs, queuedEndMs)) break;
+            pendingDetections.removeFirst();
+            long previousDeadlineMs = finishDeadlineMs;
+            extendFinishDeadline(queuedEndMs);
+            eventWindowStartMs = Math.min(eventWindowStartMs, queuedStartMs);
+            mergeCloseDeadlineMs = MotionRecorderTimeline.mergeCloseDeadline(
+                    finishDeadlineMs, config.beforeSeconds);
+            if (finishDeadlineMs > previousDeadlineMs) appendBufferedTailThroughDeadline();
             persistEpisode(activeClip, queued);
         }
+        recording = activeClip != null && !MotionRecorderTimeline.postRollRecorded(
+                activeClip.lastVideoElapsedMs, finishDeadlineMs);
+    }
+
+    private long alignedEventWindowStart(long eventElapsedMs) {
+        long requestedStartMs = MotionRecorderTimeline.eventWindowStart(eventElapsedMs,
+                config.beforeSeconds);
+        ArrayList<Long> keyframes = new ArrayList<>();
+        for (EncodedPacket packet : ring) {
+            if (packet.track == VIDEO_TRACK && packet.isKeyFrame())
+                keyframes.add(packet.elapsedUs / 1_000L);
+        }
+        long aligned = MotionRecorderTimeline.chooseKeyframeStart(
+                keyframes, requestedStartMs, eventElapsedMs);
+        return aligned < 0 ? requestedStartMs : aligned;
     }
 
     private void handlePacket(EncodedPacket packet) {
@@ -871,6 +974,33 @@ public final class MotionVideoRecorder implements AutoCloseable {
             openSegment(packetElapsedMs, Collections.emptyList(), requiredBytes, outputRestartVolumeId);
         }
         if (activeClip == null || packet.elapsedUs < activeClip.startElapsedMs * 1_000L) return;
+        boolean postRollAlreadyRecorded = MotionRecorderTimeline.postRollRecorded(
+                activeClip.lastVideoElapsedMs, finishDeadlineMs);
+        if (postRollAlreadyRecorded
+                && !(packet.track == AUDIO_TRACK
+                    && packet.elapsedUs <= activeClip.lastVideoElapsedUs)) return;
+        long contentEndUs = elapsedMicros(finishDeadlineMs);
+        long audioThroughUs = postRollAlreadyRecorded
+                ? Math.max(contentEndUs, activeClip.lastVideoElapsedUs) : contentEndUs;
+        if (packet.track == AUDIO_TRACK && finishDeadlineMs != Long.MIN_VALUE
+                && packet.elapsedUs > audioThroughUs) return;
+        if (packet.track == VIDEO_TRACK && finishDeadlineMs != Long.MIN_VALUE
+                && packet.elapsedUs > contentEndUs) {
+            appendBufferedTailThrough(packet.elapsedUs);
+            recording = activeClip != null && !MotionRecorderTimeline.postRollRecorded(
+                    activeClip.lastVideoElapsedMs, finishDeadlineMs);
+            return;
+        }
+        writePacketAcrossSegments(packet);
+        recording = activeClip != null && !MotionRecorderTimeline.postRollRecorded(
+                activeClip.lastVideoElapsedMs, finishDeadlineMs);
+    }
+
+    private void writePacketAcrossSegments(EncodedPacket packet) {
+        if (activeClip == null || packet.elapsedUs < activeClip.startElapsedMs * 1_000L) return;
+        long lastWrittenUs = packet.track == VIDEO_TRACK
+                ? chainLastVideoElapsedUs : chainLastAudioElapsedUs;
+        if (packet.elapsedUs <= lastWrittenUs) return;
         if (!stopRequested && packet.track == VIDEO_TRACK && MotionRecorderTimeline.startsSegmentAt(
                 activeClip.startElapsedMs, packet.elapsedUs / 1_000L, packet.isKeyFrame())) {
             String endedVolumeId = activeClip.output.volumeId;
@@ -891,6 +1021,40 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 closeActiveClip();
             } else writePacket(clip, packet);
         }
+    }
+
+    private List<EncodedPacket> ringPacketsThroughDeadline(List<EncodedPacket> packets, long deadlineMs) {
+        long deadlineUs = elapsedMicros(deadlineMs);
+        long boundaryUs = MotionRecorderTimeline.firstVideoAtOrAfter(packets, VIDEO_TRACK, deadlineUs);
+        long throughUs = boundaryUs == Long.MAX_VALUE ? deadlineUs : boundaryUs;
+        ArrayList<EncodedPacket> result = new ArrayList<>();
+        for (EncodedPacket packet : packets) if (packet.elapsedUs <= throughUs) result.add(packet);
+        return result;
+    }
+
+    private void appendBufferedTailThroughDeadline() {
+        if (activeClip == null || finishDeadlineMs == Long.MIN_VALUE) return;
+        List<EncodedPacket> available = new ArrayList<>(ring);
+        long deadlineUs = elapsedMicros(finishDeadlineMs);
+        long boundaryUs = MotionRecorderTimeline.firstVideoAtOrAfter(available, VIDEO_TRACK, deadlineUs);
+        appendBufferedTailThrough(boundaryUs == Long.MAX_VALUE ? deadlineUs : boundaryUs);
+    }
+
+    private void appendBufferedTailThrough(long throughUs) {
+        if (activeClip == null) return;
+        List<EncodedPacket> available = new ArrayList<>(ring);
+        for (EncodedPacket packet : available) {
+            if (activeClip == null) return;
+            if (!MotionRecorderTimeline.shouldAppendSample(packet.track, packet.elapsedUs,
+                    VIDEO_TRACK, AUDIO_TRACK, chainLastVideoElapsedUs, chainLastAudioElapsedUs, throughUs))
+                continue;
+            writePacketAcrossSegments(packet);
+        }
+    }
+
+    private static long elapsedMicros(long elapsedMs) {
+        if (elapsedMs == Long.MIN_VALUE) return Long.MIN_VALUE;
+        return elapsedMs > Long.MAX_VALUE / 1_000L ? Long.MAX_VALUE : elapsedMs * 1_000L;
     }
 
     private List<EncodedPacket> ringPacketsFrom(long startMs) {
@@ -958,7 +1122,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
             MotionMediaIndex.Record record = new MotionMediaIndex.Record(uri,
                     output.recoveryUri == null ? null : output.recoveryUri.toString(),
                     output.volumeId, output.displayName, segmentId, wallFromElapsed(startElapsedMs),
-                    startElapsedMs, config.width(), config.height(), MotionMediaIndex.RECORDING);
+                    startElapsedMs, config.width(), config.height(), MotionMediaIndex.RECORDING,
+                    config.cameraOrder);
             index.put(record);
             if (output.descriptor != null) {
                 muxer = new MediaMuxer(output.descriptor.getFileDescriptor(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
@@ -989,6 +1154,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
                         return false;
                     }
                     writePacket(clip, packet);
+                    if (activeClip != clip) return false;
                 }
             }
             return true;
@@ -1036,7 +1202,13 @@ public final class MotionVideoRecorder implements AutoCloseable {
             if (packet.track == VIDEO_TRACK) {
                 clip.videoSamples++;
                 clip.lastVideoElapsedMs = packet.elapsedUs / 1_000L;
-            } else clip.audioSamples++;
+                clip.lastVideoElapsedUs = packet.elapsedUs;
+                chainLastVideoElapsedUs = packet.elapsedUs;
+                persistPendingEpisodes(clip, false);
+            } else {
+                clip.audioSamples++;
+                chainLastAudioElapsedUs = packet.elapsedUs;
+            }
         } catch (RuntimeException failure) {
             Log.e(TAG, "motion_muxer_write_failed", failure);
             notifyState("motion_muxer_write_failed");
@@ -1115,6 +1287,16 @@ public final class MotionVideoRecorder implements AutoCloseable {
             }
             try { clip.lease.close(); } catch (IOException ignored) { }
         }
+        if (!segmentBoundary) clearEventWindow();
+    }
+
+    private void clearEventWindow() {
+        eventWindowStartMs = Long.MIN_VALUE;
+        mergeCloseDeadlineMs = Long.MIN_VALUE;
+        chainLastVideoElapsedUs = Long.MIN_VALUE;
+        chainLastAudioElapsedUs = Long.MIN_VALUE;
+        bufferedTailUnavailable = false;
+        mergeWaitAbandoned = false;
     }
 
     private void updateEpisode(Detection detection) {
@@ -1153,20 +1335,54 @@ public final class MotionVideoRecorder implements AutoCloseable {
             persistEpisode(clip, episode.id, episode.level,
                     Math.max(episode.startElapsedMs, clip.startElapsedMs), episode.lastElapsedMs, force);
         }
+        persistPendingEpisodes(clip, force);
     }
 
     private void persistEpisode(Clip clip, String eventId, int level, long startMs, long endMs, boolean force) {
-        long boundedEnd = Math.max(startMs, endMs);
-        long previous = clip.persistedEpisodeEnds.getOrDefault(eventId, Long.MIN_VALUE);
-        if (!force && previous != Long.MIN_VALUE && boundedEnd - previous < MARKER_PERSIST_INTERVAL_MS) return;
-        long wallStart = wallFromElapsed(startMs);
-        long wallEnd = wallFromElapsed(boundedEnd);
-        try {
-            index.upsertMarker(clip.record.uri,
-                    new MotionMediaIndex.Marker(eventId, startMs, wallStart, boundedEnd, wallEnd, level));
-            clip.persistedEpisodeEnds.put(eventId, boundedEnd);
-        } catch (IOException failure) {
-            notifyState("motion_marker_persist_failed");
+        if (clip == null || eventId == null || endMs < clip.startElapsedMs) return;
+        long boundedStart = Math.max(startMs, clip.startElapsedMs);
+        if (endMs < boundedStart) return;
+        PendingEpisode pending = clip.pendingEpisodes.get(eventId);
+        if (pending == null) {
+            pending = new PendingEpisode(level, boundedStart, endMs);
+            clip.pendingEpisodes.put(eventId, pending);
+        } else {
+            pending.startElapsedMs = Math.min(pending.startElapsedMs, boundedStart);
+            pending.endElapsedMs = Math.max(pending.endElapsedMs, endMs);
+        }
+        persistPendingEpisodes(clip, force);
+    }
+
+    private void persistPendingEpisodes(Clip clip, boolean force) {
+        if (clip == null || clip.videoSamples == 0) return;
+        Iterator<Map.Entry<String, PendingEpisode>> iterator = clip.pendingEpisodes.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, PendingEpisode> entry = iterator.next();
+            String eventId = entry.getKey();
+            PendingEpisode pending = entry.getValue();
+            long boundedEnd = Math.min(pending.endElapsedMs, clip.lastVideoElapsedMs);
+            if (boundedEnd < pending.startElapsedMs) continue;
+
+            long previous = clip.persistedEpisodeEnds.getOrDefault(eventId, Long.MIN_VALUE);
+            if (previous != Long.MIN_VALUE && pending.endElapsedMs <= previous) {
+                iterator.remove();
+                continue;
+            }
+            if (!force && previous != Long.MIN_VALUE
+                    && boundedEnd - previous < MARKER_PERSIST_INTERVAL_MS) continue;
+            if (!force && pending.lastAttemptElapsedMs != Long.MIN_VALUE
+                    && clip.lastVideoElapsedMs - pending.lastAttemptElapsedMs < MARKER_PERSIST_INTERVAL_MS) continue;
+
+            pending.lastAttemptElapsedMs = clip.lastVideoElapsedMs;
+            try {
+                index.upsertMarker(clip.record.uri, new MotionMediaIndex.Marker(eventId,
+                        pending.startElapsedMs, wallFromElapsed(pending.startElapsedMs),
+                        boundedEnd, wallFromElapsed(boundedEnd), pending.level));
+                clip.persistedEpisodeEnds.put(eventId, boundedEnd);
+                if (pending.endElapsedMs <= boundedEnd) iterator.remove();
+            } catch (IOException failure) {
+                notifyState("motion_marker_persist_failed");
+            }
         }
     }
 
@@ -1230,7 +1446,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
             if (oldestKeyframe != Long.MAX_VALUE) removeRingBefore(oldestKeyframe);
             else {
                 EncodedPacket removed = ring.remove(0);
-                ringBytes -= removed.data.length;
+                recordRingEviction(removed);
             }
         }
     }
@@ -1240,10 +1456,18 @@ public final class MotionVideoRecorder implements AutoCloseable {
         while (iterator.hasNext()) {
             EncodedPacket packet = iterator.next();
             if (packet.elapsedUs < elapsedUs) {
-                ringBytes -= packet.data.length;
+                recordRingEviction(packet);
                 iterator.remove();
             }
         }
+    }
+
+    private void recordRingEviction(EncodedPacket packet) {
+        ringBytes -= packet.data.length;
+        if (activeClip == null) return;
+        long lastWrittenUs = packet.track == VIDEO_TRACK
+                ? chainLastVideoElapsedUs : chainLastAudioElapsedUs;
+        if (packet.elapsedUs > lastWrittenUs) bufferedTailUnavailable = true;
     }
 
     private void applyFinishRequest() {
@@ -1317,7 +1541,10 @@ public final class MotionVideoRecorder implements AutoCloseable {
         return ptsUs > 0 && Math.abs(ptsUs - nowUs) <= 5_000_000L ? 0 : nowUs - ptsUs;
     }
 
-    private long wallFromElapsed(long elapsedMs) { return wallAnchorMs + elapsedMs - elapsedAnchorMs; }
+    private long wallFromElapsed(long elapsedMs) {
+        MotionFrameTimestamp timestamp = frameTimestamp;
+        return timestamp == null ? elapsedMs : timestamp.wallTimeMillis(elapsedMs);
+    }
 
     private long sizeOf(android.net.Uri uri) {
         try (android.os.ParcelFileDescriptor descriptor = storage.openMediaFileDescriptor(uri, "r")) {
@@ -1394,7 +1621,19 @@ public final class MotionVideoRecorder implements AutoCloseable {
         }
     }
 
-    private static final class EncodedPacket {
+    private static final class PendingEpisode {
+        final int level;
+        long startElapsedMs;
+        long endElapsedMs;
+        long lastAttemptElapsedMs = Long.MIN_VALUE;
+        PendingEpisode(int level, long startElapsedMs, long endElapsedMs) {
+            this.level = level;
+            this.startElapsedMs = startElapsedMs;
+            this.endElapsedMs = endElapsedMs;
+        }
+    }
+
+    private static final class EncodedPacket implements MotionRecorderTimeline.Sample {
         final int track;
         final long elapsedUs;
         final int flags;
@@ -1402,6 +1641,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
         EncodedPacket(int track, long elapsedUs, int flags, byte[] data) {
             this.track = track; this.elapsedUs = elapsedUs; this.flags = flags; this.data = data;
         }
+        @Override public int track() { return track; }
+        @Override public long elapsedUs() { return elapsedUs; }
         boolean isKeyFrame() { return (flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0; }
     }
 
@@ -1423,7 +1664,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
         final int audioTrack;
         final boolean audioIncluded;
         final long startElapsedMs;
-        long lastVideoElapsedMs;
+        long lastVideoElapsedMs = Long.MIN_VALUE;
+        long lastVideoElapsedUs = Long.MIN_VALUE;
         long videoSamples;
         long audioSamples;
         long sampleBytes;
@@ -1431,6 +1673,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
         long storageWriteLimitBytes = Long.MAX_VALUE;
         long lastStorageCheckMs;
         final HashMap<String, Long> persistedEpisodeEnds = new HashMap<>();
+        final HashMap<String, PendingEpisode> pendingEpisodes = new HashMap<>();
 
         Clip(MotionStorage.Output output, MediaMuxer muxer, MotionMediaLease lease,
                 MotionMediaIndex.Record record, int videoTrack, int audioTrack,
@@ -1438,7 +1681,6 @@ public final class MotionVideoRecorder implements AutoCloseable {
             this.output = output; this.muxer = muxer; this.lease = lease; this.record = record;
             this.videoTrack = videoTrack; this.audioTrack = audioTrack;
             this.audioIncluded = audioIncluded; this.startElapsedMs = startElapsedMs;
-            this.lastVideoElapsedMs = startElapsedMs;
         }
     }
 }

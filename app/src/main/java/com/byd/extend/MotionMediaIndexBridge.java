@@ -92,7 +92,7 @@ public final class MotionMediaIndexBridge {
 
             MotionMediaIndex.Record copy = new MotionMediaIndex.Record(canonical.toString(),
                     volume.id, old.name, old.segmentId, old.recordedAtMs,
-                    old.startElapsedRealtimeMs, old.width, old.height, old.status);
+                    old.startElapsedRealtimeMs, old.width, old.height, old.status, old.cameraOrder);
             copy.durationMs = old.durationMs;
             copy.sizeBytes = old.sizeBytes;
             copy.protectedFile = old.protectedFile;
@@ -190,6 +190,8 @@ public final class MotionMediaIndexBridge {
             row.put("status", entry.status.name().toLowerCase(java.util.Locale.ROOT));
             row.put("available", entry.available);
             row.put("protectedFile", entry.protectedFile);
+            if (entry.cameraOrder != null)
+                row.put("cameraOrder", MotionMediaIndex.encodeCameraOrder(entry.cameraOrder));
             row.put("markers", markers);
             return row;
         } catch (JSONException failure) {

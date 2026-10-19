@@ -922,7 +922,7 @@ public final class MotionDetectorShellMain {
             if (reader == null || !eligible && (check == null || !checkLive(check))) return;
             Image frame = reader.acquireLatestImage();
             if (frame == null) return;
-            try (Image owned = frame) { processFrame(owned); }
+            processFrame(frame);
         } catch (Throwable error) {
             String id = sessionId;
             if (id != null) fail(id, "frame", error);
@@ -932,28 +932,34 @@ public final class MotionDetectorShellMain {
     }
 
     private void processFrame(Image frame) throws Exception {
-        ManualCheck check = manualCheck;
-        if (check != null && check.finishing) return;
-        if (frame.getFormat() != ImageFormat.YUV_420_888
-                || frame.getWidth() != MotionDetectorProtocol.INPUT_WIDTH
-                || frame.getHeight() != MotionDetectorProtocol.INPUT_HEIGHT)
-            throw new IllegalStateException("composed camera frame mismatch: expected format="
-                    + ImageFormat.YUV_420_888 + " size=" + MotionDetectorProtocol.INPUT_WIDTH + "x"
-                    + MotionDetectorProtocol.INPUT_HEIGHT + " actual format=" + frame.getFormat()
-                    + " size=" + frame.getWidth() + "x" + frame.getHeight());
-        Rect crop = frame.getCropRect();
-        if (crop.left != 0 || crop.top != 0 || crop.right != frame.getWidth()
-                || crop.bottom != frame.getHeight())
-            throw new IllegalStateException("motion frame crop is not the full composition: crop="
-                    + crop + " size=" + frame.getWidth() + "x" + frame.getHeight());
-        Image.Plane[] planes = frame.getPlanes();
-        if (planes == null || planes.length != 3)
-            throw new IllegalStateException("YUV_420_888 requires three planes: actual="
-                    + (planes == null ? "null" : planes.length));
-        MotionYuvPacker.pack(
-                plane(planes[0]), plane(planes[1]), plane(planes[2]),
-                frame.getWidth(), frame.getHeight(), nativeInput);
-        long frameTimeNs = frame.getTimestamp();
+        ManualCheck check;
+        long frameTimeNs;
+        try {
+            check = manualCheck;
+            if (check != null && check.finishing) return;
+            if (frame.getFormat() != ImageFormat.YUV_420_888
+                    || frame.getWidth() != MotionDetectorProtocol.INPUT_WIDTH
+                    || frame.getHeight() != MotionDetectorProtocol.INPUT_HEIGHT)
+                throw new IllegalStateException("composed camera frame mismatch: expected format="
+                        + ImageFormat.YUV_420_888 + " size=" + MotionDetectorProtocol.INPUT_WIDTH + "x"
+                        + MotionDetectorProtocol.INPUT_HEIGHT + " actual format=" + frame.getFormat()
+                        + " size=" + frame.getWidth() + "x" + frame.getHeight());
+            Rect crop = frame.getCropRect();
+            if (crop.left != 0 || crop.top != 0 || crop.right != frame.getWidth()
+                    || crop.bottom != frame.getHeight())
+                throw new IllegalStateException("motion frame crop is not the full composition: crop="
+                        + crop + " size=" + frame.getWidth() + "x" + frame.getHeight());
+            Image.Plane[] planes = frame.getPlanes();
+            if (planes == null || planes.length != 3)
+                throw new IllegalStateException("YUV_420_888 requires three planes: actual="
+                        + (planes == null ? "null" : planes.length));
+            MotionYuvPacker.pack(
+                    plane(planes[0]), plane(planes[1]), plane(planes[2]),
+                    frame.getWidth(), frame.getHeight(), nativeInput);
+            frameTimeNs = frame.getTimestamp();
+        } finally {
+            frame.close();
+        }
         long now = SystemClock.elapsedRealtime();
         int raw = nativeApi.detect(nativeInput, MotionDetectorProtocol.INPUT_WIDTH,
                 MotionDetectorProtocol.INPUT_HEIGHT, sensitivity);
@@ -1731,6 +1737,7 @@ public final class MotionDetectorShellMain {
             Surface encoderSurface = recorder.retainInputSurface();
             composer = new MotionGpuComposer(mediaContext,
                     recorder.width(), recorder.height(), recordingConfig.cameraOrder, id,
+                    recorder.frameTimestamp(),
                     detail -> control.post(() -> {
                         if (!sameSession(id) || generation != recordingGeneration) return;
                         sendError(id, "video_composer", detail);

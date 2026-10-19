@@ -66,6 +66,7 @@ final class MotionMediaIndex {
         final long startElapsedRealtimeMs;
         final int width;
         final int height;
+        int[] cameraOrder;
         long durationMs;
         long sizeBytes;
         String status;
@@ -75,11 +76,23 @@ final class MotionMediaIndex {
         Record(String uri, String volumeId, String name, String segmentId, long recordedAtMs,
                 long startElapsedRealtimeMs, int width, int height, String status) {
             this(uri, null, volumeId, name, segmentId, recordedAtMs, startElapsedRealtimeMs,
-                    width, height, status);
+                    width, height, status, null);
+        }
+
+        Record(String uri, String volumeId, String name, String segmentId, long recordedAtMs,
+                long startElapsedRealtimeMs, int width, int height, String status, int[] cameraOrder) {
+            this(uri, null, volumeId, name, segmentId, recordedAtMs, startElapsedRealtimeMs,
+                    width, height, status, cameraOrder);
         }
 
         Record(String uri, String stagingUri, String volumeId, String name, String segmentId, long recordedAtMs,
                 long startElapsedRealtimeMs, int width, int height, String status) {
+            this(uri, stagingUri, volumeId, name, segmentId, recordedAtMs, startElapsedRealtimeMs,
+                    width, height, status, null);
+        }
+
+        Record(String uri, String stagingUri, String volumeId, String name, String segmentId, long recordedAtMs,
+                long startElapsedRealtimeMs, int width, int height, String status, int[] cameraOrder) {
             this.uri = uri;
             this.stagingUri = stagingUri;
             this.volumeId = volumeId;
@@ -90,11 +103,12 @@ final class MotionMediaIndex {
             this.width = width;
             this.height = height;
             this.status = status;
+            this.cameraOrder = copyCameraOrder(cameraOrder);
         }
 
         Record copy() {
             Record copy = new Record(uri, stagingUri, volumeId, name, segmentId, recordedAtMs,
-                    startElapsedRealtimeMs, width, height, status);
+                    startElapsedRealtimeMs, width, height, status, cameraOrder);
             copy.durationMs = durationMs;
             copy.sizeBytes = sizeBytes;
             copy.protectedFile = protectedFile;
@@ -223,6 +237,10 @@ final class MotionMediaIndex {
                 continue;
             }
             Record existing = records.get(index);
+            if (existing.cameraOrder == null && incoming.cameraOrder != null) {
+                existing.cameraOrder = copyCameraOrder(incoming.cameraOrder);
+                changed = true;
+            }
             if (incoming.protectedFile && !existing.protectedFile) {
                 existing.protectedFile = true;
                 changed = true;
@@ -351,6 +369,7 @@ final class MotionMediaIndex {
         row.put("sizeBytes", record.sizeBytes);
         row.put("width", record.width);
         row.put("height", record.height);
+        if (record.cameraOrder != null) row.put("cameraOrder", encodeCameraOrder(record.cameraOrder));
         row.put("status", record.status);
         row.put("protected", record.protectedFile);
         row.put("markers", markers);
@@ -362,7 +381,7 @@ final class MotionMediaIndex {
                 row.getString("volumeId"), row.getString("name"),
                 row.getString("segmentId"), row.getLong("recordedAtMs"),
                 row.getLong("startElapsedRealtimeMs"), row.getInt("width"), row.getInt("height"),
-                row.getString("status"));
+                row.getString("status"), readCameraOrder(row.optJSONArray("cameraOrder")));
         record.durationMs = row.getLong("durationMs");
         record.sizeBytes = row.getLong("sizeBytes");
         record.protectedFile = row.getBoolean("protected");
@@ -377,6 +396,35 @@ final class MotionMediaIndex {
                     item.optLong("endWallTimeMs", startWall), level));
         }
         return record;
+    }
+
+    static int[] copyCameraOrder(int[] order) {
+        if (order == null || order.length != 4) return null;
+        int seen = 0;
+        for (int direction : order) {
+            if (direction < 0 || direction > 3 || (seen & (1 << direction)) != 0) return null;
+            seen |= 1 << direction;
+        }
+        return order.clone();
+    }
+
+    static int[] readCameraOrder(JSONArray encoded) {
+        if (encoded == null || encoded.length() != 4) return null;
+        int[] order = new int[4];
+        for (int i = 0; i < order.length; i++) {
+            Object value = encoded.opt(i);
+            if (!(value instanceof Number)) return null;
+            double number = ((Number) value).doubleValue();
+            if (number < 0 || number > 3 || number != Math.rint(number)) return null;
+            order[i] = (int) number;
+        }
+        return copyCameraOrder(order);
+    }
+
+    static JSONArray encodeCameraOrder(int[] order) {
+        JSONArray encoded = new JSONArray();
+        for (int direction : order) encoded.put(direction);
+        return encoded;
     }
 
     private static int markerIndex(List<Marker> markers, String eventId, int level) {
