@@ -140,6 +140,14 @@ public final class MotionDetectorShellMain {
     private boolean warningWindowLaunched;
     private int warningWindowGeneration;
     private ResultReceiver warningWindowCommands;
+    private boolean warningPreparingSleep;
+    private boolean warningSleepAttempted;
+    private boolean warningScreenFinishIssued;
+    private boolean warningAwaitingClosed;
+    private boolean warningBlackFallback;
+    private boolean warningPowerOnClose;
+    private boolean warningCloseSent;
+    private boolean warningWakeTokenOwned;
     private String deliberatelyDetachedProducerReason = "";
     private String warningWindowFailure = "";
     private volatile String expectedSourceEpoch = "";
@@ -207,47 +215,53 @@ public final class MotionDetectorShellMain {
                 });
             }
         });
-        screen = new MotionScreenControl((active, screenState, detail) -> {
+        screen = new MotionScreenControl((active, generation, screenState, detail) -> control.post(() -> {
             if (!sameSession(active)) return;
-            if ("wake_requested".equals(screenState)) launchWarningWindow(active);
+            if (generation >= 0 && generation != warningWindowGeneration) return;
             sendScreen(active, screenState, detail);
+            if ("wake_requested".equals(screenState)) {
+                launchWarningWindow(active, generation);
+                return;
+            }
             if ("cover_release_requested".equals(screenState)) {
-                control.post(() -> {
-                    if (!sameSession(active) || !warning || !warningWindowDrawn || warningClosing || !eligible) return;
-                    warningVisible = true;
-                    policy.beginVisibleWarning(SystemClock.elapsedRealtime());
-                    scheduleWarningDeadline();
-                    sendStatus(active, "warning_visible", "warning interval begins after owned cover release was confirmed");
-                });
+                if (!warning || generation != warningWindowGeneration || !warningWindowDrawn
+                        || warningClosing || !eligible) return;
+                warningVisible = true;
+                policy.beginVisibleWarning(SystemClock.elapsedRealtime());
+                scheduleWarningDeadline();
+                sendStatus(active, "warning_visible", "warning interval begins after owned cover release was confirmed");
+                return;
+            }
+            if ("black_restore_observed".equals(screenState)) {
+                closeWarningAfterBlackRestore(active, generation);
+                endOwnedWake(active);
+                return;
             }
             if (isWarningCycleFailure(screenState)) {
-                control.post(() -> {
-                    if (!sameSession(active)) return;
-                    if (eligible) sessionRuntime.blockWarningRetry();
-                    warningWindowFailure = screenState + (detail.isEmpty() ? "" : ": " + detail);
-                    warningWindowPending = false;
-                    control.removeCallbacks(warningWindowTimeout);
-                    sendError(active, "warning_preflight", warningWindowFailure);
-                    if (warning) finishWarning(active, false);
-                    else endOwnedWake(active);
-                });
+                if (eligible) sessionRuntime.blockWarningRetry();
+                warningWindowFailure = screenState + (detail.isEmpty() ? "" : ": " + detail);
+                warningWindowPending = false;
+                control.removeCallbacks(warningWindowTimeout);
+                sendError(active, "warning_preflight", warningWindowFailure);
+                if (warning) enterWarningBlackFallback(active, warningWindowFailure, true);
+                endOwnedWake(active);
+                return;
+            }
+            if ("user_takeover".equals(screenState) || "user_dismissed_no_sleep".equals(screenState)) {
+                if (eligible) sessionRuntime.blockWarningRetry();
+                warningWindowFailure = screenState + (detail.isEmpty() ? "" : ": " + detail);
+                if (warning && !warningPowerOnClose && !warningAwaitingClosed)
+                    enterWarningBlackFallback(active, warningWindowFailure, false);
+                endOwnedWake(active);
+                return;
             }
             if ("wake_skipped".equals(screenState) || "wake_uncertain".equals(screenState)
                     || "cover_release_skipped".equals(screenState)
                     || "cover_release_uncertain".equals(screenState)
                     || "sleep_skipped".equals(screenState) || "sleep_uncertain".equals(screenState)
-                    || "black_restore_observed".equals(screenState)
-                    || "black_restore_uncertain".equals(screenState)
-                    || "finish_uncertain".equals(screenState)
-                    || "off_session_lost".equals(screenState)
-                    || "user_dismissed_no_sleep".equals(screenState)) {
-                control.post(() -> {
-                    if (!sameSession(active)) return;
-                    if (!warning) warningClosing = false;
-                    endOwnedWake(active);
-                });
-            }
-        });
+                    || "black_restore_uncertain".equals(screenState) || "finish_uncertain".equals(screenState)
+                    || "off_session_lost".equals(screenState)) endOwnedWake(active);
+        }));
     }
 
     private void publish() throws Exception {
@@ -663,6 +677,14 @@ public final class MotionDetectorShellMain {
         warningWindowCommands = null;
         warningWindowGeneration++;
         control.removeCallbacks(warningCloseTimeout);
+        warningPreparingSleep = false;
+        warningSleepAttempted = false;
+        warningScreenFinishIssued = false;
+        warningAwaitingClosed = false;
+        warningBlackFallback = false;
+        warningPowerOnClose = false;
+        warningCloseSent = false;
+        warningWakeTokenOwned = false;
         warningWindowFailure = "";
         deliberatelyDetachedProducerReason = "";
         lastError = "";
@@ -1064,12 +1086,22 @@ public final class MotionDetectorShellMain {
         warningWindowLaunched = false;
         warningWindowCommands = null;
         warningWindowFailure = "";
+        warningPreparingSleep = false;
+        warningSleepAttempted = false;
+        warningScreenFinishIssued = false;
+        warningAwaitingClosed = false;
+        warningBlackFallback = false;
+        warningPowerOnClose = false;
+        warningCloseSent = false;
+        warningWakeTokenOwned = false;
+        int generation = ++warningWindowGeneration;
         control.removeCallbacks(warningTimeout);
         holdCpu(true);
         try {
             if (!cameraOperation(MotionDetectorProtocol.CAMERA_OWN_WAKE, id, null, null, 0))
                 throw new IllegalStateException("camera host refused Motion-owned wake token");
-            screen.wakeForWarning(id);
+            warningWakeTokenOwned = true;
+            screen.wakeForWarning(id, generation);
             sendStatus(id, "warning_waking", "shell registered the current OFF-state camera producer before wake reason 13");
         } catch (Throwable error) {
             sessionRuntime.blockWarningRetry();
@@ -1080,12 +1112,12 @@ public final class MotionDetectorShellMain {
         }
     }
 
-    private void launchWarningWindow(String id) {
+    private void launchWarningWindow(String id, int generation) {
         control.post(() -> {
-            if (!sameSession(id) || !warning || warningClosing || !eligible || warningWindowPending || warningWindowDrawn) return;
+            if (!sameSession(id) || generation != warningWindowGeneration || !warning || warningClosing
+                    || !eligible || warningWindowPending || warningWindowDrawn) return;
             warningWindowPending = true;
             warningWindowLaunched = true;
-            final int generation = ++warningWindowGeneration;
             ResultReceiver reporter = new ResultReceiver(control) {
                 @Override protected void onReceiveResult(int code, Bundle data) {
                     onWarningWindowResult(id, generation, code, data);
@@ -1105,6 +1137,7 @@ public final class MotionDetectorShellMain {
                 sendStatus(id, "warning_window_pending", "shell launched warning Activity; first draw must be acknowledged within 10 seconds");
             } catch (Throwable error) {
                 warningWindowPending = false;
+                warningWindowLaunched = false;
                 if (eligible) sessionRuntime.blockWarningRetry();
                 warningWindowFailure = summary(error);
                 sendError(id, "warning_activity_launch", warningWindowFailure);
@@ -1120,7 +1153,7 @@ public final class MotionDetectorShellMain {
         warningWindowFailure = "first_draw_timeout";
         sendError(sessionId, "warning_first_draw", warningWindowFailure);
         sendStatus(sessionId, "warning_error", "first-draw acknowledgement was not received within 10 seconds");
-        finishWarning(sessionId, false);
+        enterWarningBlackFallback(sessionId, warningWindowFailure, true);
     }
 
     private int acknowledgeWarningDraw(String id) throws Exception {
@@ -1130,7 +1163,7 @@ public final class MotionDetectorShellMain {
         warningWindowPending = false;
         warningWindowDrawn = true;
         control.removeCallbacks(warningWindowTimeout);
-        screen.warningWindowReady(id);
+        screen.warningWindowReady(id, warningWindowGeneration);
         sendStatus(id, "warning_drawn", "matching runtime window reported first draw; OEM cover is not yet released");
         return 1;
     }
@@ -1140,34 +1173,139 @@ public final class MotionDetectorShellMain {
         if (!warning) return 1;
         control.removeCallbacks(warningWindowTimeout);
         control.removeCallbacks(warningTimeout);
+        if (warningPowerOnClose) {
+            closeWarningForPowerOn(id);
+            return 1;
+        }
         boolean canRestore = restoreAllowed && eligible && warningWindowDrawn
-                && sessionRuntime.power() == 0 && !sessionRuntime.suspended();
+                && sessionRuntime.power() == 0 && !sessionRuntime.suspended() && !teardownPending;
         if (warningClosing) {
             warningRestoreAllowed &= canRestore;
+            if (!warningRestoreAllowed && !warningSleepAttempted && !warningAwaitingClosed)
+                enterWarningBlackFallback(id, "warning became ineligible before owned sleep", true);
             return 1;
         }
         warningClosing = true;
         warningRestoreAllowed = canRestore;
         if (!warningWindowLaunched) {
-            completeWarningClose(id, true, false);
+            if (!warningScreenFinishIssued) {
+                warningScreenFinishIssued = true;
+                screen.finishWarning(id, warningWindowGeneration, false);
+            }
+            finalizeWarningWindow(id, false, false);
             return 1;
         }
-        if (warningWindowCommands != null)
-            warningWindowCommands.send(MotionDetectorProtocol.WINDOW_CLOSE, Bundle.EMPTY);
-        control.postDelayed(warningCloseTimeout, MotionDetectorProtocol.WINDOW_CLOSE_TIMEOUT_MS);
-        sendStatus(id, "warning_closing", "waiting for runtime window CLOSED before any owned sleep");
+        if (!canRestore) {
+            enterWarningBlackFallback(id, "owned sleep is not currently allowed", true);
+            return 1;
+        }
+        requestWarningSleepPreparation(id);
         return 1;
     }
 
-    private void completeWarningClose(String id, boolean closed, boolean cancelled) {
+    private void requestWarningSleepPreparation(String id) {
+        if (!warning || warningPowerOnClose || warningBlackFallback || warningSleepAttempted) return;
+        warningClosing = true;
+        warningPreparingSleep = true;
+        warningRestoreAllowed = true;
+        control.removeCallbacks(warningCloseTimeout);
+        control.postDelayed(warningCloseTimeout, MotionDetectorProtocol.WINDOW_CLOSE_TIMEOUT_MS);
+        if (warningWindowCommands != null)
+            warningWindowCommands.send(MotionDetectorProtocol.WINDOW_PREPARE_SLEEP, Bundle.EMPTY);
+        sendStatus(id, "warning_sleep_preparing", "waiting for Activity to remove keep-screen and turn-screen-on flags");
+    }
+
+    private void onWarningPrepared(String id) {
+        if (!warning || !warningPreparingSleep || warningPowerOnClose || warningBlackFallback) return;
+        control.removeCallbacks(warningCloseTimeout);
+        warningPreparingSleep = false;
+        boolean canSleep = warningRestoreAllowed && warningWindowDrawn && eligible
+                && sessionRuntime.power() == 0 && !sessionRuntime.suspended() && !teardownPending;
+        if (!canSleep) {
+            enterWarningBlackFallback(id, "sleep preparation completed after ownership became invalid", true);
+            return;
+        }
+        warningSleepAttempted = true;
+        warningScreenFinishIssued = true;
+        if (warningWindowCommands != null)
+            warningWindowCommands.send(MotionDetectorProtocol.WINDOW_SLEEP_STARTED, Bundle.EMPTY);
+        screen.finishWarning(id, warningWindowGeneration, true);
+        sendStatus(id, "warning_sleep_started", "Activity acknowledged flags cleared; guarded OEM sleep attempt started");
+    }
+
+    private void enterWarningBlackFallback(String id, String reason, boolean stopScreen) {
+        if (!sameSession(id) || !warning) return;
+        if (warningPowerOnClose) {
+            sendWarningWindowClose(id);
+            return;
+        }
+        warningClosing = true;
+        warningRestoreAllowed = false;
+        warningPreparingSleep = false;
+        warningBlackFallback = true;
         control.removeCallbacks(warningWindowTimeout);
         control.removeCallbacks(warningTimeout);
         control.removeCallbacks(warningCloseTimeout);
-        boolean canRestore = closed && !cancelled && warningRestoreAllowed && warningWindowDrawn
-                && eligible && sessionRuntime.power() == 0 && !sessionRuntime.suspended();
+        if (!warningWindowLaunched) {
+            finalizeWarningWindow(id, false, false);
+            return;
+        }
+        if (warningWindowCommands != null)
+            warningWindowCommands.send(MotionDetectorProtocol.WINDOW_BLACK_FALLBACK, Bundle.EMPTY);
+        if (stopScreen && !warningSleepAttempted && !warningScreenFinishIssued) {
+            warningScreenFinishIssued = true;
+            screen.finishWarning(id, warningWindowGeneration, false);
+        }
+        endOwnedWake(id);
+        sendStatus(id, "warning_black_fallback", reason == null ? "sleep/restore not confirmed" : reason);
+    }
+
+    private void closeWarningAfterBlackRestore(String id, int generation) {
+        if (!sameSession(id) || generation != warningWindowGeneration || !warning
+                || !warningSleepAttempted || warningPowerOnClose) return;
+        warningClosing = true;
+        warningAwaitingClosed = true;
+        warningPreparingSleep = false;
+        warningRestoreAllowed = true;
+        sendWarningWindowClose(id);
+    }
+
+    private void closeWarningForPowerOn(String id) {
+        if (!sameSession(id) || !warning) return;
+        warningPowerOnClose = true;
+        warningClosing = true;
+        warningPreparingSleep = false;
+        warningAwaitingClosed = true;
+        warningRestoreAllowed = false;
+        warningBlackFallback = false;
+        control.removeCallbacks(warningTimeout);
+        control.removeCallbacks(warningWindowTimeout);
+        screen.markUserTakeover(id, warningWindowGeneration);
+        if (!warningWindowLaunched) {
+            finalizeWarningWindow(id, false, false);
+            return;
+        }
+        sendWarningWindowClose(id);
+    }
+
+    private void sendWarningWindowClose(String id) {
+        if (warningWindowCommands == null) return;
+        if (warningCloseSent) return;
+        warningWindowCommands.send(MotionDetectorProtocol.WINDOW_CLOSE, Bundle.EMPTY);
+        warningCloseSent = true;
+        warningAwaitingClosed = true;
+        control.removeCallbacks(warningCloseTimeout);
+        control.postDelayed(warningCloseTimeout, MotionDetectorProtocol.WINDOW_CLOSE_TIMEOUT_MS);
+    }
+
+    private void finalizeWarningWindow(String id, boolean closed, boolean cancelled) {
+        if (!sameSession(id) || !warning) return;
+        control.removeCallbacks(warningWindowTimeout);
+        control.removeCallbacks(warningTimeout);
+        control.removeCallbacks(warningCloseTimeout);
         if (cancelled) {
             if (eligible) sessionRuntime.blockWarningRetry();
-            screen.markUserTakeover(id);
+            screen.markUserTakeover(id, warningWindowGeneration);
         }
         warning = false;
         warningWindowPending = false;
@@ -1175,9 +1313,20 @@ public final class MotionDetectorShellMain {
         warningVisible = false;
         warningWindowLaunched = false;
         warningWindowCommands = null;
-        screen.finishWarning(id, canRestore);
-        sendStatus(id, cancelled ? "warning_user_dismissed" : closed ? "warning_window_closed" : "warning_window_close_unconfirmed",
-                "closed=" + closed + "; restore_allowed=" + canRestore);
+        warningClosing = false;
+        warningRestoreAllowed = false;
+        warningPreparingSleep = false;
+        warningAwaitingClosed = false;
+        warningBlackFallback = false;
+        warningPowerOnClose = false;
+        warningCloseSent = false;
+        warningSleepAttempted = false;
+        warningScreenFinishIssued = false;
+        warningWindowGeneration++;
+        endOwnedWake(id);
+        sendStatus(id, cancelled ? "warning_user_dismissed" : closed ? "warning_window_closed" : "warning_window_unavailable",
+                "Activity closed=" + closed + "; cancelled=" + cancelled);
+        if (teardownPending) continuePendingTeardown();
     }
 
     private void finishWarningAfterPolicy() {
@@ -1201,8 +1350,17 @@ public final class MotionDetectorShellMain {
     private void onWarningCloseTimeout() {
         if (sessionId == null || !warning || !warningClosing) return;
         if (eligible) sessionRuntime.blockWarningRetry();
-        sendError(sessionId, "warning_window_close", "CLOSED not received within 2 seconds; owned sleep refused");
-        completeWarningClose(sessionId, false, false);
+        if (warningPreparingSleep) {
+            sendError(sessionId, "warning_window_prepare", "PREPARED not received within 2 seconds; owned sleep refused");
+            enterWarningBlackFallback(sessionId, "Activity did not acknowledge sleep preparation", true);
+            return;
+        }
+        if (warningAwaitingClosed) {
+            sendError(sessionId, "warning_window_close", "CLOSED not received within 2 seconds; warning remains active");
+            if (!warningPowerOnClose && warningWindowCommands != null)
+                warningWindowCommands.send(MotionDetectorProtocol.WINDOW_BLACK_FALLBACK, Bundle.EMPTY);
+            if (teardownPending) sendStatus(sessionId, "teardown_wait_warning_close", "retaining Activity command channel until actual CLOSED acknowledgement");
+        }
     }
 
     private void onWarningWindowResult(String id, int generation, int code, Bundle data) {
@@ -1219,17 +1377,30 @@ public final class MotionDetectorShellMain {
                 if (commands == null) throw new IllegalStateException("window close channel missing");
                 warningWindowCommands = commands;
                 sendStatus(id, "warning_window_ready", "matching runtime window supplied close/deadline channel");
-                if (warningClosing) commands.send(MotionDetectorProtocol.WINDOW_CLOSE, Bundle.EMPTY);
+                if (warningPowerOnClose || warningCloseSent) sendWarningWindowClose(id);
+                else if (warningBlackFallback) commands.send(MotionDetectorProtocol.WINDOW_BLACK_FALLBACK, Bundle.EMPTY);
+                else if (warningPreparingSleep) commands.send(MotionDetectorProtocol.WINDOW_PREPARE_SLEEP, Bundle.EMPTY);
             } else if (code == MotionDetectorProtocol.WINDOW_DRAWN && !warningClosing) {
                 if (warningWindowCommands == null) throw new IllegalStateException("draw arrived before window READY");
                 acknowledgeWarningDraw(id);
+            } else if (code == MotionDetectorProtocol.WINDOW_REQUEST_FINISH && !warningClosing) {
+                finishWarning(id, true);
+            } else if (code == MotionDetectorProtocol.WINDOW_PREPARED) {
+                onWarningPrepared(id);
+            } else if (code == MotionDetectorProtocol.WINDOW_PAUSED) {
+                screen.warningActivityPaused(id, generation);
+            } else if (code == MotionDetectorProtocol.WINDOW_USER_TAKEOVER) {
+                if (eligible) sessionRuntime.blockWarningRetry();
+                screen.markUserTakeover(id, generation);
+                warningClosing = true;
+                warningRestoreAllowed = false;
+                warningPreparingSleep = false;
+                warningAwaitingClosed = true;
+                control.removeCallbacks(warningTimeout);
+                control.postDelayed(warningCloseTimeout, MotionDetectorProtocol.WINDOW_CLOSE_TIMEOUT_MS);
             } else if (code == MotionDetectorProtocol.WINDOW_CLOSED) {
                 boolean cancelled = data == null || data.getBoolean(MotionDetectorProtocol.WINDOW_CANCELLED, true);
-                if (!warningClosing) {
-                    warningClosing = true;
-                    warningRestoreAllowed = warningVisible && !cancelled;
-                }
-                completeWarningClose(id, true, cancelled);
+                finalizeWarningWindow(id, true, cancelled || !warningPowerOnClose && !warningSleepAttempted);
             }
         } catch (Throwable error) {
             if (!currentWindow) {
@@ -1238,7 +1409,7 @@ public final class MotionDetectorShellMain {
             }
             if (eligible) sessionRuntime.blockWarningRetry();
             sendError(id, "warning_window_callback", summary(error));
-            finishWarning(id, false);
+            enterWarningBlackFallback(id, summary(error), true);
         }
     }
 
@@ -1268,6 +1439,8 @@ public final class MotionDetectorShellMain {
     }
 
     private void endOwnedWake(String id) {
+        if (!warningWakeTokenOwned) return;
+        warningWakeTokenOwned = false;
         try { cameraOperation(MotionDetectorProtocol.CAMERA_END_WAKE, id, null, null, 0); }
         catch (Throwable error) { sendError(id, "wake_release", summary(error)); }
     }
@@ -1277,7 +1450,8 @@ public final class MotionDetectorShellMain {
         required |= !cameraPreparation.stopped();
         try {
             if (required && wakeLock == null) {
-                PowerManager manager = (PowerManager) systemContext.getSystemService(Context.POWER_SERVICE);
+                Context attributedContext = TurnSignalShellMain.shellContext(systemContext);
+                PowerManager manager = (PowerManager) attributedContext.getSystemService(Context.POWER_SERVICE);
                 if (manager == null) throw new IllegalStateException("PowerManager unavailable");
                 wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
                         "com.byd.extend:motion-shell");
@@ -1285,7 +1459,7 @@ public final class MotionDetectorShellMain {
             }
             if (required && !wakeLock.isHeld()) wakeLock.acquire();
             else if (!required && wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        } catch (RuntimeException error) {
+        } catch (Exception error) {
             if (sessionId != null) sendError(sessionId, "wake_lock", summary(error));
         }
     }
@@ -1309,8 +1483,8 @@ public final class MotionDetectorShellMain {
                         event.optString("error", ""));
                 return;
             }
-            if (teardownPending || shuttingDown || "error".equals(state)) return;
-            if ("helper_death".equals(kind) || "helper_ping_failed".equals(kind)) {
+            boolean terminal = teardownPending || shuttingDown || "error".equals(state);
+            if (!terminal && ("helper_death".equals(kind) || "helper_ping_failed".equals(kind))) {
                 if (!expectedSourceEpoch.equals(event.optString("source_epoch", ""))) return;
                 sessionRuntime.invalidateTelemetry();
                 cameraPreparation.stop();
@@ -1323,6 +1497,14 @@ public final class MotionDetectorShellMain {
             String epoch = event.optString("source_epoch", "");
             if (epoch.isEmpty() || !epoch.equals(expectedSourceEpoch)) return;
             int value = event.optInt("value", Integer.MIN_VALUE);
+            if (terminal) {
+                if (warning && "power".equals(signal)
+                        && AvasEventPolicy.normalizedPower(value) == 1)
+                    closeWarningForPowerOn(id);
+                return;
+            }
+            if ("power".equals(signal) && AvasEventPolicy.normalizedPower(value) == 1)
+                closeWarningForPowerOn(id);
             ManualCheck check = manualCheck;
             if (check != null && "power".equals(signal) && AvasEventPolicy.normalizedPower(value) != 1) {
                 completeCheck(check, MotionCheckupClient.NOT_CHECKED, "power_not_on",
@@ -1778,6 +1960,15 @@ public final class MotionDetectorShellMain {
             state = "teardown_pending";
             return;
         }
+        if (warning) {
+            if (sessionRuntime.power() == 1) closeWarningForPowerOn(id);
+            else enterWarningBlackFallback(id, "Motion teardown is waiting for the active warning window", true);
+            if (warning) {
+                state = "teardown_wait_warning_close";
+                sendStatus(id, state, "warning Activity remains available for manual or PowerON close until CLOSED is confirmed");
+                return;
+            }
+        }
         control.removeCallbacks(armCheck);
         control.removeCallbacks(firstInferenceTimeout);
         control.removeCallbacks(warningWindowTimeout);
@@ -1786,7 +1977,6 @@ public final class MotionDetectorShellMain {
         eligible = false;
         policy.stop(SystemClock.elapsedRealtime());
         screen.setEligible(id, false);
-        if (warning) finishWarning(id, false);
         deliberatelyDetachedProducerReason = "motion_detector_idle";
         boolean recorderStopped = stopRecording(teardownReason, teardownSurfacesDrained);
         boolean readerDetached = detachAndCloseReader(teardownSurfacesDrained);
@@ -1839,6 +2029,15 @@ public final class MotionDetectorShellMain {
         warning = false;
         warningWindowPending = false;
         warningWindowDrawn = false;
+        warningRestoreAllowed = false;
+        warningPreparingSleep = false;
+        warningSleepAttempted = false;
+        warningScreenFinishIssued = false;
+        warningAwaitingClosed = false;
+        warningBlackFallback = false;
+        warningPowerOnClose = false;
+        warningCloseSent = false;
+        warningWakeTokenOwned = false;
         prepared = false;
         eligible = false;
         IBinder callback = teardownCallback;

@@ -161,8 +161,11 @@ public final class MotionStorage {
                         CleanupResult result = cleanOemNormalToLimit(nextVolume, nextLimit);
                         Log.i(TAG, "oem_cleanup_finished volume=" + nextVolume
                                 + " elapsed_ms=" + (android.os.SystemClock.elapsedRealtime() - started)
-                                + " complete=" + result.complete + " deleted_bytes=" + result.deletedBytes
-                                + " reason=" + result.reason);
+                                + " available=" + result.available + " complete=" + result.complete
+                                + " bytes_before=" + result.bytesBefore
+                                + " bytes_after=" + result.remainingBytes
+                                + " deleted_bytes=" + result.deletedBytes + " reason=" + result.reason
+                                + " skipped={" + result.skips + "}");
                     } catch (RuntimeException failure) {
                         Log.w(TAG, "oem_cleanup_failed volume=" + nextVolume, failure);
                     }
@@ -523,84 +526,132 @@ public final class MotionStorage {
             return CleanupResult.unavailable("oem_storage_permission_denied");
         long currentBytes = queryRecorderBytes(volume);
         if (currentBytes < 0) return CleanupResult.unavailable("recorder_tree_unreadable");
-        if (currentBytes <= maximumArchiveBytes) return CleanupResult.success(0, currentBytes);
+        long initialBytes = currentBytes;
+        CleanupSkips skips = new CleanupSkips();
+        if (currentBytes <= maximumArchiveBytes) return CleanupResult.success(initialBytes, 0, currentBytes, skips);
 
         final ArrayList<CdrNormalRow> rows = new ArrayList<>();
         try (Cursor cursor = oemRecorderProvider.queryNormal(null, null)) {
-            if (cursor == null) return CleanupResult.unavailable("cdr_normal_query_returned_null");
+            if (cursor == null) return CleanupResult.unavailable("cdr_normal_query_returned_null", currentBytes, skips);
             int pathColumn = cursor.getColumnIndex("file_path");
             int nameColumn = cursor.getColumnIndex("name");
-            if (pathColumn < 0 || nameColumn < 0) return CleanupResult.unavailable("cdr_normal_schema_unrecognized");
+            if (pathColumn < 0 || nameColumn < 0)
+                return CleanupResult.unavailable("cdr_normal_schema_unrecognized", currentBytes, skips);
             while (cursor.moveToNext()) {
                 String path = cursor.getString(pathColumn);
                 if (closed || Thread.currentThread().isInterrupted())
-                    return CleanupResult.unavailable("cleanup_cancelled");
+                    return CleanupResult.unavailable("cleanup_cancelled", currentBytes, skips);
                 String indexedName = cursor.getString(nameColumn);
                 CdrNormalRow row = cdrNormalRow(volume, path);
-                if (row != null && row.file.getName().equals(indexedName)) rows.add(row);
+                if (row == null || !row.file.getName().equals(indexedName)) skips.candidateRejected++;
+                else rows.add(row);
             }
         } catch (SecurityException e) {
             Log.w(TAG, "cdr_normal_cleanup_permission_denied volume=" + volumeId, e);
-            return CleanupResult.unavailable("cdr_provider_permission_denied");
+            return CleanupResult.unavailable("cdr_provider_permission_denied", currentBytes, skips);
         } catch (RuntimeException e) {
             Log.w(TAG, "cdr_normal_cleanup_provider_unavailable volume=" + volumeId, e);
-            return CleanupResult.unavailable("cdr_provider_unavailable");
+            return CleanupResult.unavailable("cdr_provider_unavailable", currentBytes, skips);
         }
         rows.sort(Comparator.comparingLong(row -> row.timestampMs));
         long deleted = 0;
         for (CdrNormalRow row : rows) {
             if (closed || Thread.currentThread().isInterrupted())
-                return CleanupResult.failure(deleted, currentBytes, "cleanup_cancelled");
+                return CleanupResult.failure(initialBytes, deleted, currentBytes, "cleanup_cancelled", skips);
             if (currentBytes <= maximumArchiveBytes) break;
             File file = row.file;
-            if (!file.isFile() || file.length() <= 0 || !validVideoFile(file)) continue;
+            if (!file.isFile()) { skips.missingFiles++; continue; }
+            if (file.length() <= 0) { skips.emptyFiles++; continue; }
+            if (!validVideoFile(file)) { skips.invalidVideos++; continue; }
             // Requery the same exact table/path immediately before deleting; do not trust a stale scan.
-            if (cdrNormalRowState(row.path, file.getName()) != CdrRowState.PRESENT) continue;
-            long bytes = file.length();
-            if (!file.delete()) {
-                Log.w(TAG, "cdr_normal_file_delete_failed path=" + row.path);
+            CdrRowState beforeDelete = cdrNormalRowState(row.path, file.getName());
+            if (beforeDelete != CdrRowState.PRESENT) {
+                if (beforeDelete == CdrRowState.ABSENT) skips.rowAbsent++;
+                else skips.rowUnknown++;
                 continue;
             }
+            long bytes = file.length();
+            if (!file.delete()) {
+                skips.fileDeleteFailures++;
+                continue;
+            }
+            // Physical deletion happened; account it even if the provider's row cleanup fails.
+            deleted += bytes;
+            currentBytes = Math.max(0, currentBytes - bytes);
             try {
                 oemRecorderProvider.deleteNormal("file_path=?", new String[]{row.path});
             } catch (RuntimeException e) {
+                skips.rowDeleteFailures++;
                 Log.e(TAG, "cdr_normal_row_cleanup_failed after deleting " + row.path, e);
-                return CleanupResult.failure(deleted, currentBytes, "cdr_row_cleanup_failed");
+                return CleanupResult.failure(initialBytes, deleted, currentBytes, "cdr_row_cleanup_failed", skips);
             }
-            if (cdrNormalRowState(row.path, file.getName()) != CdrRowState.ABSENT) {
+            CdrRowState afterDelete = cdrNormalRowState(row.path, file.getName());
+            if (afterDelete != CdrRowState.ABSENT) {
+                if (afterDelete == CdrRowState.PRESENT) skips.rowRemains++;
+                else skips.rowVerifyUnknown++;
                 Log.e(TAG, "cdr_normal_row_remains_after_file_delete path=" + row.path);
-                return CleanupResult.failure(deleted, currentBytes, "cdr_row_cleanup_failed");
+                return CleanupResult.failure(initialBytes, deleted, currentBytes, "cdr_row_cleanup_failed", skips);
             }
-            deleted += bytes;
-            currentBytes = Math.max(0, currentBytes - bytes);
         }
         if (currentBytes > maximumArchiveBytes) {
-            return CleanupResult.failure(deleted, currentBytes, "no_deletable_completed_normal_files");
+            return CleanupResult.failure(initialBytes, deleted, currentBytes,
+                    "no_deletable_completed_normal_files", skips);
         }
-        return CleanupResult.success(deleted, currentBytes);
+        return CleanupResult.success(initialBytes, deleted, currentBytes, skips);
     }
 
     static final class CleanupResult {
         final boolean available;
         final boolean complete;
+        final long bytesBefore;
         final long deletedBytes;
         final long remainingBytes;
         final String reason;
+        final CleanupSkips skips;
 
-        private CleanupResult(boolean available, boolean complete, long deletedBytes, long remainingBytes, String reason) {
+        private CleanupResult(boolean available, boolean complete, long bytesBefore, long deletedBytes,
+                long remainingBytes, String reason, CleanupSkips skips) {
             this.available = available; this.complete = complete; this.deletedBytes = deletedBytes;
-            this.remainingBytes = remainingBytes; this.reason = reason;
+            this.bytesBefore = bytesBefore; this.remainingBytes = remainingBytes; this.reason = reason;
+            this.skips = skips;
         }
-        static CleanupResult unavailable(String reason) { return new CleanupResult(false, false, 0, -1, reason); }
-        static CleanupResult failure(long deleted, long remaining, String reason) {
-            return new CleanupResult(true, false, deleted, remaining, reason);
+        static CleanupResult unavailable(String reason) {
+            return unavailable(reason, -1, new CleanupSkips());
         }
-        static CleanupResult success(long deleted, long remaining) {
-            return new CleanupResult(true, true, deleted, remaining, null);
+        static CleanupResult unavailable(String reason, long currentBytes, CleanupSkips skips) {
+            return new CleanupResult(false, false, currentBytes, 0, currentBytes, reason, skips);
+        }
+        static CleanupResult failure(long before, long deleted, long remaining, String reason, CleanupSkips skips) {
+            return new CleanupResult(true, false, before, deleted, remaining, reason, skips);
+        }
+        static CleanupResult success(long before, long deleted, long remaining, CleanupSkips skips) {
+            return new CleanupResult(true, true, before, deleted, remaining, null, skips);
         }
     }
 
-    private static final class CdrNormalRow {
+    private static final class CleanupSkips {
+        int candidateRejected;
+        int missingFiles;
+        int emptyFiles;
+        int invalidVideos;
+        int rowAbsent;
+        int rowUnknown;
+        int fileDeleteFailures;
+        int rowDeleteFailures;
+        int rowRemains;
+        int rowVerifyUnknown;
+
+        @Override public String toString() {
+            return "candidate_rejected=" + candidateRejected + ",missing_files=" + missingFiles
+                    + ",empty_files=" + emptyFiles + ",invalid_videos=" + invalidVideos
+                    + ",row_absent=" + rowAbsent + ",row_unknown=" + rowUnknown
+                    + ",file_delete_failures=" + fileDeleteFailures
+                    + ",row_delete_failures=" + rowDeleteFailures + ",row_remains=" + rowRemains
+                    + ",row_verify_unknown=" + rowVerifyUnknown;
+        }
+    }
+
+    static final class CdrNormalRow {
         final String path;
         final File file;
         final long timestampMs;
@@ -610,8 +661,12 @@ public final class MotionStorage {
     }
 
     private CdrNormalRow cdrNormalRow(Volume volume, String path) {
+        if (volume.publicRoot == null) return null;
+        return cdrNormalRow(new File(volume.publicRoot, "Recorder/Normal"), path);
+    }
+
+    static CdrNormalRow cdrNormalRow(File expectedDirectory, String path) {
         if (path == null) return null;
-        File expectedDirectory = new File(volume.publicRoot, "Recorder/Normal");
         try {
             File expected = expectedDirectory.getCanonicalFile();
             File file = new File(path).getCanonicalFile();
@@ -627,7 +682,7 @@ public final class MotionStorage {
             ParsePosition position = new ParsePosition(0);
             Date date = format.parse(timestamp, position);
             if (date == null || position.getIndex() != timestamp.length()) return null;
-            return new CdrNormalRow(file.getAbsolutePath(), file, date.getTime());
+            return new CdrNormalRow(path, file, date.getTime());
         } catch (IOException | RuntimeException invalid) {
             return null;
         }

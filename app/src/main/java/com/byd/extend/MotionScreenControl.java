@@ -15,7 +15,7 @@ import java.util.concurrent.TimeoutException;
 
 /** One-shot shell-UID screen control guarded by an observed, continuously-OFF session. */
 final class MotionScreenControl implements AutoCloseable {
-    interface Listener { void onState(String sessionId, String state, String detail); }
+    interface Listener { void onState(String sessionId, int warningGeneration, String state, String detail); }
     private static final String POWER_IFACE = "android.os.IPowerManager";
     private static final String DISPLAY_IFACE = "android.hardware.display.IDisplayManager";
     private static final String ANIMATION_IFACE = "android.os.IAccAnimation";
@@ -43,6 +43,10 @@ final class MotionScreenControl implements AutoCloseable {
     private boolean coverAttempted;
     private boolean coverRemoved;
     private boolean finishAttempted;
+    private volatile int warningGeneration = -1;
+    private volatile boolean userTakeoverRequested;
+    private volatile int takeoverGeneration = -1;
+    private boolean sleepCommandIssued;
     private final MotionScreenCyclePolicy cycle = new MotionScreenCyclePolicy();
 
     MotionScreenControl(Listener stateListener) {
@@ -61,6 +65,10 @@ final class MotionScreenControl implements AutoCloseable {
             coverAttempted = false;
             coverRemoved = false;
             finishAttempted = false;
+            warningGeneration = -1;
+            userTakeoverRequested = false;
+            takeoverGeneration = -1;
+            sleepCommandIssued = false;
             cycle.beginSession();
             report("session_ready", "screen control awaits eligible camera session");
         });
@@ -81,9 +89,18 @@ final class MotionScreenControl implements AutoCloseable {
         });
     }
 
-    void wakeForWarning(String id) {
+    void wakeForWarning(String id, int generation) {
         handler.post(() -> {
-            if (!sameSession(id) || !cycle.mayStartPreflight(eligible, offContinuous, ownsWake)) {
+            if (!sameSession(id)) return;
+            warningGeneration = generation;
+            handler.removeCallbacks(observe);
+            synchronized (this) { sleepCommandIssued = false; }
+            if (takeoverGeneration == generation) {
+                cycle.markUserTakeover();
+                report("wake_skipped", "PowerON or user takeover arrived before the wake request");
+                return;
+            }
+            if (!cycle.mayStartPreflight(eligible, offContinuous, ownsWake)) {
                 report("wake_skipped", "session is not eligible or screen is already worker-owned");
                 return;
             }
@@ -118,7 +135,14 @@ final class MotionScreenControl implements AutoCloseable {
                     report("wake_skipped", "screen cycle remains uncertain");
                     return;
                 }
-                cycle.beginWakeAttempt(); // No repeat unless a full black/off baseline is observed.
+                synchronized (this) {
+                    if (takeoverGeneration == generation) {
+                        cycle.markUserTakeover();
+                        report("wake_skipped", "PowerON or user takeover arrived before the wake request");
+                        return;
+                    }
+                    cycle.beginWakeAttempt(); // No repeat unless a full black/off baseline is observed.
+                }
                 controlCall("wakeUp reason=13", () -> {
                     Object power = service(POWER_IFACE);
                     Class<?> api = Class.forName(POWER_IFACE);
@@ -153,9 +177,9 @@ final class MotionScreenControl implements AutoCloseable {
     }
 
     /** Called only after the app-owned fullscreen warning window reports that it is ready. */
-    void warningWindowReady(String id) {
+    void warningWindowReady(String id, int generation) {
         handler.post(() -> {
-            if (!sameSession(id) || !eligible || !ownsWake || cycle.userTookOver()
+            if (!sameWarning(id, generation) || !eligible || !ownsWake || cycle.userTookOver()
                     || cycle.uncertain() || coverAttempted) {
                 report("cover_release_skipped", "screen session is not safely owned or command already attempted");
                 return;
@@ -186,14 +210,15 @@ final class MotionScreenControl implements AutoCloseable {
         });
     }
 
-    void finishWarning(String id, boolean restoreAllowed) {
+    void finishWarning(String id, int generation, boolean restoreAllowed) {
         handler.post(() -> {
-            if (!sameSession(id) || finishAttempted) {
+            if (!sameWarning(id, generation) || finishAttempted) {
                 report("sleep_skipped", "session mismatch or finish already attempted");
                 return;
             }
             finishAttempted = true;
-            if (cycle.userTookOver()) {
+            if (takeoverRequested()) {
+                cycle.markUserTakeover();
                 ownsWake = false;
                 stopPowerObservation();
                 report("user_dismissed_no_sleep", "this cycle will not sleep; later wake requires fresh black/off confirmation");
@@ -219,6 +244,16 @@ final class MotionScreenControl implements AutoCloseable {
                     report("sleep_skipped", "current vehicle/display state is not confirmed");
                     return;
                 }
+                synchronized (this) {
+                    if (takeoverRequested()) {
+                        cycle.markUserTakeover();
+                        ownsWake = false;
+                        stopPowerObservation();
+                        report("user_dismissed_no_sleep", "user took over before the owned sleep command");
+                        return;
+                    }
+                    sleepCommandIssued = true;
+                }
                 controlCall("goToSleep reason=13 flags=1", () -> {
                     Object power = service(POWER_IFACE);
                     Class<?> api = Class.forName(POWER_IFACE);
@@ -229,7 +264,7 @@ final class MotionScreenControl implements AutoCloseable {
                 long deadline = SystemClock.elapsedRealtime() + WAIT_MS;
                 boolean off = false;
                 while (SystemClock.elapsedRealtime() < deadline) {
-                    if (!offContinuous || cycle.userTookOver() || readPower() != POWER_OFF) break;
+                    if (!offContinuous || takeoverRequested() || readPower() != POWER_OFF) break;
                     if (!isInteractive() && displayState() == DISPLAY_OFF) {
                         off = true;
                         break;
@@ -237,9 +272,29 @@ final class MotionScreenControl implements AutoCloseable {
                     SystemClock.sleep(50L);
                 }
                 if (!off) {
+                    if (takeoverRequested()) {
+                        cycle.markUserTakeover();
+                        ownsWake = false;
+                        stopPowerObservation();
+                        report("user_dismissed_no_sleep", "user took over during the owned sleep transition");
+                        return;
+                    }
                     cycle.markUncertain();
                     stopPowerObservation();
                     report("sleep_uncertain", "sleep transition was not observed; transaction 2 was not sent");
+                    return;
+                }
+                if (takeoverRequested() || !offContinuous || readPower() != POWER_OFF) {
+                    if (takeoverRequested()) {
+                        cycle.markUserTakeover();
+                        ownsWake = false;
+                        stopPowerObservation();
+                        report("user_dismissed_no_sleep", "user or vehicle Power took over before black restoration");
+                    } else {
+                        cycle.markUncertain();
+                        stopPowerObservation();
+                        report("black_restore_uncertain", "OFF ownership was lost before transaction 2");
+                    }
                     return;
                 }
                 int result = animationCommand(2);
@@ -251,7 +306,7 @@ final class MotionScreenControl implements AutoCloseable {
                 }
                 long restoreDeadline = SystemClock.elapsedRealtime() + WAIT_MS;
                 while (SystemClock.elapsedRealtime() < restoreDeadline) {
-                    if (!offContinuous || cycle.userTookOver() || readPower() != POWER_OFF) break;
+                    if (!offContinuous || takeoverRequested() || readPower() != POWER_OFF) break;
                     if (!isInteractive() && displayState() == DISPLAY_OFF
                             && "1".equals(animationStatus())) {
                         cycle.confirmOwnedBlackRestore();
@@ -272,13 +327,34 @@ final class MotionScreenControl implements AutoCloseable {
         });
     }
 
-    void markUserTakeover(String id) {
+    void markUserTakeover(String id, int generation) {
+        synchronized (this) {
+            if (!sameSession(id) || generation < warningGeneration) return;
+            warningGeneration = generation;
+            userTakeoverRequested = true;
+            takeoverGeneration = generation;
+        }
         handler.post(() -> {
-            if (!sameSession(id)) return;
+            if (!sameWarning(id, generation)) return;
             cycle.markUserTakeover();
             ownsWake = false;
             stopPowerObservation();
             report("user_takeover", "this cycle will not sleep; later wake requires fresh black/off confirmation");
+        });
+    }
+
+    void warningActivityPaused(String id, int generation) {
+        synchronized (this) {
+            if (!sameWarning(id, generation) || sleepCommandIssued) return;
+            userTakeoverRequested = true;
+            takeoverGeneration = generation;
+        }
+        handler.post(() -> {
+            if (!sameWarning(id, generation)) return;
+            cycle.markUserTakeover();
+            ownsWake = false;
+            stopPowerObservation();
+            report("user_takeover", "warning Activity paused before the owned sleep command");
         });
     }
 
@@ -310,6 +386,18 @@ final class MotionScreenControl implements AutoCloseable {
         coverRemoved = false;
         finishAttempted = false;
         offContinuous = true;
+        synchronized (this) {
+            userTakeoverRequested = false;
+            takeoverGeneration = -1;
+        }
+    }
+
+    private boolean sameWarning(String id, int generation) {
+        return sameSession(id) && warningGeneration == generation;
+    }
+
+    private boolean takeoverRequested() {
+        return userTakeoverRequested || cycle.userTookOver();
     }
 
     private boolean sameSession(String id) {
@@ -318,7 +406,7 @@ final class MotionScreenControl implements AutoCloseable {
 
     private void report(String state, String detail) {
         if (stateListener != null && sessionId != null)
-            stateListener.onState(sessionId, state, detail == null ? "" : detail);
+            stateListener.onState(sessionId, warningGeneration, state, detail == null ? "" : detail);
     }
 
     private <T> T bounded(String operation, Callable<T> action) throws Exception {

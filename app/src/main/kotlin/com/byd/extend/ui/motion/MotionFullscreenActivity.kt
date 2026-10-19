@@ -39,16 +39,25 @@ class MotionFullscreenActivity : ComponentActivity() {
     private var runtimeDismissal = false
     private var takeoverNotified = false
     private var activeRuntimeWarning = false
+    private var ownedSleepStarted = false
+    private var sleepPreparationPending = false
+    private var blackFallback = false
+    private var finishRequestSent = false
     private var readyNotifiedForSession: String? = null
     private val windowHandler = Handler(Looper.getMainLooper())
     private var windowReporter: ResultReceiver? = null
     private var windowDeadline = 0L
+    private var savedWarningBrightness: Float? = null
     private val windowTimeout = Runnable {
         if (activeRuntimeWarning && !isFinishing) {
-            runtimeDismissal = true
-            finish()
+            if (!finishRequestSent) {
+                finishRequestSent = true
+                windowReporter?.send(MotionDetectorProtocol.WINDOW_REQUEST_FINISH, Bundle.EMPTY)
+            }
+            scheduleBlackFallback()
         }
     }
+    private val windowFallbackTimeout = Runnable { applyBlackFallback() }
     private var renderGeneration by mutableIntStateOf(0)
     private var template by mutableStateOf<MotionTemplate?>(null)
 
@@ -83,16 +92,18 @@ class MotionFullscreenActivity : ComponentActivity() {
                 }
             }
             BackHandler { closeByUser() }
-            template?.let { active ->
+            if (template != null || blackFallback) {
                 Box(Modifier.fillMaxSize().background(Color.Black).clickable { closeByUser() }) {
-                    MotionTemplateCanvas(
-                        active,
-                        store,
-                        strings,
-                        Modifier.fillMaxSize(),
-                        readyKey = drawGeneration,
-                        onFirstRendered = renderedCallback
-                    )
+                    template?.let { active ->
+                        MotionTemplateCanvas(
+                            active,
+                            store,
+                            strings,
+                            Modifier.fillMaxSize(),
+                            readyKey = drawGeneration,
+                            onFirstRendered = renderedCallback
+                        )
+                    }
                 }
             }
         }
@@ -106,14 +117,21 @@ class MotionFullscreenActivity : ComponentActivity() {
 
     override fun onDestroy() {
         windowHandler.removeCallbacks(windowTimeout)
+        windowHandler.removeCallbacks(windowFallbackTimeout)
         reportWindowClosed()
+        restoreWarningBrightness()
         super.onDestroy()
     }
 
     override fun onPause() {
         super.onPause()
-        // Like the probe, never leave a runtime warning behind another window.
-        if (activeRuntimeWarning && !isFinishing && !runtimeDismissal) closeByUser()
+        if (activeRuntimeWarning && !isFinishing && !runtimeDismissal) {
+            if (ownedSleepStarted || sleepPreparationPending) {
+                windowReporter?.send(MotionDetectorProtocol.WINDOW_PAUSED, Bundle.EMPTY)
+            } else {
+                closeByUser()
+            }
+        }
     }
 
     override fun onResume() {
@@ -132,7 +150,14 @@ class MotionFullscreenActivity : ComponentActivity() {
             ACTION_SHOW -> {
                 reportWindowClosed()
                 windowHandler.removeCallbacks(windowTimeout)
+                windowHandler.removeCallbacks(windowFallbackTimeout)
+                restoreWarningBrightness()
                 readyNotifiedForSession = null
+                ownedSleepStarted = false
+                sleepPreparationPending = false
+                blackFallback = false
+                finishRequestSent = false
+                windowDeadline = 0L
                 val requestedSession = next.getStringExtra(EXTRA_SESSION)
                 val reporter = next.getParcelableExtra<ResultReceiver>(MotionDetectorProtocol.EXTRA_WINDOW_REPORTER)
                 if (requestedSession != null
@@ -159,12 +184,28 @@ class MotionFullscreenActivity : ComponentActivity() {
                             when (code) {
                                 MotionDetectorProtocol.WINDOW_CLOSE -> {
                                     runtimeDismissal = true
+                                    windowHandler.removeCallbacks(windowTimeout)
+                                    windowHandler.removeCallbacks(windowFallbackTimeout)
+                                    restoreWarningBrightness()
                                     finish()
                                 }
                                 MotionDetectorProtocol.WINDOW_SET_DEADLINE -> {
                                     val deadline = data?.getLong(MotionDetectorProtocol.WINDOW_DEADLINE) ?: 0L
                                     if (deadline > 0L) setWindowDeadline(deadline)
                                 }
+                                MotionDetectorProtocol.WINDOW_PREPARE_SLEEP -> {
+                                    sleepPreparationPending = true
+                                    windowHandler.removeCallbacks(windowTimeout)
+                                    windowDeadline = 0L
+                                    prepareWarningWindowForSleep()
+                                    windowReporter?.send(MotionDetectorProtocol.WINDOW_PREPARED, Bundle.EMPTY)
+                                    scheduleBlackFallback()
+                                }
+                                MotionDetectorProtocol.WINDOW_SLEEP_STARTED -> {
+                                    ownedSleepStarted = true
+                                    scheduleBlackFallback()
+                                }
+                                MotionDetectorProtocol.WINDOW_BLACK_FALLBACK -> applyBlackFallback()
                             }
                         }
                     }
@@ -182,6 +223,8 @@ class MotionFullscreenActivity : ComponentActivity() {
     }
 
     private fun configureRuntimeWarningWindow() {
+        if (savedWarningBrightness == null) savedWarningBrightness = window.attributes.screenBrightness
+        window.attributes = window.attributes.apply { screenBrightness = 1.0f }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -191,8 +234,44 @@ class MotionFullscreenActivity : ComponentActivity() {
             or android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
     }
 
+    private fun prepareWarningWindowForSleep() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setTurnScreenOn(false)
+        }
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            or android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+    }
+
+    private fun applyBlackFallback() {
+        if (!activeRuntimeWarning || isFinishing) return
+        windowHandler.removeCallbacks(windowTimeout)
+        windowHandler.removeCallbacks(windowFallbackTimeout)
+        prepareWarningWindowForSleep()
+        restoreWarningBrightness()
+        blackFallback = true
+        template = null
+        renderGeneration++
+    }
+
+    private fun scheduleBlackFallback() {
+        windowHandler.removeCallbacks(windowFallbackTimeout)
+        windowHandler.postDelayed(windowFallbackTimeout, MotionDetectorProtocol.WINDOW_CLOSE_TIMEOUT_MS)
+    }
+
+    private fun restoreWarningBrightness() {
+        val brightness = savedWarningBrightness ?: return
+        window.attributes = window.attributes.apply { screenBrightness = brightness }
+        savedWarningBrightness = null
+    }
+
     private fun closeByUser() {
+        if (activeRuntimeWarning) {
+            windowReporter?.send(MotionDetectorProtocol.WINDOW_USER_TAKEOVER, Bundle.EMPTY)
+        }
         takeoverNotified = true
+        windowHandler.removeCallbacks(windowTimeout)
+        windowHandler.removeCallbacks(windowFallbackTimeout)
+        restoreWarningBrightness()
         finish()
     }
 
@@ -202,7 +281,6 @@ class MotionFullscreenActivity : ComponentActivity() {
         if (isFinishing || isDestroyed) return
         val reporter = windowReporter ?: return
         readyNotifiedForSession = session
-        setWindowDeadline(SystemClock.elapsedRealtime() + MotionDetectorProtocol.WARNING_MS)
         reporter.send(MotionDetectorProtocol.WINDOW_DRAWN, Bundle.EMPTY)
     }
 

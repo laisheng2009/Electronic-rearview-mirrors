@@ -17,7 +17,7 @@ public final class MotionDetectorProtocol {
     static final String CONFIG_PATH = STATE_ROOT + "/config.json";
     static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
     static final String EXTRA_SESSION = "motion_session_id";
-    static final int VERSION = 9;
+    static final int VERSION = 10;
     public static final String EXTRA_WINDOW_REPORTER = "motion_window_reporter";
     public static final String WINDOW_COMMANDS = "window_commands";
     public static final String WINDOW_CANCELLED = "window_cancelled";
@@ -27,8 +27,15 @@ public final class MotionDetectorProtocol {
     public static final int WINDOW_CLOSED = 3;
     public static final int WINDOW_CLOSE = 4;
     public static final int WINDOW_SET_DEADLINE = 5;
+    public static final int WINDOW_PREPARE_SLEEP = 6;
+    public static final int WINDOW_SLEEP_STARTED = 7;
+    public static final int WINDOW_BLACK_FALLBACK = 8;
+    public static final int WINDOW_PREPARED = 6;
+    public static final int WINDOW_REQUEST_FINISH = 7;
+    public static final int WINDOW_PAUSED = 8;
+    public static final int WINDOW_USER_TAKEOVER = 9;
     public static final long WINDOW_START_TIMEOUT_MS = 30_000L;
-    static final long WINDOW_CLOSE_TIMEOUT_MS = 2_000L;
+    public static final long WINDOW_CLOSE_TIMEOUT_MS = 2_000L;
 
     static final int TX_PING = IBinder.FIRST_CALL_TRANSACTION;
     static final int TX_START = IBinder.FIRST_CALL_TRANSACTION + 1;
