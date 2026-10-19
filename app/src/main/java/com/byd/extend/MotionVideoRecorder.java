@@ -406,9 +406,23 @@ public final class MotionVideoRecorder implements AutoCloseable {
             int minimum = AudioRecord.getMinBufferSize(AUDIO_SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
             if (minimum <= 0) throw new IOException("audio_format_unavailable");
-            recorder = new AudioRecord(MediaRecorder.AudioSource.MIC, AUDIO_SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                    Math.max(minimum * 2, 6_400));
+            AudioRecord.Builder builder = new AudioRecord.Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.MIC)
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setSampleRate(AUDIO_SAMPLE_RATE)
+                            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+                    .setBufferSizeInBytes(Math.max(minimum * 2, 6_400));
+            if (shellMediaContext != null && Build.VERSION.SDK_INT >= 31) {
+                // app_process defaults to package android, which does not belong to shell UID2000.
+                try {
+                    AudioRecord.Builder.class.getMethod("setContext", Context.class)
+                            .invoke(builder, context);
+                } catch (ReflectiveOperationException failure) {
+                    throw new IOException("audio_record_context_failed", failure);
+                }
+            }
+            recorder = builder.build();
             audioRecord = recorder;
             if (recorder.getState() != AudioRecord.STATE_INITIALIZED)
                 throw new IOException("audio_record_not_initialized");
@@ -475,6 +489,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 notifyState("record_audio_permission_revoked");
             } else if (audioRunning) {
                 audioFailed = true;
+                Log.w(TAG, "motion_audio_capture_failed", failure);
                 String detail = failure.getMessage();
                 notifyState("audio_unavailable:" + (detail == null || detail.isEmpty()
                         ? failure.getClass().getSimpleName() : detail));

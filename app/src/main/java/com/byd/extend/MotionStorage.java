@@ -44,6 +44,7 @@ public final class MotionStorage {
     private final MotionMediaProvider.OemRecorder oemRecorderProvider;
     private final MotionShellMediaContext shellMediaContext;
     private final String ownerPackage;
+    private final String pendingOwnerPackage;
     private final StorageManager manager;
     private final Map<String, String> reportedVolumeMappings = new HashMap<>();
 
@@ -111,6 +112,7 @@ public final class MotionStorage {
         this.oemRecorderProvider = new MotionMediaProvider.OemRecorder.Resolver(this.context);
         this.shellMediaContext = null;
         this.ownerPackage = this.context.getPackageName();
+        this.pendingOwnerPackage = this.ownerPackage;
         this.manager = this.context.getSystemService(StorageManager.class);
     }
 
@@ -120,6 +122,7 @@ public final class MotionStorage {
         this.mediaProvider = shellMediaContext.mediaProvider();
         this.oemRecorderProvider = shellMediaContext.oemRecorderProvider();
         this.ownerPackage = MotionShellMediaContext.OWNER_PACKAGE;
+        this.pendingOwnerPackage = this.context.getPackageName();
         this.manager = this.context.getSystemService(StorageManager.class);
     }
 
@@ -219,10 +222,8 @@ public final class MotionStorage {
         if (volume.mediaStoreName == null) return -1;
         Uri collection = MediaStore.Video.Media.getContentUri(volume.mediaStoreName);
         String[] columns = {MediaStore.MediaColumns.SIZE};
-        String selection = MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
-                + MediaStore.MediaColumns.RELATIVE_PATH + "=?";
-        try (Cursor cursor = mediaProvider.query(collection, columns, selection,
-                new String[]{ownerPackage, RELATIVE_PATH}, null)) {
+        try (Cursor cursor = mediaProvider.query(collection, columns, ownedMediaSelection(),
+                ownedMediaArgs(), null)) {
             long total = 0;
             if (cursor == null) return -1;
             int size = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE);
@@ -255,11 +256,9 @@ public final class MotionStorage {
                     MediaStore.Video.Media.DATE_TAKEN, MediaStore.MediaColumns.DATE_ADDED,
                     MediaStore.Video.Media.WIDTH, MediaStore.Video.Media.HEIGHT,
                     MediaStore.MediaColumns.IS_PENDING};
-            String selection = MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
-                    + MediaStore.MediaColumns.RELATIVE_PATH + "=?";
             ArrayList<OwnedMedia> rows = new ArrayList<>();
-            try (Cursor cursor = mediaProvider.query(collection, columns, selection,
-                    new String[]{ownerPackage, RELATIVE_PATH},
+            try (Cursor cursor = mediaProvider.query(collection, columns, ownedMediaSelection(),
+                    ownedMediaArgs(),
                     MediaStore.MediaColumns.DATE_ADDED + " DESC")) {
                 if (cursor == null) throw new IOException("Motion MediaStore query returned null");
                 int id = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
@@ -335,6 +334,21 @@ public final class MotionStorage {
 
     enum MediaStoreOwnership { ABSENT, OWNED, OTHER }
 
+    private String ownedMediaSelection() {
+        return "(" + MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? OR ("
+                + MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
+                + MediaStore.MediaColumns.IS_PENDING + "=1)) AND "
+                + MediaStore.MediaColumns.RELATIVE_PATH + "=?";
+    }
+
+    private String[] ownedMediaArgs() {
+        return new String[]{ownerPackage, pendingOwnerPackage, RELATIVE_PATH};
+    }
+
+    private boolean matchesMediaOwner(String owner, int pending) {
+        return ownerPackage.equals(owner) || (pending == 1 && pendingOwnerPackage.equals(owner));
+    }
+
     MediaStoreOwnership inspectMediaStoreOwnership(Volume volume, Uri uri) throws IOException {
         if (volume == null || uri == null) return MediaStoreOwnership.OTHER;
         if (!volume.mounted) throw new IOException("Motion volume is not mounted");
@@ -343,11 +357,11 @@ public final class MotionStorage {
                 ? MediaStoreOwnership.OWNED : MediaStoreOwnership.OTHER;
         if (!isVolumeMediaUri(volume, uri)) return MediaStoreOwnership.OTHER;
         String[] columns = {MediaStore.MediaColumns._ID, MediaStore.MediaColumns.OWNER_PACKAGE_NAME,
-                MediaStore.MediaColumns.RELATIVE_PATH};
+                MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.IS_PENDING};
         try (Cursor cursor = mediaProvider.query(uri, columns, null, null, null)) {
             if (cursor == null) throw new IOException("MediaStore ownership query returned null");
             if (!cursor.moveToFirst()) return MediaStoreOwnership.ABSENT;
-            return ownerPackage.equals(cursor.getString(1))
+            return matchesMediaOwner(cursor.getString(1), cursor.getInt(3))
                     && RELATIVE_PATH.equals(cursor.getString(2))
                     ? MediaStoreOwnership.OWNED : MediaStoreOwnership.OTHER;
         } catch (RuntimeException failure) {
@@ -380,20 +394,13 @@ public final class MotionStorage {
                     MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.IS_PENDING};
             try (Cursor cursor = mediaProvider.query(uri, columns, null, null, null)) {
                 if (cursor == null || !cursor.moveToFirst()
-                        || !ownerPackage.equals(cursor.getString(0))
+                        || !matchesMediaOwner(cursor.getString(0), cursor.getInt(2))
                         || !RELATIVE_PATH.equals(cursor.getString(1))) return false;
                 if (cursor.getInt(2) == 0) return true;
             } catch (RuntimeException e) {
                 throw new IOException("Cannot inspect interrupted Motion media", e);
             }
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
-            if (mediaProvider.update(uri, values, MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
-                    + MediaStore.MediaColumns.RELATIVE_PATH + "=? AND "
-                    + MediaStore.MediaColumns.IS_PENDING + "=1",
-                    new String[]{ownerPackage, RELATIVE_PATH}) != 1) {
-                throw new IOException("Cannot publish recovered Motion video");
-            }
+            publishPending(uri);
             return true;
         }
         if (isOwnedMedia(volume, uri)) return true;
@@ -418,16 +425,14 @@ public final class MotionStorage {
             try (Cursor cursor = mediaProvider.query(uri, columns, null, null, null)) {
                 if (cursor == null) throw new IOException("Cannot inspect stale Motion media");
                 if (!cursor.moveToFirst()) return true;
-                if (!ownerPackage.equals(cursor.getString(0))
+                if (!matchesMediaOwner(cursor.getString(0), cursor.getInt(2))
                         || !RELATIVE_PATH.equals(cursor.getString(1))
                         || cursor.getInt(2) != 1) return false;
             } catch (RuntimeException e) {
                 throw new IOException("Cannot inspect stale Motion media", e);
             }
-            int removed = mediaProvider.delete(uri, MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
-                    + MediaStore.MediaColumns.RELATIVE_PATH + "=? AND "
-                    + MediaStore.MediaColumns.IS_PENDING + "=1",
-                    new String[]{ownerPackage, RELATIVE_PATH});
+            int removed = mediaProvider.delete(uri, ownedMediaSelection() + " AND "
+                    + MediaStore.MediaColumns.IS_PENDING + "=1", ownedMediaArgs());
             return removed == 1;
         }
         if (!"file".equals(uri.getScheme())) return false;
@@ -734,15 +739,7 @@ public final class MotionStorage {
 
     void publish(Output output) throws IOException {
         if (output.pendingMediaStore) {
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
-            if (mediaProvider.update(output.uri, values,
-                    MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
-                            + MediaStore.MediaColumns.RELATIVE_PATH + "=? AND "
-                            + MediaStore.MediaColumns.IS_PENDING + "=1",
-                    new String[]{ownerPackage, RELATIVE_PATH}) != 1) {
-                throw new IOException("Cannot publish finished Motion video");
-            }
+            publishPending(output.uri);
             return;
         }
         if (output.temporaryFile == null || output.destinationFile == null || !output.temporaryFile.isFile()) {
@@ -774,10 +771,7 @@ public final class MotionStorage {
 
     void deleteTemporaryOutput(Output output) throws IOException {
         if (output.pendingMediaStore) {
-            int deleted = mediaProvider.delete(output.uri,
-                    MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
-                            + MediaStore.MediaColumns.RELATIVE_PATH + "=?",
-                    new String[]{ownerPackage, RELATIVE_PATH});
+            int deleted = mediaProvider.delete(output.uri, ownedMediaSelection(), ownedMediaArgs());
             if (deleted != 1) throw new IOException("Cannot delete temporary Motion clip: " + output.uri);
         } else {
             for (File file : new File[]{output.temporaryFile, output.destinationFile}) {
@@ -791,10 +785,8 @@ public final class MotionStorage {
         if (output == null) return;
         if (output.pendingMediaStore) {
             try {
-                mediaProvider.delete(output.uri, MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
-                                + MediaStore.MediaColumns.RELATIVE_PATH + "=? AND "
-                                + MediaStore.MediaColumns.IS_PENDING + "=1",
-                        new String[]{ownerPackage, RELATIVE_PATH});
+                mediaProvider.delete(output.uri, ownedMediaSelection() + " AND "
+                        + MediaStore.MediaColumns.IS_PENDING + "=1", ownedMediaArgs());
             }
             catch (RuntimeException e) { Log.w(TAG, "pending_delete_failed uri=" + output.uri, e); }
         } else {
@@ -807,6 +799,17 @@ public final class MotionStorage {
     Uri collectionUri(Volume volume) {
         if (volume.mediaStoreName == null) return MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
         return MediaStore.Video.Media.getContentUri(volume.mediaStoreName);
+    }
+
+    private void publishPending(Uri uri) throws IOException {
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+        // Keep the writer as owner while pending; transfer only with the completed publication.
+        if (shellMediaContext != null) values.put(MediaStore.MediaColumns.OWNER_PACKAGE_NAME, ownerPackage);
+        if (mediaProvider.update(uri, values, ownedMediaSelection() + " AND "
+                + MediaStore.MediaColumns.IS_PENDING + "=1", ownedMediaArgs()) != 1) {
+            throw new IOException("Cannot publish finished Motion video");
+        }
     }
 
     private boolean isVolumeMediaUri(Volume volume, Uri uri) {
@@ -835,19 +838,29 @@ public final class MotionStorage {
             values.put(MediaStore.MediaColumns.RELATIVE_PATH, RELATIVE_PATH);
             values.put(MediaStore.MediaColumns.IS_PENDING, 1);
             if (shellMediaContext != null)
-                values.put(MediaStore.MediaColumns.OWNER_PACKAGE_NAME, ownerPackage);
+                values.put(MediaStore.MediaColumns.OWNER_PACKAGE_NAME, pendingOwnerPackage);
             Uri uri = mediaProvider.insert(collectionUri(volume), values);
             if (uri == null) throw new IOException("MediaStore insert returned no item");
-            ParcelFileDescriptor descriptor = mediaProvider.openFileDescriptor(uri, "rw");
-            if (descriptor == null) {
-                mediaProvider.delete(uri, MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=? AND "
-                                + MediaStore.MediaColumns.RELATIVE_PATH + "=? AND "
-                                + MediaStore.MediaColumns.IS_PENDING + "=1",
-                        new String[]{ownerPackage, RELATIVE_PATH});
-                throw new IOException("MediaStore item cannot be opened");
+            ParcelFileDescriptor descriptor = null;
+            try {
+                descriptor = mediaProvider.openFileDescriptor(uri, "rw");
+                if (descriptor == null) throw new IOException("MediaStore item cannot be opened");
+                return new Output(uri, volume.id, displayName, descriptor, null, null, true,
+                        baseOwnBytes, initialOwnAllowanceBytes);
+            } catch (IOException | RuntimeException failure) {
+                if (descriptor != null) {
+                    try { descriptor.close(); }
+                    catch (IOException cleanup) { failure.addSuppressed(cleanup); }
+                }
+                try {
+                    if (mediaProvider.delete(uri, ownedMediaSelection() + " AND "
+                            + MediaStore.MediaColumns.IS_PENDING + "=1", ownedMediaArgs()) != 1)
+                        throw new IOException("Cannot delete unopened Motion clip: " + uri);
+                } catch (IOException | RuntimeException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+                throw failure;
             }
-            return new Output(uri, volume.id, displayName, descriptor, null, null, true,
-                    baseOwnBytes, initialOwnAllowanceBytes);
         }
         if (!hasWritePermission()) {
             throw new IOException("Legacy external-storage permission is not granted");
