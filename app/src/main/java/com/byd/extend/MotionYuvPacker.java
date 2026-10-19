@@ -34,6 +34,19 @@ final class MotionYuvPacker {
 
     private static void copyPlane(Plane plane, int width, int height, byte[] output,
             int outputOffset, int outputPixelStride) {
+        if (plane.pixelStride == 1 && outputPixelStride == 1) {
+            ByteBuffer source = plane.buffer.duplicate();
+            if (plane.rowStride == width) {
+                source.get(output, outputOffset, width * height);
+            } else {
+                int start = source.position();
+                for (int row = 0; row < height; row++) {
+                    source.position(start + row * plane.rowStride);
+                    source.get(output, outputOffset + row * width, width);
+                }
+            }
+            return;
+        }
         for (int row = 0; row < height; row++) {
             int out = outputOffset + row * width * outputPixelStride;
             for (int col = 0; col < width; col++)

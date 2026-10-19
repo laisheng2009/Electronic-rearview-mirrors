@@ -168,6 +168,8 @@ public final class MotionDetectorShellMain {
     private ImageReader reader;
     private Surface surface;
     private long frameNumber;
+    private final FramePerformance framePerformance = new FramePerformance();
+    private final int[] loggedFrameLayout = new int[8];
     private String lastReportedDetectorState = "";
     private boolean firstInferenceReceived;
     private volatile ManualCheck manualCheck;
@@ -897,6 +899,8 @@ public final class MotionDetectorShellMain {
         if (attached && reader != null && surface != null) return;
         if (attached || reader != null || surface != null)
             throw new IllegalStateException("motion Surface attachment is in an uncertain state");
+        framePerformance.reset();
+        java.util.Arrays.fill(loggedFrameLayout, 0);
         reader = ImageReader.newInstance(MotionDetectorProtocol.INPUT_WIDTH,
                 MotionDetectorProtocol.INPUT_HEIGHT, ImageFormat.YUV_420_888, 2);
         surface = reader.getSurface();
@@ -934,6 +938,9 @@ public final class MotionDetectorShellMain {
     private void processFrame(Image frame) throws Exception {
         ManualCheck check;
         long frameTimeNs;
+        long packStartNs, packEndNs;
+        int width, height;
+        MotionYuvPacker.Plane y, u, v;
         try {
             check = manualCheck;
             if (check != null && check.finishing) return;
@@ -953,17 +960,27 @@ public final class MotionDetectorShellMain {
             if (planes == null || planes.length != 3)
                 throw new IllegalStateException("YUV_420_888 requires three planes: actual="
                         + (planes == null ? "null" : planes.length));
-            MotionYuvPacker.pack(
-                    plane(planes[0]), plane(planes[1]), plane(planes[2]),
-                    frame.getWidth(), frame.getHeight(), nativeInput);
+            width = frame.getWidth();
+            height = frame.getHeight();
+            y = plane(planes[0]);
+            u = plane(planes[1]);
+            v = plane(planes[2]);
+            packStartNs = SystemClock.elapsedRealtimeNanos();
+            MotionYuvPacker.pack(y, u, v, width, height, nativeInput);
+            packEndNs = SystemClock.elapsedRealtimeNanos();
             frameTimeNs = frame.getTimestamp();
         } finally {
             frame.close();
         }
         long now = SystemClock.elapsedRealtime();
+        long detectStartNs = SystemClock.elapsedRealtimeNanos();
         int raw = nativeApi.detect(nativeInput, MotionDetectorProtocol.INPUT_WIDTH,
                 MotionDetectorProtocol.INPUT_HEIGHT, sensitivity);
+        long detectEndNs = SystemClock.elapsedRealtimeNanos();
         frameNumber++;
+        framePerformance.record(packStartNs, packEndNs, detectStartNs, detectEndNs);
+        noteFrameLayout(width, height, y, u, v);
+        if (framePerformance.due()) flushFramePerformance();
         if (check != null && check.ownsReader) {
             boolean done = check.frames.observe(frameTimeNs, raw);
             int nativeState = nativeApi.getState();
@@ -1004,6 +1021,64 @@ public final class MotionDetectorShellMain {
             if (warningVisible && !warningClosing) scheduleWarningDeadline();
             if (config != null && config.warningEnabled && !warning)
                 requestWarningWake(sessionId);
+        }
+    }
+
+    private void noteFrameLayout(int width, int height,
+            MotionYuvPacker.Plane y, MotionYuvPacker.Plane u, MotionYuvPacker.Plane v) {
+        if (loggedFrameLayout[0] == width && loggedFrameLayout[1] == height
+                && loggedFrameLayout[2] == y.rowStride && loggedFrameLayout[3] == y.pixelStride
+                && loggedFrameLayout[4] == u.rowStride && loggedFrameLayout[5] == u.pixelStride
+                && loggedFrameLayout[6] == v.rowStride && loggedFrameLayout[7] == v.pixelStride) return;
+        loggedFrameLayout[0] = width;
+        loggedFrameLayout[1] = height;
+        loggedFrameLayout[2] = y.rowStride;
+        loggedFrameLayout[3] = y.pixelStride;
+        loggedFrameLayout[4] = u.rowStride;
+        loggedFrameLayout[5] = u.pixelStride;
+        loggedFrameLayout[6] = v.rowStride;
+        loggedFrameLayout[7] = v.pixelStride;
+        logEvent("motion_frame_layout", sessionId, "width", width, "height", height,
+                "y_row_stride", y.rowStride, "y_pixel_stride", y.pixelStride,
+                "u_row_stride", u.rowStride, "u_pixel_stride", u.pixelStride,
+                "v_row_stride", v.rowStride, "v_pixel_stride", v.pixelStride);
+    }
+
+    private void flushFramePerformance() {
+        if (framePerformance.frames == 0) return;
+        logEvent("motion_frame_performance", sessionId,
+                "window_ms", framePerformance.windowNs() / 1_000_000.0,
+                "frames", framePerformance.frames,
+                "pack_avg_ms", framePerformance.packTotalNs / 1_000_000.0 / framePerformance.frames,
+                "pack_max_ms", framePerformance.packMaxNs / 1_000_000.0,
+                "detect_avg_ms", framePerformance.detectTotalNs / 1_000_000.0 / framePerformance.frames,
+                "detect_max_ms", framePerformance.detectMaxNs / 1_000_000.0);
+        framePerformance.reset();
+    }
+
+    /** Control-thread measurements of completed pack/detect calls, not process CPU time. */
+    static final class FramePerformance {
+        long frames, startNs, endNs;
+        long packTotalNs, packMaxNs, detectTotalNs, detectMaxNs;
+
+        void record(long packStartNs, long packEndNs, long detectStartNs, long detectEndNs) {
+            if (frames == 0) startNs = packStartNs;
+            endNs = detectEndNs;
+            frames++;
+            long packNs = packEndNs - packStartNs;
+            long detectNs = detectEndNs - detectStartNs;
+            packTotalNs += packNs;
+            packMaxNs = Math.max(packMaxNs, packNs);
+            detectTotalNs += detectNs;
+            detectMaxNs = Math.max(detectMaxNs, detectNs);
+        }
+
+        long windowNs() { return frames == 0 ? 0 : endNs - startNs; }
+        boolean due() { return frames > 0 && windowNs() >= 30_000_000_000L; }
+
+        void reset() {
+            frames = startNs = endNs = 0;
+            packTotalNs = packMaxNs = detectTotalNs = detectMaxNs = 0;
         }
     }
 
@@ -2076,6 +2151,7 @@ public final class MotionDetectorShellMain {
     }
 
     private boolean detachAndCloseReader(boolean surfacesDrained) {
+        flushFramePerformance();
         if (attached && !surfacesDrained) {
             deliberatelyDetachedProducerReason = "motion_detector_idle";
             try {
