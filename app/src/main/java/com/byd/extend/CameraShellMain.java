@@ -1,6 +1,7 @@
 package com.byd.extend;
 
 import android.content.Context;
+import android.content.pm.ProviderInfo;
 import android.hardware.display.DisplayManager;
 import android.os.Binder;
 import android.os.Handler;
@@ -10,6 +11,8 @@ import android.os.Parcel;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.SystemClock;
+import android.provider.Settings;
+import android.util.Log;
 import android.view.Surface;
 
 import org.json.JSONObject;
@@ -46,28 +49,77 @@ public final class CameraShellMain {
         int versionCode = Integer.parseInt(args[1]);
         OwnerLock owner = OwnerLock.acquire();
         if (owner == null) return;
-        prepareMainLooperForShell();
-        Context context = systemContext();
-        initializeSystemFontsForShell();
-        Handler handler = new Handler(Looper.getMainLooper());
-        ShellBinder binder = new ShellBinder(context, handler, appUid, versionCode);
-        binder.attachInterface(null, CameraShellProtocol.DESCRIPTOR);
         try {
-            Class<?> serviceManager = Class.forName("android.os.ServiceManager");
-            Method addService = serviceManager.getMethod("addService", String.class, IBinder.class);
-            addService.invoke(null, CameraShellProtocol.SERVICE_NAME, binder);
-            System.out.println("READY pid=" + Process.myPid()
-                    + " protocol=" + CameraShellProtocol.VERSION
-                    + " build=" + versionCode);
-            DiagnosticLogPolicy.flushOutput();
-            Looper.loop();
-        } finally {
-            try {
-                binder.closeAll("process_exit");
-            } finally {
-                DiagnosticLogPolicy.flushOutput();
-                owner.close();
+            prepareMainLooperForShell();
+            Context context = TurnSignalShellMain.shellContext(systemContext());
+            try (AvasShellSettings.ProviderHandle settings = prepareSettings(context)) {
+                int blastAdapter = Settings.Global.getInt(
+                        context.getContentResolver(), "use_blast_adapter_sv", 1);
+                initializeSystemFontsForShell();
+                Handler handler = new Handler(Looper.getMainLooper());
+                ShellBinder binder = new ShellBinder(context, handler, appUid, versionCode);
+                binder.attachInterface(null, CameraShellProtocol.DESCRIPTOR);
+                try {
+                    Class<?> serviceManager = Class.forName("android.os.ServiceManager");
+                    Method addService = serviceManager.getMethod(
+                            "addService", String.class, IBinder.class);
+                    addService.invoke(null, CameraShellProtocol.SERVICE_NAME, binder);
+                    System.out.println("READY pid=" + Process.myPid()
+                            + " protocol=" + CameraShellProtocol.VERSION
+                            + " build=" + versionCode
+                            + " settings_package=" + context.getPackageName()
+                            + " shell_uid=" + Process.myUid()
+                            + " blast_adapter=" + blastAdapter);
+                    DiagnosticLogPolicy.flushOutput();
+                    Looper.loop();
+                } finally {
+                    binder.closeAll("process_exit");
+                }
             }
+        } finally {
+            DiagnosticLogPolicy.flushOutput();
+            owner.close();
+        }
+    }
+
+    private static AvasShellSettings.ProviderHandle prepareSettings(Context context)
+            throws Exception {
+        Class<?> threadType = Class.forName("android.app.ActivityThread");
+        Object thread = threadType.getMethod("currentActivityThread").invoke(null);
+        Class<?> holderType = Class.forName("android.app.ContentProviderHolder");
+        Method install = threadType.getDeclaredMethod("installProvider",
+                Context.class, holderType, ProviderInfo.class,
+                boolean.class, boolean.class, boolean.class);
+        install.setAccessible(true);
+        Object activityManager = Class.forName("android.app.ActivityManager")
+                .getMethod("getService").invoke(null);
+        Class<?> managerType = Class.forName("android.app.IActivityManager");
+        Method remove = managerType.getMethod(
+                "removeContentProviderExternal", String.class, IBinder.class);
+        IBinder token = new Binder();
+        Object holder = managerType.getMethod("getContentProviderExternal",
+                String.class, int.class, IBinder.class, String.class)
+                .invoke(activityManager, "settings", 0, token, "byd-extend-camera");
+        if (holder == null) throw new IllegalStateException("SettingsProvider unavailable");
+        AvasShellSettings.ProviderHandle handle =
+                new AvasShellSettings.ProviderHandle(activityManager, remove, token);
+        try {
+            if (holderType.getField("provider").get(holder) == null) {
+                throw new IllegalStateException("SettingsProvider unavailable");
+            }
+            // Framework reads, also in display contexts, reuse this external provider.
+            // noReleaseNeeded=true: its lifetime belongs to our token, not an app connection.
+            Object installed = install.invoke(thread, context, holder,
+                    holderType.getField("info").get(holder), false, true, true);
+            if (installed == null) throw new IllegalStateException("SettingsProvider not installed");
+            return handle;
+        } catch (Exception | Error failure) {
+            try {
+                handle.close();
+            } catch (Exception cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
         }
     }
 
@@ -476,7 +528,8 @@ public final class CameraShellMain {
                 return false;
             } catch (Throwable error) {
                 if (reply != null) reply.writeException(new IllegalStateException(summary(error)));
-                emit("camera_shell_transaction_error", "code", code, "error", summary(error));
+                emit("camera_shell_transaction_error", "code", code, "error", summary(error),
+                        "stack", Log.getStackTraceString(error));
                 return true;
             }
         }
