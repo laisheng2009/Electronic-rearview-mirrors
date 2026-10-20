@@ -143,6 +143,10 @@ public final class CameraProbeActivity extends ComponentActivity
     private static final String OPEN_METEO_URL = "https://open-meteo.com/";
     private static final int CAMERA_PERMISSION_REQUEST = 10;
     private static final int LOCATION_PERMISSION_REQUEST = 11;
+    private static final int BACKGROUND_LOCATION_PERMISSION_REQUEST = 17;
+    private static final String PREF_WEATHER_BACKGROUND_PERMISSION_ASKED =
+            "weather_background_permission_asked";
+    private static final String STATE_WEATHER_BACKGROUND_SETTINGS = "weather_background_settings";
     private static final int MICROPHONE_PERMISSION_REQUEST = 12;
     private static final int BLUETOOTH_PERMISSION_REQUEST = 16;
     private static final String PREF_BLUETOOTH_PERMISSION_ASKED = "calls_bluetooth_permission_asked";
@@ -717,6 +721,7 @@ public final class CameraProbeActivity extends ComponentActivity
     private boolean weatherLocationPermissionStartScheduled;
     private boolean weatherLocationPermissionInFlight;
     private boolean weatherEnableRequestedForPermission;
+    private boolean weatherBackgroundSettingsOpened;
     private long weatherRefreshUiGeneration;
     private boolean backgroundStartSettingsRequired;
     private InstallationReminder installationReminder;
@@ -875,7 +880,7 @@ public final class CameraProbeActivity extends ComponentActivity
     private boolean updateDownloadInFlight;
     private final UpdateHintRuntime.DownloadListener updateDownloadListener =
             this::onUpdateDownloadChanged;
-    private enum RuntimeDialogOwner { NONE, BACKGROUND, LOGS, COMPATIBILITY, UPDATE }
+    private enum RuntimeDialogOwner { NONE, BACKGROUND, LOGS, COMPATIBILITY, UPDATE, WEATHER }
     private RuntimeDialogOwner runtimeDialogOwner = RuntimeDialogOwner.NONE;
     private Runnable runtimeDialogConfirm;
     private Runnable runtimeDialogDismiss;
@@ -917,6 +922,15 @@ public final class CameraProbeActivity extends ComponentActivity
                 || logExportInProgress || compatibilityExportInProgress || adbAuthPending
                 || productionUi != null && productionUi.getState().getDialog() != null) {
             advanceStartupAuthorizationFlow();
+            return;
+        }
+        if (hasLocationPermission()) {
+            if (hasBackgroundLocationPermission()) {
+                weatherLocationPermissionPending = false;
+                advanceStartupAuthorizationFlow();
+            } else {
+                showWeatherBackgroundPermission();
+            }
             return;
         }
         weatherEnableRequestedForPermission = true;
@@ -1123,6 +1137,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 weatherEnableRequestedForPermission);
         outState.putBoolean(STATE_WEATHER_REFRESH_AFTER_PERMISSION,
                 weatherRefreshAfterPermission);
+        outState.putBoolean(STATE_WEATHER_BACKGROUND_SETTINGS, weatherBackgroundSettingsOpened);
         outState.putBoolean(STATE_STARTUP_OVERLAY_PERMISSION_ATTEMPTED,
                 startupOverlayPermissionFlow.overlayPermissionAttempted());
         outState.putBoolean(STATE_STARTUP_OVERLAY_SETTINGS_IN_FLIGHT,
@@ -1190,6 +1205,8 @@ public final class CameraProbeActivity extends ComponentActivity
         refreshProductionHeader();
         if (!helperBound) startAndBindHelperService();
         activityResumed = true;
+        if (weatherBackgroundSettingsOpened) finishWeatherBackgroundPermission();
+        showWeatherPermissionStatus();
         openPendingMotionPreviews();
         enqueueHelperCallbackRegistration(helperCallbackRegistration.start());
         publishReverseOwnerPresence();
@@ -1280,6 +1297,9 @@ public final class CameraProbeActivity extends ComponentActivity
             maybeOpenCalibrationCamera();
             maybeOpenReversePreview();
             openPendingMotionPreviews();
+        } else if (requestCode == BACKGROUND_LOCATION_PERMISSION_REQUEST) {
+            finishWeatherBackgroundPermission();
+            advanceStartupAuthorizationFlow();
         } else if (requestCode == LOCATION_PERMISSION_REQUEST) {
             weatherLocationPermissionInFlight = false;
             boolean granted = false;
@@ -1301,14 +1321,13 @@ public final class CameraProbeActivity extends ComponentActivity
                     WeatherRuntime.PREF_ENABLED, false);
             if (!granted) {
                 weatherRefreshAfterPermission = false;
-                preferences.edit().putBoolean(WeatherRuntime.PREF_ENABLED, false).apply();
             } else if (shouldEnableWeatherAfterPermission(granted, enableRequested)) {
                 preferences.edit().putBoolean(WeatherRuntime.PREF_ENABLED, true).apply();
             }
             CameraHelperService.weatherSettingsChanged(this);
             if (productionUi != null) productionUi.reload();
             if (!granted) {
-                Toast.makeText(this, runtimeText(R.string.runtime_weather_disabled),
+                Toast.makeText(this, runtimeText(R.string.runtime_weather_location_permission_needed),
                         Toast.LENGTH_LONG).show();
             } else if (shouldRefreshWeatherAfterPermission(
                     granted, weatherRefreshAfterPermission, weatherStillEnabled)) {
@@ -1317,6 +1336,8 @@ public final class CameraProbeActivity extends ComponentActivity
             } else {
                 weatherRefreshAfterPermission = false;
             }
+            if (granted) queueWeatherBackgroundPermission(false);
+            showWeatherPermissionStatus();
             refreshProductionHeader();
             advanceStartupAuthorizationFlow();
             updateControls();
@@ -5205,7 +5226,8 @@ public final class CameraProbeActivity extends ComponentActivity
                         AvasNotificationAccess.isGranted(this),
                         AppPermissionProvisioner.hasWriteSecureSettings(this),
                         checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
-                        AppPermissionProvisioner.hasBluetoothCallAccess(this))));
+                        AppPermissionProvisioner.hasBluetoothCallAccess(this)),
+                hasBackgroundLocationPermission()));
     }
 
     static HeaderUiState productionHeader(LocalAdbClient.AccessState.Status access,
@@ -5215,12 +5237,19 @@ public final class CameraProbeActivity extends ComponentActivity
 
     static HeaderUiState productionHeader(LocalAdbClient.AccessState.Status access,
             boolean weatherEnabled, boolean locationGranted, boolean permissionsGranted) {
+        return productionHeader(access, weatherEnabled, locationGranted, permissionsGranted, true);
+    }
+
+    private static HeaderUiState productionHeader(LocalAdbClient.AccessState.Status access,
+            boolean weatherEnabled, boolean locationGranted, boolean permissionsGranted,
+            boolean backgroundLocationGranted) {
         StatusTone adbTone = access == LocalAdbClient.AccessState.Status.OK
                 ? StatusTone.Ok : access == LocalAdbClient.AccessState.Status.ERROR
                 ? StatusTone.Error : StatusTone.Neutral;
         return new HeaderUiState(
                 new StatusUiState("ADB", adbTone, true),
-                new StatusUiState("", locationGranted ? StatusTone.Ok : StatusTone.Error,
+                new StatusUiState("", !locationGranted ? StatusTone.Error
+                        : backgroundLocationGranted ? StatusTone.Ok : StatusTone.Warning,
                         weatherEnabled), weatherEnabled,
                 new StatusUiState("", permissionsGranted ? StatusTone.Ok : StatusTone.Error, true));
     }
@@ -5377,6 +5406,8 @@ public final class CameraProbeActivity extends ComponentActivity
             preferences.edit().putBoolean(WeatherRuntime.PREF_ENABLED, true).apply();
             CameraHelperService.weatherSettingsChanged(this);
             if (productionUi != null) productionUi.reload();
+            queueWeatherBackgroundPermission(true);
+            showWeatherPermissionStatus();
             refreshProductionHeader();
             return;
         }
@@ -7874,7 +7905,6 @@ public final class CameraProbeActivity extends ComponentActivity
                     .putBoolean(PREF_WEATHER_PERMISSION_MIGRATION_SEEN, true)
                     .apply();
             record("weather_location_permission_failed", "error", error.toString());
-            preferences.edit().putBoolean(WeatherRuntime.PREF_ENABLED, false).apply();
             if (productionUi != null) {
                 productionUi.reload();
                 productionUi.setWeatherStatus(new StatusUiState(
@@ -7905,10 +7935,16 @@ public final class CameraProbeActivity extends ComponentActivity
                     .putBoolean(PREF_WEATHER_PERMISSION_MIGRATION_SEEN, true)
                     .apply();
         }
+        if (weatherEnabled && locationGranted && !hasBackgroundLocationPermission()
+                && !preferences.getBoolean(PREF_WEATHER_BACKGROUND_PERMISSION_ASKED, false)) {
+            weatherLocationPermissionPending = true;
+        }
     }
 
     private void restoreWeatherPermissionState(Bundle savedInstanceState) {
         if (savedInstanceState == null) return;
+        weatherBackgroundSettingsOpened =
+                savedInstanceState.getBoolean(STATE_WEATHER_BACKGROUND_SETTINGS, false);
         // A saved Activity flag is not proof that a system permission window still exists.
         boolean interrupted = savedInstanceState.getBoolean(STATE_WEATHER_PERMISSION_IN_FLIGHT, false);
         weatherEnableRequestedForPermission = savedInstanceState.getBoolean(
@@ -7950,6 +7986,81 @@ public final class CameraProbeActivity extends ComponentActivity
                 == PackageManager.PERMISSION_GRANTED
                 || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
                 == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean hasBackgroundLocationPermission() {
+        return android.os.Build.VERSION.SDK_INT < 29
+                || checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void queueWeatherBackgroundPermission(boolean explicitEnable) {
+        if (!preferences.getBoolean(WeatherRuntime.PREF_ENABLED, false)
+                || !hasLocationPermission() || hasBackgroundLocationPermission()
+                || !explicitEnable
+                && preferences.getBoolean(PREF_WEATHER_BACKGROUND_PERMISSION_ASKED, false)) return;
+        weatherLocationPermissionPending = true;
+        advanceStartupAuthorizationFlow();
+    }
+
+    private void showWeatherBackgroundPermission() {
+        if (showRuntimeDialog(RuntimeDialogOwner.WEATHER, DialogKind.Message,
+                runtimeText(R.string.weather_background_title),
+                runtimeText(R.string.weather_background_message), true,
+                runtimeText(R.string.weather_background_allow),
+                runtimeText(R.string.runtime_cancel), null,
+                this::openWeatherBackgroundPermission, this::showWeatherPermissionStatus)) {
+            weatherLocationPermissionPending = false;
+            preferences.edit().putBoolean(PREF_WEATHER_BACKGROUND_PERMISSION_ASKED, true).apply();
+        }
+    }
+
+    private void openWeatherBackgroundPermission() {
+        try {
+            weatherLocationPermissionInFlight = true;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                weatherBackgroundSettingsOpened = true;
+                startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName())));
+            } else {
+                requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION},
+                        BACKGROUND_LOCATION_PERMISSION_REQUEST);
+            }
+        } catch (RuntimeException failure) {
+            weatherLocationPermissionInFlight = false;
+            weatherBackgroundSettingsOpened = false;
+            record("weather_background_permission_failed", "error", failure.toString());
+            showWeatherPermissionStatus();
+        }
+    }
+
+    private void finishWeatherBackgroundPermission() {
+        weatherBackgroundSettingsOpened = false;
+        weatherLocationPermissionInFlight = false;
+        record("weather_background_permission", "granted", hasBackgroundLocationPermission());
+        if (preferences.getBoolean(WeatherRuntime.PREF_ENABLED, false)) {
+            CameraHelperService.weatherSettingsChanged(this);
+        }
+        showWeatherPermissionStatus();
+        refreshProductionHeader();
+    }
+
+    private void showWeatherPermissionStatus() {
+        if (productionUi == null || !preferences.getBoolean(WeatherRuntime.PREF_ENABLED, false)
+                || productionUi.getState().getSignals().getWeather().getRefresh().getPending()) return;
+        if (!hasLocationPermission() || !hasBackgroundLocationPermission()) {
+            productionUi.setWeatherStatus(new StatusUiState(runtimeText(hasLocationPermission()
+                    ? R.string.weather_background_limited
+                    : R.string.runtime_weather_location_permission_needed),
+                    StatusTone.Warning, true), false);
+        } else {
+            String status = productionUi.getState().getSignals().getWeather()
+                    .getRefresh().getStatus().getText();
+            if (status.equals(runtimeText(R.string.weather_background_limited))
+                    || status.equals(runtimeText(R.string.runtime_weather_location_permission_needed))) {
+                productionUi.setWeatherStatus(new StatusUiState("", StatusTone.Neutral, false), false);
+            }
+        }
     }
 
 

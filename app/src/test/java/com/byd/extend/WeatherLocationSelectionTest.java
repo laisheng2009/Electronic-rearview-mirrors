@@ -9,6 +9,33 @@ import static org.junit.Assert.assertTrue;
 
 public final class WeatherLocationSelectionTest {
     @Test
+    public void acquisitionDeadlineIsNotExtendedByRepeatedChecks() {
+        WeatherLocationAttempt attempt = new WeatherLocationAttempt();
+        attempt.start(1_000L);
+        assertEquals(60_000L, attempt.remaining(1_000L));
+        attempt.start(30_000L);
+        assertEquals(31_000L, attempt.remaining(30_000L));
+        assertEquals(1L, attempt.remaining(60_999L));
+        assertEquals(0L, attempt.remaining(61_000L));
+        assertEquals(0L, attempt.remaining(400_000L));
+        assertEquals(60_000L, attempt.duration(61_000L));
+    }
+
+    @Test
+    public void finishingOrCancellingAcquisitionAllowsAFreshAttempt() {
+        WeatherLocationAttempt attempt = new WeatherLocationAttempt();
+        attempt.start(0L);
+        assertEquals(0L, attempt.remaining(60_000L));
+        attempt.clear();
+        assertEquals(0L, attempt.duration(360_000L));
+        attempt.start(360_000L);
+        assertEquals(60_000L, attempt.remaining(360_000L));
+        attempt.clear();
+        attempt.start(361_000L);
+        assertEquals(59_999L, attempt.remaining(361_001L));
+    }
+
+    @Test
     public void selectsFreshKyivOverOlderNativeLimaFix() {
         long nowNanos = 16_193_272_020_801L;
 

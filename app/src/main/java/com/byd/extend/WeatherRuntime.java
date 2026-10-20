@@ -15,6 +15,7 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
@@ -28,6 +29,8 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.Locale;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Executors;
@@ -96,6 +99,9 @@ public final class WeatherRuntime {
     private ConnectivityManager waitingConnectivityManager;
     private boolean locationCallbackRegistered;
     private boolean networkCallbackRegistered;
+    private final WeatherLocationAttempt locationAttempt = new WeatherLocationAttempt();
+    private final Set<String> locationDiagnostics = new HashSet<>();
+    private boolean locationAccessRejected;
     private final LocationListener locationWaitListener = new LocationListener() {
         @Override
         public void onLocationChanged(Location location) {
@@ -103,9 +109,11 @@ public final class WeatherRuntime {
         }
 
         @Override public void onProviderEnabled(String provider) {
+            emit("weather_location_provider_changed", "provider", provider, "enabled", true);
             prerequisiteChanged("location", null);
         }
         @Override public void onProviderDisabled(String provider) {
+            emit("weather_location_provider_changed", "provider", provider, "enabled", false);
             prerequisiteChanged("location", null);
         }
         @Override public void onStatusChanged(String provider, int status, Bundle extras) { }
@@ -172,7 +180,7 @@ public final class WeatherRuntime {
                 unregister = true;
                 emit("weather_disabled", "reason", "settings");
             } else if (requestPending) {
-                schedulePrerequisiteRecheckLocked();
+                queuePrerequisiteCheckLocked("settings");
             } else if (started || changed) {
                 long dueAt = lastSuccessMs <= 0L ? 0L : lastSuccessMs
                         + TimeUnit.MINUTES.toMillis(interval);
@@ -194,9 +202,13 @@ public final class WeatherRuntime {
             if (!started || !enabled || inFlight || requestPending) return false;
             cancelScheduledLocked();
             requestPending = true;
+            locationAttempt.clear();
+            locationDiagnostics.clear();
+            locationAccessRejected = false;
             pendingGeneration = generation;
             pendingReason = reason == null ? "manual" : reason;
             pendingCallback = callback;
+            emitLocationAccess();
             queuePrerequisiteCheckLocked("request");
             return true;
         }
@@ -242,6 +254,17 @@ public final class WeatherRuntime {
                 ? WeatherMapping.clampIntervalMinutes(intervalMinutes) : RETRY_INTERVAL_MINUTES);
     }
 
+    static int errorMessageResource(String error) {
+        if ("location_permission_denied".equals(error)) {
+            return R.string.runtime_weather_location_permission_needed;
+        }
+        if ("location_access_denied".equals(error)) return R.string.runtime_weather_location_denied;
+        if ("location_provider_unavailable".equals(error)) return R.string.runtime_weather_location_unavailable;
+        if ("location_timeout".equals(error)) return R.string.runtime_weather_location_timeout;
+        if ("provider_write_failed".equals(error)) return R.string.runtime_weather_provider_failed;
+        return R.string.runtime_weather_failed;
+    }
+
     private void runRequest(
             long requestGeneration, String reason, ResultCallback callback,
             LocationSnapshot location) {
@@ -273,7 +296,11 @@ public final class WeatherRuntime {
                     city.englishName, System.currentTimeMillis());
             if (!WeatherMapping.isComplete(payload)) throw new IllegalStateException("incomplete BYD payload");
             if (!isCurrent(requestGeneration)) throw new InterruptedException("weather disabled");
-            if (!writeProvider(payload, requestGeneration)) throw new IllegalStateException("provider readback failed");
+            if (!writeProvider(payload, requestGeneration)) {
+                error = "provider_write_failed";
+                throw new IllegalStateException("provider readback failed");
+            }
+            emit("weather_provider_written");
             synchronized (stateLock) {
                 success = true;
                 lastSuccessMs = System.currentTimeMillis();
@@ -284,8 +311,8 @@ public final class WeatherRuntime {
             Thread.currentThread().interrupt();
             error = "cancelled";
         } catch (Throwable failure) {
-            error = summary(failure);
-            emit("weather_failure", "error", error);
+            if (error.isEmpty()) error = summary(failure);
+            emit("weather_failure", "error", error, "cause", summary(failure));
         } finally {
             boolean networkValidated = hasValidatedDefaultNetwork();
             boolean deliverCallback;
@@ -305,6 +332,9 @@ public final class WeatherRuntime {
                             pendingGeneration = generation;
                             pendingReason = "network_recovery";
                             pendingCallback = null;
+                            locationAttempt.clear();
+                            locationDiagnostics.clear();
+                            locationAccessRejected = false;
                             queuePrerequisiteCheckLocked("fetch_failure");
                         }
                     }
@@ -368,6 +398,7 @@ public final class WeatherRuntime {
             }
             return true;
         } catch (Throwable failure) {
+            emit("weather_provider_write_failed", "error", summary(failure));
             restoreProvider(resolver, uri, old, written, inserted, payload);
             return false;
         }
@@ -473,7 +504,7 @@ public final class WeatherRuntime {
         String reason = null;
         ResultCallback callback = null;
         boolean startRequest = false;
-        boolean authorizationDenied = false;
+        String prerequisiteError = null;
         boolean readinessRetry = false;
         synchronized (stateLock) {
             if (!started || !enabled || !requestPending
@@ -485,19 +516,32 @@ public final class WeatherRuntime {
             PrerequisiteState previous = waitState;
             if (state == PrerequisiteState.LOCATION_PERMISSION_DENIED) {
                 callback = pendingCallback;
-                authorizationDenied = true;
-                cancelScheduledLocked();
-                clearPendingLocked();
-                activeFuture = null;
-                unregisterPrerequisiteCallbacksLocked();
+                prerequisiteError = "location_permission_denied";
+                failPrerequisiteLocked(prerequisiteError);
             } else if (state != PrerequisiteState.READY) {
                 boolean transition = state != previous;
                 waitState = state;
                 prerequisiteCheckQueued = false;
                 activeFuture = null;
-                updatePrerequisiteCallbacksLocked(state);
-                schedulePrerequisiteRecheckLocked();
-                if (transition) {
+                boolean needLocation = location.value == null;
+                if (needLocation) locationAttempt.start(SystemClock.elapsedRealtime());
+                else locationAttempt.clear();
+                if (needLocation && locationAttempt.remaining(SystemClock.elapsedRealtime()) == 0L) {
+                    callback = pendingCallback;
+                    prerequisiteError = "location_timeout";
+                    failPrerequisiteLocked(prerequisiteError);
+                } else {
+                    updatePrerequisiteCallbacksLocked(state);
+                    if (needLocation && !locationCallbackRegistered) {
+                        callback = pendingCallback;
+                        prerequisiteError = locationAccessRejected
+                                ? "location_access_denied" : "location_provider_unavailable";
+                        failPrerequisiteLocked(prerequisiteError);
+                    } else {
+                        schedulePrerequisiteRecheckLocked();
+                    }
+                }
+                if (transition && prerequisiteError == null) {
                     if (location.value == null) {
                         emit("weather_prerequisite_wait", "missing", waitLabel(state),
                                 "location_rejections", locationWaitRejections(location));
@@ -506,12 +550,15 @@ public final class WeatherRuntime {
                     }
                     emitLocationDetail(location);
                 }
-                if (prerequisiteRecheckRequested) {
+                if (requestPending && prerequisiteRecheckRequested) {
                     prerequisiteRecheckRequested = false;
                     queuePrerequisiteCheckLocked("callback");
                 }
-                return;
+                if (prerequisiteError == null) return;
             } else {
+                emit("weather_location_ready", "provider", location.provider,
+                        "age_ms", location.ageMs, "mock", location.mock,
+                        "wait_ms", locationAttempt.duration(SystemClock.elapsedRealtime()));
                 reason = pendingReason;
                 callback = pendingCallback;
                 readinessRetry = previous != PrerequisiteState.READY;
@@ -526,17 +573,53 @@ public final class WeatherRuntime {
                 activeCallback = callback;
                 cancelScheduledLocked();
                 unregisterPrerequisiteCallbacksLocked();
+                locationAttempt.clear();
                 startRequest = true;
             }
         }
-        if (authorizationDenied) {
-            emit("weather_authorization_required", "permission", "location");
-            deliver(callback, false, "SecurityException: location permission denied");
+        if (prerequisiteError != null) {
+            deliver(callback, false, prerequisiteError);
         } else if (startRequest) {
             if (readinessRetry) {
                 emit("weather_prerequisite_ready", "trigger", trigger);
             }
             runRequest(requestGeneration, reason, callback, location);
+        }
+    }
+
+    private void failPrerequisiteLocked(String reason) {
+        long waited = locationAttempt.duration(SystemClock.elapsedRealtime());
+        cancelScheduledLocked();
+        unregisterPrerequisiteCallbacksLocked();
+        clearPendingLocked();
+        activeFuture = null;
+        long retryMs = TimeUnit.MINUTES.toMillis(RETRY_INTERVAL_MINUTES);
+        emit("weather_prerequisite_failed", "reason", reason, "wait_ms", waited,
+                "retry_in_ms", retryMs, "retry_elapsed_ms", SystemClock.elapsedRealtime() + retryMs);
+        scheduleLocked(retryMs);
+    }
+
+    private void emitLocationAccess() {
+        emit("weather_location_access",
+                "fine", context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED,
+                "coarse", context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED,
+                "background", Build.VERSION.SDK_INT < 29
+                        || context.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED);
+    }
+
+    private void locationFailure(String operation, String provider, RuntimeException failure) {
+        synchronized (stateLock) {
+            if (failure instanceof SecurityException && "subscribe".equals(operation)) {
+                locationAccessRejected = true;
+            }
+            String error = summary(failure);
+            if (locationDiagnostics.add(operation + ":" + provider + ":" + error)) {
+                emit("weather_location_failed", "operation", operation, "provider", provider,
+                        "error", error);
+            }
         }
     }
 
@@ -558,8 +641,8 @@ public final class WeatherRuntime {
                 try {
                     Location candidate = manager.getLastKnownLocation(providers[i]);
                     if (candidate != null) candidates[i + 1] = new Location(candidate);
-                } catch (SecurityException ignored) {
-                    // One OEM provider can reject access while the granted provider remains usable.
+                } catch (RuntimeException failure) {
+                    locationFailure("last_known", providers[i], failure);
                 }
             }
         }
@@ -682,10 +765,19 @@ public final class WeatherRuntime {
         for (String provider : new String[]{
                 LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER}) {
             try {
+                boolean available = manager.getProvider(provider) != null;
+                boolean providerEnabled = available && manager.isProviderEnabled(provider);
+                if (locationDiagnostics.add("provider:" + provider + ":" + providerEnabled)) {
+                    emit("weather_location_provider", "provider", provider,
+                            "available", available, "enabled", providerEnabled);
+                }
+                if (!providerEnabled) continue;
                 manager.requestLocationUpdates(
                         provider, 0L, 0f, locationWaitListener, Looper.getMainLooper());
                 registered = true;
-            } catch (SecurityException | IllegalArgumentException ignored) {
+                emit("weather_location_subscribed", "provider", provider);
+            } catch (RuntimeException failure) {
+                locationFailure("subscribe", provider, failure);
             }
         }
         if (registered) {
@@ -722,7 +814,8 @@ public final class WeatherRuntime {
         if (!locationCallbackRegistered) return;
         try {
             waitingLocationManager.removeUpdates(locationWaitListener);
-        } catch (SecurityException ignored) {
+        } catch (RuntimeException failure) {
+            locationFailure("unsubscribe", "gps/network", failure);
         }
         waitingLocationManager = null;
         locationCallbackRegistered = false;
@@ -740,13 +833,17 @@ public final class WeatherRuntime {
 
     private void schedulePrerequisiteRecheckLocked() {
         cancelScheduledLocked();
+        boolean needsLocation = waitState == PrerequisiteState.WAIT_LOCATION
+                || waitState == PrerequisiteState.WAIT_BOTH;
+        long delayMs = needsLocation ? locationAttempt.remaining(SystemClock.elapsedRealtime())
+                : TimeUnit.MINUTES.toMillis(RETRY_INTERVAL_MINUTES);
         try {
             scheduled = executor.schedule(() -> {
                 synchronized (stateLock) {
                     scheduled = null;
                     if (requestPending) queuePrerequisiteCheckLocked("safety_recheck");
                 }
-            }, TimeUnit.MINUTES.toMillis(RETRY_INTERVAL_MINUTES), TimeUnit.MILLISECONDS);
+            }, delayMs, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException ignored) {
             scheduled = null;
         }
@@ -879,6 +976,7 @@ public final class WeatherRuntime {
     }
 
     private void clearPendingLocked() {
+        locationAttempt.clear();
         requestPending = false;
         prerequisiteCheckQueued = false;
         prerequisiteRecheckRequested = false;

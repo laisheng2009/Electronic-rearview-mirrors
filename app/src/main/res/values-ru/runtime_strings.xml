@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="weather_background_title">Обновление погоды в фоне</string>
+    <string name="weather_background_message">Чтобы получать координаты без открытия BYD Extend, в разрешениях приложения для геолокации выберите «Разрешать всегда». Можно отказаться; настройки погоды сохранятся.</string>
+    <string name="weather_background_allow">Разрешить геолокацию</string>
+    <string name="weather_background_limited">Разрешение «Всегда» не предоставлено. Фоновый доступ к геолокации ограничен.</string>
+    <string name="runtime_weather_location_permission_needed">Требуется разрешение геолокации. Настройки погоды сохранены.</string>
+    <string name="runtime_weather_location_denied">Android отклонил доступ к координатам. Проверьте разрешения геолокации.</string>
+    <string name="runtime_weather_location_unavailable">Провайдеры геолокации GPS/network недоступны или выключены. Повтор через 5 минут.</string>
+    <string name="runtime_weather_location_timeout">За 60 секунд не получены свежие координаты. Повтор через 5 минут.</string>
+    <string name="runtime_weather_provider_failed">Прогноз получен, но не удалось записать его в провайдер погоды.</string>
     <string name="runtime_archive_finalizing">Завершение архива…</string>
     <string name="ui_archive_save_as">Сохранить как…</string>
     <string name="runtime_archive_save_title">Сохранить архив</string>

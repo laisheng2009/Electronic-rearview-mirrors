@@ -1090,7 +1090,7 @@ public final class CameraHelperService extends Service {
                     sendWeatherResult(receiver,
                             success ? WEATHER_RESULT_OK : WEATHER_RESULT_FAILED,
                             runtimeText(this, success ? R.string.runtime_weather_refreshed
-                                    : R.string.runtime_weather_failed)));
+                                    : WeatherRuntime.errorMessageResource(error))));
             if (!accepted) {
                 sendWeatherResult(receiver,
                         weatherRuntime.isRequestInFlight()

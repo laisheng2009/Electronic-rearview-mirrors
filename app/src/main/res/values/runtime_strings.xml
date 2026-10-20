@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="weather_background_title">Background weather updates</string>
+    <string name="weather_background_message">To obtain coordinates without opening BYD Extend, set Location permission to “Allow all the time” in the app permissions. You can decline; your weather settings will be kept.</string>
+    <string name="weather_background_allow">Allow location</string>
+    <string name="weather_background_limited">“Allow all the time” is not granted. Background location access is limited.</string>
+    <string name="runtime_weather_location_permission_needed">Location permission is required. Weather settings have been kept.</string>
+    <string name="runtime_weather_location_denied">Android rejected location access. Check location permissions.</string>
+    <string name="runtime_weather_location_unavailable">GPS/network location providers are unavailable or disabled. Retry in 5 minutes.</string>
+    <string name="runtime_weather_location_timeout">No fresh location within 60 seconds. Retry in 5 minutes.</string>
+    <string name="runtime_weather_provider_failed">Forecast received, but could not save it to the weather provider.</string>
     <string name="runtime_archive_finalizing">Finalizing archive…</string>
     <string name="ui_archive_save_as">Save as…</string>
     <string name="runtime_archive_save_title">Save archive</string>
