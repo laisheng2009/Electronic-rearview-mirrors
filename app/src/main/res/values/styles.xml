@@ -7,4 +7,10 @@
         <item name="android:statusBarColor">#121212</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
+
+    <style name="MotionPlayerWindowTheme" parent="Theme.BydExtend">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
 </resources>

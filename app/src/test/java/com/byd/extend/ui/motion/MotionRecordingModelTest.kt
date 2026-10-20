@@ -12,6 +12,29 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MotionRecordingModelTest {
+    @Test fun recordingDisplayNameUsesCalendarYearAndArchiveTimeZone() {
+        val instant = Instant.parse("2021-01-01T00:30:04Z").toEpochMilli()
+        assertEquals("Motion_20210101_003004", motionRecordingDisplayName(instant, ZoneId.of("UTC")))
+        assertEquals("Motion_20201231_193004", motionRecordingDisplayName(instant, ZoneId.of("America/New_York")))
+    }
+
+    @Test fun clipEventCountsKeepOverlappingLevelsAndIgnoreIntervalsOutsideTheClip() {
+        val intervals = listOf(
+            MotionArchiveInterval(100, 400, 1),
+            MotionArchiveInterval(200, 200, 2),
+            MotionArchiveInterval(800, 500, 1),
+            MotionArchiveInterval(900, 0, 2),
+            MotionArchiveInterval(-100, 200, 1),
+            MotionArchiveInterval(-200, 50, 2),
+            MotionArchiveInterval(1_000, 100, 2),
+            MotionArchiveInterval(500, -1, 1),
+            MotionArchiveInterval(400, 100, 9),
+        )
+        assertEquals(MotionArchiveEventCounts(3, 2), motionArchiveEventCounts(intervals, 1_000))
+        assertEquals(MotionArchiveEventCounts(0, 0), motionArchiveEventCounts(intervals, 0))
+        assertEquals(MotionArchiveEventCounts(0, 0), motionArchiveEventCounts(emptyList(), 1_000))
+    }
+
     @Test fun calendarUsesFullWeeksForShortAndSixWeekMonths() {
         val shortMonth = motionCalendarWeeks(YearMonth.of(2021, 2), DayOfWeek.MONDAY)
         assertEquals(4, shortMonth.size)

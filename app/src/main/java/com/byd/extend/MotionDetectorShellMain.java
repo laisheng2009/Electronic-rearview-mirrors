@@ -19,6 +19,7 @@ import android.os.Parcel;
 import android.os.Process;
 import android.os.PowerManager;
 import android.os.ParcelFileDescriptor;
+import android.os.Parcelable;
 import android.os.RemoteException;
 import android.os.ResultReceiver;
 import android.os.SystemClock;
@@ -457,6 +458,21 @@ public final class MotionDetectorShellMain {
                         boolean deleted = mediaBridge.delete(volumeId, mediaStoreId);
                         reply.writeNoException();
                         reply.writeInt(deleted ? 1 : 0);
+                        return true;
+                    }
+                    case MotionDetectorProtocol.TX_OPEN_THUMBNAIL: {
+                        String volumeId = data.readString();
+                        long mediaStoreId = data.readLong();
+                        String expectedKey = data.readString();
+                        if (!validVolumeId(volumeId) || mediaStoreId <= 0
+                                || !MotionThumbnailKey.isValid(expectedKey) || data.dataAvail() != 0)
+                            throw new IllegalArgumentException("invalid Motion thumbnail selector");
+                        MotionMediaIndexBridge bridge;
+                        synchronized (this) { bridge = mediaBridge; }
+                        ParcelFileDescriptor cover = bridge == null ? null
+                                : bridge.openThumbnail(volumeId, mediaStoreId, expectedKey);
+                        reply.writeNoException();
+                        reply.writeTypedObject(cover, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
                         return true;
                     }
                     case MotionDetectorProtocol.TX_START:

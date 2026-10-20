@@ -70,6 +70,8 @@
     <string name="motion_archive_no_storage">"Нет подключённого хранилища архива. Подключите его для записи и просмотра видео."</string>
     <string name="motion_archive_unavailable">"Эта запись сейчас недоступна."</string>
     <string name="motion_archive_events">"Записей: %1$d · жёлтых: %2$d · красных: %3$d"</string>
+    <string name="motion_archive_yellow_count">"Жёлтые: %1$d"</string>
+    <string name="motion_archive_red_count">"Красные: %1$d"</string>
     <string name="motion_archive_delete_confirm">"Удалить выбранные записи движения (%1$d)? Это действие нельзя отменить."</string>
     <string name="motion_archive_delete_result">"Удалено %1$d · ошибок %2$d · пропущено %3$d"</string>
     <string name="motion_archive_size">"%1$s ГБ"</string>

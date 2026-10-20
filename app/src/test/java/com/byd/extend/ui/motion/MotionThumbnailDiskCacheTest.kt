@@ -4,7 +4,6 @@ import java.io.File
 import java.util.Base64
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -15,74 +14,74 @@ import org.junit.rules.TemporaryFolder
 class MotionThumbnailDiskCacheTest {
     @Rule @JvmField val temporary = TemporaryFolder()
 
-    @Test fun writesAndReadsThePngPayloadFromDisk() {
+    @Test fun actualPngSurvivesCacheRecreationAndDecodesFromThePersistentFile() {
         val folder = temporary.newFolder("cache")
-        val cache = MotionThumbnailDiskCache(folder, 32)
-        val key = MotionThumbnailDiskCache.key("volume|content-uri", "size|duration")
-        val bytes = byteArrayOf(1, 2, 3, 4)
+        val firstCache = MotionThumbnailDiskCache(folder)
+        val secondCache = MotionThumbnailDiskCache(folder)
+        val key = MotionThumbnailDiskCache.key("volume|content-uri|42|segment", "size|duration|time")
 
-        assertTrue(cache.write(key) { it.write(bytes); true })
-        assertEquals(bytes.toList(), cache.read(key) { it.readBytes().toList() })
-        assertEquals(bytes.toList(), MotionThumbnailDiskCache(folder, 32).read(key) { it.readBytes().toList() })
-        assertEquals(bytes.size.toLong(), File(folder, "$key.png").length())
+        assertTrue(firstCache.write(key) { it.write(validPng); true })
+        val decoded = secondCache.read(key, ::decodePng)
+
+        assertNotNull(decoded)
+        assertEquals(validPng.toList(), File(folder, "$key.png").readBytes().toList())
+        assertTrue(File(folder, "$key.png").isFile)
     }
 
-    @Test fun aCorruptPngIsRemovedAndCanBeReplaced() {
-        val cache = MotionThumbnailDiskCache(temporary.newFolder("cache"), 1024)
+    @Test fun corruptImageIsRemovedAndAValidImageCanReplaceIt() {
+        val folder = temporary.newFolder("cache")
+        val cache = MotionThumbnailDiskCache(folder)
         val key = MotionThumbnailDiskCache.key("volume|content-uri", "size|duration")
-        val file = File(temporary.root, "cache/$key.png")
-        val png = Base64.getDecoder().decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
-        )
-        assertTrue(cache.write(key) { it.write(png); true })
-        assertNotNull(cache.read(key, ::decodePng))
+        val file = File(folder, "$key.png")
 
-        assertTrue(cache.write(key) { it.write(png.copyOf(12)); true })
+        assertTrue(cache.write(key) { it.write(validPng.copyOf(12)); true })
         assertNull(cache.read(key, ::decodePng))
         assertFalse(file.exists())
-        assertTrue(cache.write(key) { it.write(png); true })
+
+        assertTrue(cache.write(key) { it.write(validPng); true })
         assertNotNull(cache.read(key, ::decodePng))
     }
 
-    @Test fun evictsLeastRecentlyUsedFilesToStayWithinTheByteLimit() {
-        val cache = MotionThumbnailDiskCache(temporary.newFolder("cache"), 8)
-        val first = MotionThumbnailDiskCache.key("volume|first", "revision")
-        val second = MotionThumbnailDiskCache.key("volume|second", "revision")
-        val newest = MotionThumbnailDiskCache.key("volume|newest", "revision")
-        val folder = File(temporary.root, "cache")
+    @Test fun successfulRevisionReplacementRemovesOnlyThatIdentitysOlderCovers() {
+        val folder = temporary.newFolder("cache")
+        val cache = MotionThumbnailDiskCache(folder)
+        val old = MotionThumbnailDiskCache.key("volume|same-uri|7|segment", "revision-1")
+        val current = MotionThumbnailDiskCache.key("volume|same-uri|7|segment", "revision-2")
+        val other = MotionThumbnailDiskCache.key("volume|other-uri|8|segment", "revision-1")
 
-        assertTrue(cache.write(first) { it.write(byteArrayOf(1, 2, 3, 4)); true })
-        assertTrue(cache.write(second) { it.write(byteArrayOf(5, 6, 7, 8)); true })
-        File(folder, "$first.png").setLastModified(1)
-        File(folder, "$second.png").setLastModified(2)
-        assertNotNull(cache.read(first) { it.readBytes() })
-        assertTrue(cache.write(newest) { it.write(byteArrayOf(9, 10, 11, 12)); true })
+        assertTrue(cache.write(old) { it.write(validPng); true })
+        assertTrue(cache.write(other) { it.write(validPng); true })
+        assertTrue(cache.write(current) { it.write(validPng); true })
 
-        assertTrue(File(folder, "$first.png").isFile)
-        assertFalse(File(folder, "$second.png").exists())
-        assertTrue(File(folder, "$newest.png").isFile)
-        assertTrue(folder.listFiles()!!.filter { it.extension == "png" }.sumOf(File::length) <= 8)
+        assertFalse(File(folder, "$old.png").exists())
+        assertTrue(File(folder, "$current.png").isFile)
+        assertTrue(File(folder, "$other.png").isFile)
     }
 
-    @Test fun snapshotReconciliationRemovesDeletedAndChangedKeys() {
-        val cache = MotionThumbnailDiskCache(temporary.newFolder("cache"), 32)
-        val retained = MotionThumbnailDiskCache.key("volume|kept", "revision-1")
-        val changedOld = MotionThumbnailDiskCache.key("volume|changed", "revision-1")
-        val changedNew = MotionThumbnailDiskCache.key("volume|changed", "revision-2")
-        val deleted = MotionThumbnailDiskCache.key("volume|deleted", "revision-1")
-        listOf(retained, changedOld, deleted).forEach { key ->
-            assertTrue(cache.write(key) { it.write(byteArrayOf(1)); true })
+    @Test fun confirmedIdentityRemovalDeletesAllRevisionsButNoOtherIdentity() {
+        val folder = temporary.newFolder("cache")
+        val cache = MotionThumbnailDiskCache(folder)
+        val old = MotionThumbnailDiskCache.key("volume|deleted-uri|7|segment", "revision-1")
+        val newer = MotionThumbnailDiskCache.key("volume|deleted-uri|7|segment", "revision-2")
+        val retained = MotionThumbnailDiskCache.key("volume|kept-uri|8|segment", "revision-1")
+        listOf(old, newer, retained).forEach { key ->
+            assertTrue(cache.write(key) { it.write(validPng); true })
         }
 
-        cache.retainKeys(setOf(retained, changedNew))
+        cache.removeIdentity(newer)
 
-        assertTrue(File(temporary.root, "cache/$retained.png").isFile)
-        assertFalse(File(temporary.root, "cache/$changedOld.png").exists())
-        assertFalse(File(temporary.root, "cache/$deleted.png").exists())
-        assertNotEquals(retained, changedNew)
+        assertFalse(File(folder, "$old.png").exists())
+        assertFalse(File(folder, "$newer.png").exists())
+        assertTrue(File(folder, "$retained.png").isFile)
     }
 
+    // Android's compile classpath omits ImageIO; the host JVM still performs the real PNG decode.
     private fun decodePng(file: File): Any? = Class.forName("javax.imageio.ImageIO")
-        .getMethod("read", File::class.java)
-        .invoke(null, file)
+        .getMethod("read", File::class.java).invoke(null, file)
+
+    private companion object {
+        val validPng = Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+        )
+    }
 }

@@ -142,6 +142,39 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         finally { data.recycle(); reply.recycle(); }
     }
 
+    /** Passive guard for lifecycle polling; it never starts, replaces, or configures a worker. */
+    @Override public boolean isWorkerAvailable() {
+        return existingMediaWorker() != null;
+    }
+
+    /** Opens an existing prepared cover only; tile requests never launch or import a worker. */
+    @Override public ParcelFileDescriptor openThumbnail(String volumeId, long mediaStoreId,
+            String expectedKey) {
+        if (volumeId == null || volumeId.isEmpty() || mediaStoreId <= 0
+                || !MotionThumbnailKey.isValid(expectedKey)) return null;
+        IBinder target = existingMediaWorker();
+        if (target == null) return null;
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        ParcelFileDescriptor result = null;
+        try {
+            data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
+            data.writeString(volumeId);
+            data.writeLong(mediaStoreId);
+            data.writeString(expectedKey);
+            if (!target.transact(MotionDetectorProtocol.TX_OPEN_THUMBNAIL, data, reply, 0)) return null;
+            reply.readException();
+            result = reply.readTypedObject(ParcelFileDescriptor.CREATOR);
+            if (reply.dataAvail() != 0) {
+                if (result != null) try { result.close(); } catch (IOException ignored) { }
+                return null;
+            }
+            return result;
+        } catch (Throwable unavailable) {
+            if (result != null) try { result.close(); } catch (IOException ignored) { }
+            return null;
+        } finally { data.recycle(); reply.recycle(); }
+    }
+
     @Override public boolean importLegacyIndex(ParcelFileDescriptor source) throws IOException {
         if (source == null) throw new IOException("Legacy Motion index descriptor is missing");
         IBinder target;
@@ -199,6 +232,16 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
 
     /** Opens the worker for fixed media operations; never configures monitoring. */
     private IBinder ensureMediaWorker() { return ensureWorker(true); }
+
+    private IBinder existingMediaWorker() {
+        if (closed) return null;
+        try {
+            IBinder candidate = resolveWorker();
+            if (!healthy(candidate)) return null;
+            worker = candidate;
+            return candidate;
+        } catch (Throwable unavailable) { return null; }
+    }
 
     IBinder ensureCheckWorker() { return ensureWorker(false); }
 

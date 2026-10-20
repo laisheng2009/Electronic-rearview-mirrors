@@ -58,7 +58,7 @@ internal class MotionTexturePlayer(
                     preparing = false
                     videoWidth = it.videoWidth
                     videoHeight = it.videoHeight
-                    updateViewport()
+                    requestLayout()
                     onPrepared(it.duration.coerceAtLeast(0))
                     if (surface != null && playbackAllowed) it.start()
                     else resumeOnSurfaceAvailable = surface == null && playbackAllowed
@@ -68,7 +68,7 @@ internal class MotionTexturePlayer(
                 if (!released && !failed) {
                     videoWidth = width
                     videoHeight = height
-                    updateViewport()
+                    requestLayout()
                 }
             }
             player.setOnSeekCompleteListener {
@@ -93,8 +93,16 @@ internal class MotionTexturePlayer(
     }
 
     fun showCrop(direction: Int) {
+        if (cropDirection == direction) return
+        val previousSource = sourceDimensions(cropDirection)
         cropDirection = direction
-        updateViewport()
+        val nextSource = sourceDimensions(cropDirection)
+        if (sameAspect(previousSource, nextSource)) {
+            applyTextureTransform()
+            texture.invalidate()
+        } else {
+            requestLayout()
+        }
     }
 
     fun currentPositionOrZero(): Int = currentPosition
@@ -209,11 +217,14 @@ internal class MotionTexturePlayer(
         } catch (_: IllegalStateException) {
             fail(0, 0)
         }
-        updateViewport()
+        requestLayout()
+        applyTextureTransform()
+        texture.invalidate()
     }
 
     override fun onSurfaceTextureSizeChanged(surfaceTexture: android.graphics.SurfaceTexture, width: Int, height: Int) {
-        updateViewport()
+        applyTextureTransform()
+        texture.invalidate()
     }
 
     override fun onSurfaceTextureDestroyed(surfaceTexture: android.graphics.SurfaceTexture): Boolean {
@@ -227,9 +238,33 @@ internal class MotionTexturePlayer(
 
     override fun onSurfaceTextureUpdated(surfaceTexture: android.graphics.SurfaceTexture) = Unit
 
-    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
-        super.onSizeChanged(width, height, oldWidth, oldHeight)
-        updateViewport()
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val measuredWidth = resolveSize(
+            android.view.View.MeasureSpec.getSize(widthMeasureSpec), widthMeasureSpec)
+        val measuredHeight = resolveSize(
+            android.view.View.MeasureSpec.getSize(heightMeasureSpec), heightMeasureSpec)
+        setMeasuredDimension(measuredWidth, measuredHeight)
+
+        val boundsWidth = (measuredWidth - paddingLeft - paddingRight).coerceAtLeast(0)
+        val boundsHeight = (measuredHeight - paddingTop - paddingBottom).coerceAtLeast(0)
+        val source = sourceDimensions(cropDirection)
+        val viewport = when {
+            videoWidth <= 0 || videoHeight <= 0 -> MotionPlayerViewport(boundsWidth, boundsHeight)
+            source == null -> MotionPlayerViewport(0, 0)
+            else -> motionPlayerViewport(source.first, source.second, boundsWidth, boundsHeight)
+        }
+        texture.measure(
+            android.view.View.MeasureSpec.makeMeasureSpec(viewport.width, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(viewport.height, android.view.View.MeasureSpec.EXACTLY),
+        )
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        val childLeft = paddingLeft + ((right - left - paddingLeft - paddingRight - texture.measuredWidth) / 2)
+        val childTop = paddingTop + ((bottom - top - paddingTop - paddingBottom - texture.measuredHeight) / 2)
+        texture.layout(childLeft, childTop, childLeft + texture.measuredWidth, childTop + texture.measuredHeight)
+        applyTextureTransform()
+        texture.invalidate()
     }
 
     private fun prepareWhenReady() {
@@ -288,29 +323,31 @@ internal class MotionTexturePlayer(
         surface = null
     }
 
-    /** Fit the encoded source/camera rectangle in the black parent; crop within TextureView coordinates. */
-    private fun updateViewport() {
-        if (videoWidth <= 0 || videoHeight <= 0 || width <= 0 || height <= 0) return
-        val crop = if (cropDirection < 0) null else MotionCompositionLayout.cameraRectForDirection(
-            cropDirection, cameraOrder, videoWidth, videoHeight) ?: return
-        val sourceLeft = crop?.left ?: 0
-        val sourceTop = crop?.top ?: 0
-        val sourceWidth = crop?.width() ?: videoWidth
-        val sourceHeight = crop?.height() ?: videoHeight
-        if (sourceWidth <= 0 || sourceHeight <= 0) return
-        val aspect = sourceWidth.toFloat() / sourceHeight
-        val viewportWidth = minOf(width.toFloat(), height * aspect).toInt().coerceAtLeast(1)
-        val viewportHeight = minOf(height.toFloat(), width / aspect).toInt().coerceAtLeast(1)
-        if (texture.layoutParams.width != viewportWidth || texture.layoutParams.height != viewportHeight) {
-            texture.layoutParams = LayoutParams(viewportWidth, viewportHeight, Gravity.CENTER)
-        }
+    private fun cropRect(direction: Int): MotionCompositionLayout.Rect? =
+        if (direction < 0 || videoWidth <= 0 || videoHeight <= 0) null
+        else MotionCompositionLayout.cameraRectForDirection(direction, cameraOrder, videoWidth, videoHeight)
+
+    private fun sourceDimensions(direction: Int): Pair<Int, Int>? {
+        if (videoWidth <= 0 || videoHeight <= 0) return null
+        if (direction < 0) return videoWidth to videoHeight
+        val crop = cropRect(direction) ?: return null
+        return crop.width() to crop.height()
+    }
+
+    private fun sameAspect(first: Pair<Int, Int>?, second: Pair<Int, Int>?): Boolean =
+        first != null && second != null && first.first.toLong() * second.second == second.first.toLong() * first.second
+
+    /** Apply crop only after layout has assigned the measured TextureView bounds. */
+    private fun applyTextureTransform() {
+        val source = sourceDimensions(cropDirection) ?: return
         if (texture.width <= 0 || texture.height <= 0) return
         val transform = Matrix()
         if (cropDirection >= 0) {
-            val scaleX = videoWidth.toFloat() / sourceWidth
-            val scaleY = videoHeight.toFloat() / sourceHeight
-            val dx = -sourceLeft.toFloat() * texture.width / sourceWidth
-            val dy = -sourceTop.toFloat() * texture.height / sourceHeight
+            val crop = cropRect(cropDirection) ?: return
+            val scaleX = videoWidth.toFloat() / source.first
+            val scaleY = videoHeight.toFloat() / source.second
+            val dx = -crop.left.toFloat() * texture.width / source.first
+            val dy = -crop.top.toFloat() * texture.height / source.second
             transform.setScale(scaleX, scaleY)
             transform.postTranslate(dx, dy)
         }

@@ -8,40 +8,36 @@ import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
-import java.security.MessageDigest
+import com.byd.extend.MotionThumbnailKey
 
-internal class MotionThumbnailDiskCache(
-    private val directory: File,
-    private val maxBytes: Long = 64L * 1024 * 1024,
-) {
+class MotionThumbnailDiskCache(private val directory: File) {
     private val lock = Any()
-
-    init {
-        require(maxBytes >= 0)
-        synchronized(lock) { if (ensureDirectory()) removeTemporaryFiles() }
-    }
+    private var temporaryFilesRemoved = false
 
     fun <T : Any> read(key: String, decode: (File) -> T?): T? {
-        val file = synchronized(lock) {
-            cacheFile(key)?.takeIf(File::isFile)?.also(::touch)
-        } ?: return null
+        val file = file(key) ?: return null
         val value = try { decode(file) } catch (_: Exception) { null }
         if (value == null) synchronized(lock) { file.delete() }
         return value
     }
 
+    fun file(key: String): File? = synchronized(lock) {
+        cacheFile(key)?.takeIf(File::isFile)
+    }
+
     fun write(key: String, encode: (OutputStream) -> Boolean): Boolean = synchronized(lock) {
         val target = cacheFile(key) ?: return@synchronized false
         if (!ensureDirectory()) return@synchronized false
+        removeTemporaryFiles()
         val temporary = try { File.createTempFile("thumb-", ".tmp", directory) }
         catch (_: Exception) { return@synchronized false }
         try {
-            var encoded = false
-            FileOutputStream(temporary).use { output ->
-                encoded = encode(output)
+            val encoded = FileOutputStream(temporary).use { output ->
+                val success = encode(output)
                 output.flush()
+                success
             }
-            if (!encoded || temporary.length() !in 1..maxBytes) return@synchronized false
+            if (!encoded || temporary.length() == 0L) return@synchronized false
             try {
                 Files.move(temporary.toPath(), target.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
             } catch (_: AtomicMoveNotSupportedException) {
@@ -49,8 +45,7 @@ internal class MotionThumbnailDiskCache(
             } catch (_: FileAlreadyExistsException) {
                 Files.move(temporary.toPath(), target.toPath(), REPLACE_EXISTING)
             }
-            touch(target)
-            trim()
+            removeOtherRevisions(key)
             target.isFile
         } catch (_: Exception) {
             false
@@ -61,11 +56,16 @@ internal class MotionThumbnailDiskCache(
 
     fun remove(key: String) = synchronized(lock) { cacheFile(key)?.delete() }
 
-    fun retainKeys(keys: Set<String>) = synchronized(lock) {
-        if (!ensureDirectory()) return@synchronized
-        val keep = keys.mapNotNullTo(HashSet()) { cacheFile(it)?.name }
-        cacheFiles().filter { it.name !in keep }.forEach { it.delete() }
-        removeTemporaryFiles()
+    fun removeIdentity(key: String) = synchronized(lock) {
+        val identityPrefix = identityPrefix(key) ?: return@synchronized
+        cacheFiles().filter { it.name.startsWith(identityPrefix) }.forEach { it.delete() }
+    }
+
+    private fun removeOtherRevisions(key: String) {
+        val identityPrefix = identityPrefix(key) ?: return
+        val keep = "$key.png"
+        cacheFiles().filter { it.name.startsWith(identityPrefix) && it.name != keep }
+            .forEach { it.delete() }
     }
 
     private fun ensureDirectory() = directory.isDirectory || (!directory.exists() && directory.mkdirs())
@@ -77,35 +77,20 @@ internal class MotionThumbnailDiskCache(
         file.isFile && file.name.endsWith(".png") && KEY.matches(file.name.removeSuffix(".png"))
     }?.toList().orEmpty()
 
-    private fun trim() {
-        val files = cacheFiles()
-        var bytes = files.sumOf(File::length)
-        for (file in files.sortedWith(compareBy<File> { it.lastModified() }.thenBy { it.name })) {
-            if (bytes <= maxBytes) break
-            val size = file.length()
-            if (file.delete()) bytes -= size
-        }
-    }
-
-    private fun touch(file: File) {
-        file.setLastModified(maxOf(System.currentTimeMillis(), file.lastModified() + 1))
-    }
+    private fun identityPrefix(key: String) =
+        if (KEY.matches(key)) "${key.substringBefore('-')}-" else null
 
     private fun removeTemporaryFiles() {
+        if (temporaryFilesRemoved) return
         directory.listFiles { file -> file.isFile && file.name.startsWith("thumb-") && file.name.endsWith(".tmp") }
             ?.forEach { it.delete() }
+        temporaryFilesRemoved = true
     }
 
     companion object {
-        private val KEY = Regex("[0-9a-f]{64}")
+        private val KEY = Regex("[0-9a-f]{64}-[0-9a-f]{64}")
 
-        fun key(identity: String, revision: String): String {
-            val digest = MessageDigest.getInstance("SHA-256")
-            digest.update(identity.toByteArray(Charsets.UTF_8))
-            digest.update(0.toByte())
-            return digest.digest(revision.toByteArray(Charsets.UTF_8)).joinToString("") {
-                (it.toInt() and 0xff).toString(16).padStart(2, '0')
-            }
-        }
+        @JvmStatic
+        fun key(identity: String, revision: String): String = MotionThumbnailKey.key(identity, revision)
     }
 }

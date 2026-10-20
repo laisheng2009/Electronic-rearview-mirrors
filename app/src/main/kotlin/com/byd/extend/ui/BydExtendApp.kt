@@ -105,9 +105,12 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.findViewTreeLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.byd.extend.R
 import com.byd.extend.ReleaseNotesMarkdown
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 private val rootIcons: List<ImageVector> = listOf(
     Icons.Outlined.Extension, Icons.Outlined.Visibility, Icons.Outlined.LocalParking,
@@ -133,11 +136,16 @@ fun BydExtendApp(
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
-    val motionArchiveState = remember(appContext) { MotionArchiveState(appContext) }
-    DisposableEffect(motionArchiveState) {
-        onDispose { motionArchiveState.close() }
-    }
+    val motionArchiveState = remember(appContext) { MotionArchiveState.get(appContext) }
     val lifecycleOwner = LocalView.current.findViewTreeLifecycleOwner()
+    LaunchedEffect(lifecycleOwner, motionArchiveState) {
+        lifecycleOwner?.lifecycle?.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive) {
+                if (motionArchiveState.playerEntry == null) motionArchiveState.refreshSnapshot(backgroundOnly = true)
+                delay(5_000)
+            }
+        }
+    }
     val strings = remember(state.language, context) { UiStrings(state.language, context) }
     val colors = remember(state.theme) { palette(state.theme) }
     val uiSession = remember {

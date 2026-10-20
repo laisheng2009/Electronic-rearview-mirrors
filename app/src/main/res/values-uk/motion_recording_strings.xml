@@ -70,6 +70,8 @@
     <string name="motion_archive_no_storage">"Немає змонтованого носія для архіву. Під’єднайте носій, щоб записувати й переглядати відео."</string>
     <string name="motion_archive_unavailable">"Цей запис зараз недоступний."</string>
     <string name="motion_archive_events">"Записів: %1$d · жовтих: %2$d · червоних: %3$d"</string>
+    <string name="motion_archive_yellow_count">"Жовті: %1$d"</string>
+    <string name="motion_archive_red_count">"Червоні: %1$d"</string>
     <string name="motion_archive_delete_confirm">"Видалити вибрані записи руху (%1$d)? Дію не можна скасувати."</string>
     <string name="motion_archive_delete_result">"Видалено %1$d · помилок %2$d · пропущено %3$d"</string>
     <string name="motion_archive_size">"%1$s ГБ"</string>

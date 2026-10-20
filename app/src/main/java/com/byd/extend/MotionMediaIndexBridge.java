@@ -30,6 +30,7 @@ public final class MotionMediaIndexBridge {
         library.index();
         library.storage();
         this.library = library;
+        library.scanAvailableThumbnails();
     }
 
     /** Consumes one authenticated legacy index snapshot and never modifies its source. */
@@ -100,6 +101,7 @@ public final class MotionMediaIndexBridge {
             imported.add(copy);
         }
         index.mergeLegacyRecords(imported, digest, fullyResolved);
+        library.scanAvailableThumbnails();
         if (!fullyResolved) {
             System.out.println("MOTION session=media pid=" + Process.myPid()
                     + " elapsed_ms=" + SystemClock.elapsedRealtime()
@@ -148,6 +150,13 @@ public final class MotionMediaIndexBridge {
         if (entry == null) return false;
         MotionMediaLibrary.DeleteResult result = library.deleteSelected(Collections.singletonList(entry));
         return result.deletedCount == 1;
+    }
+
+    /** Returns only a private read-only cover FD after revalidating its indexed revision. */
+    public synchronized android.os.ParcelFileDescriptor openThumbnail(String volumeId,
+            long mediaStoreId, String expectedKey) {
+        if (!MotionThumbnailKey.isValid(expectedKey)) return null;
+        return library.openPreparedThumbnail(volumeId, mediaStoreId, expectedKey);
     }
 
     private MotionMediaLibrary.Entry find(String volumeId, long mediaStoreId) {

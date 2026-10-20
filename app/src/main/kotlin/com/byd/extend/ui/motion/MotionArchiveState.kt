@@ -19,10 +19,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-internal class MotionArchiveState(context: Context) : Closeable {
+internal class MotionArchiveState private constructor(context: Context) : Closeable {
     private val appContext = context.applicationContext
     val library = MotionMediaLibrary(appContext, MotionDetectorClient(appContext))
-    val thumbnailLoader = MotionThumbnailLoader(appContext)
+    val thumbnailLoader = MotionThumbnailLoader(appContext, library)
     private val refreshMutex = Mutex()
     private var closed = false
 
@@ -50,7 +50,10 @@ internal class MotionArchiveState(context: Context) : Closeable {
         private set
     val gridPositions = mutableStateMapOf<MotionArchiveGridKey, MotionArchiveGridPosition>()
 
-    suspend fun refreshSnapshot(): Boolean = refreshMutex.withLock { refreshSnapshotLocked() }
+    suspend fun refreshSnapshot(backgroundOnly: Boolean = false): Boolean = refreshMutex.withLock {
+        if (backgroundOnly && !withContext(Dispatchers.IO) { library.isWorkerAvailable }) return@withLock false
+        refreshSnapshotLocked()
+    }
 
     suspend fun deleteSelected(selected: List<MotionMediaLibrary.Entry>): MotionMediaLibrary.DeleteResult =
         refreshMutex.withLock {
@@ -110,5 +113,13 @@ internal class MotionArchiveState(context: Context) : Closeable {
         closed = true
         thumbnailLoader.close()
         library.close()
+    }
+
+    companion object {
+        private var instance: MotionArchiveState? = null
+
+        @Synchronized
+        fun get(context: Context): MotionArchiveState =
+            instance?.takeUnless { it.closed } ?: MotionArchiveState(context).also { instance = it }
     }
 }

@@ -5,6 +5,8 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import com.byd.extend.MotionMediaLibrary
 
 internal enum class MotionArchiveStorageFilter { ALL, TABLET, SD }
@@ -29,6 +31,32 @@ internal data class MotionArchiveRecordMetadata(
     val recordedAtMillis: Long,
     val volumeId: String,
 )
+
+internal fun motionRecordingDisplayName(recordedAtMillis: Long, zone: ZoneId = ZoneId.systemDefault()): String =
+    "Motion_" + DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", Locale.ROOT)
+        .withZone(zone).format(Instant.ofEpochMilli(recordedAtMillis))
+
+internal data class MotionArchiveInterval(val positionMs: Long, val durationMs: Long, val level: Int)
+
+internal data class MotionArchiveEventCounts(val yellow: Int, val red: Int)
+
+internal fun motionArchiveEventCounts(
+    intervals: Iterable<MotionArchiveInterval>,
+    durationMs: Long,
+): MotionArchiveEventCounts {
+    var yellow = 0
+    var red = 0
+    if (durationMs > 0) intervals.forEach { interval ->
+        // Zero-length markers are still visible point events on the player's timeline.
+        if (interval.durationMs < 0 || interval.positionMs >= durationMs ||
+            interval.positionMs < 0 && interval.positionMs < -interval.durationMs) return@forEach
+        when (interval.level) {
+            1 -> yellow++
+            2 -> red++
+        }
+    }
+    return MotionArchiveEventCounts(yellow, red)
+}
 
 internal fun motionArchiveProject(
     records: Iterable<MotionArchiveRecordMetadata>,

@@ -1233,6 +1233,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
         logDiagnostic("mp4_finalize_begin", "volume=" + clip.output.volumeId
                 + " name=" + clip.output.displayName + " video_samples=" + clip.videoSamples);
         boolean stopped = false;
+        boolean prepareThumbnail = false;
         try {
             clip.muxer.stop();
             stopped = true;
@@ -1252,7 +1253,8 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 long durationMs = Math.max(1L, clip.lastVideoElapsedMs - clip.startElapsedMs + 34L);
                 String status = !videoFailed && (segmentBoundary || postRollComplete)
                         ? MotionMediaIndex.COMPLETE : MotionMediaIndex.INTERRUPTED;
-                index.finishRecording(clip.record.uri, status, durationMs, size);
+                boolean indexed = index.finishRecording(clip.record.uri, status, durationMs, size);
+                prepareThumbnail = indexed && !checkup;
                 logDiagnostic("mp4_finalize_complete", "volume=" + clip.output.volumeId
                         + " name=" + clip.output.displayName + " size_bytes=" + size
                         + " duration_ms=" + durationMs + " video_samples=" + clip.videoSamples
@@ -1286,6 +1288,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 stopReason = "manual_check_finished";
             }
             try { clip.lease.close(); } catch (IOException ignored) { }
+            if (prepareThumbnail) library.prepareThumbnail(clip.record.uri);
         }
         if (!segmentBoundary) clearEventWindow();
     }

@@ -75,7 +75,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
 import com.byd.extend.MotionConfig
 import com.byd.extend.MotionDirectionIcon
 import com.byd.extend.MotionMediaLibrary
@@ -94,8 +93,6 @@ import com.byd.extend.ui.icons.DirectionsCar
 import com.byd.extend.ui.icons.Checklist
 import com.byd.extend.ui.icons.Videocam
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.collect
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -263,13 +260,8 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings, archiv
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(lifecycle, refreshKey, archiveState, archiveState.playerEntry, archiveState.archiveOpen) {
-        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (isActive) {
-                if (archiveState.playerEntry == null) archiveState.refreshSnapshot()
-                delay(5_000)
-            }
-        }
+    LaunchedEffect(refreshKey, archiveState, archiveState.archiveOpen) {
+        if (refreshKey > 0 || archiveState.archiveOpen) archiveState.refreshSnapshot()
     }
 
     Section(strings.motionText(R.string.motion_video_title), colors) {
@@ -997,6 +989,15 @@ private fun MotionArchiveCard(
         DateTimeFormatter.ofPattern("dd.MM.yyyy · HH:mm", locale)
             .withZone(zone).format(java.time.Instant.ofEpochMilli(entry.recordedAtMillis))
     }
+    val eventCounts = remember(entry.markers, entry.durationMs) {
+        motionArchiveEventCounts(entry.markers.map {
+            MotionArchiveInterval(it.positionMs, it.durationMs, it.level)
+        }, entry.durationMs)
+    }
+    val eventLabels = listOfNotNull(
+        eventCounts.yellow.takeIf { it > 0 }?.let { strings.motionText(R.string.motion_archive_yellow_count, it) },
+        eventCounts.red.takeIf { it > 0 }?.let { strings.motionText(R.string.motion_archive_red_count, it) },
+    )
     val status = when (entry.status) {
         MotionMediaLibrary.Status.RECORDING -> R.string.motion_archive_recording
         MotionMediaLibrary.Status.COMPLETE -> R.string.motion_archive_complete
@@ -1013,9 +1014,10 @@ private fun MotionArchiveCard(
             onClick = onClick, onLongClick = onLongClick)
         .semantics(mergeDescendants = true) {
             if (selectionMode && deletable) toggleableState = ToggleableState(selected) else this.selected = selected
-            contentDescription = "${entry.title.ifBlank { time }}, $time, ${formatDuration(entry.durationMs)}, " +
+            contentDescription = "${motionRecordingDisplayName(entry.recordedAtMillis, zone)}, $time, ${formatDuration(entry.durationMs)}, " +
                 strings.motionText(status) + ", " + strings.motionText(
                     if (removableVolume) R.string.motion_storage_sd else R.string.motion_storage_internal) +
+                (if (eventLabels.isEmpty()) "" else ", ${eventLabels.joinToString(", ")}") +
                 if (entry.protectedFile) ", ${strings.motionText(R.string.motion_archive_protected_short)}" else ""
         }.padding(8.dp)) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(5.dp))) {
@@ -1036,11 +1038,23 @@ private fun MotionArchiveCard(
                     .padding(8.dp), color = Color.White, fontSize = 22.sp)
             }
         }
+        Text(time, Modifier.fillMaxWidth().padding(top = 4.dp), color = colors.text, fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (eventLabels.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (eventCounts.yellow > 0) Text(
+                    strings.motionText(R.string.motion_archive_yellow_count, eventCounts.yellow),
+                    color = colors.yellow, fontSize = 12.sp, maxLines = 1,
+                )
+                if (eventCounts.red > 0) Text(
+                    strings.motionText(R.string.motion_archive_red_count, eventCounts.red),
+                    color = colors.red, fontSize = 12.sp, maxLines = 1,
+                )
+            }
+        }
         Row(Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(time, Modifier.weight(1f), color = colors.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(formatDuration(entry.durationMs), color = colors.muted, fontSize = 13.sp)
+            Text(formatDuration(entry.durationMs), Modifier.weight(1f), color = colors.muted, fontSize = 13.sp)
             Image(painterResource(if (removableVolume) R.drawable.ic_archive_sd_card else R.drawable.ic_archive_tablet),
                 contentDescription = strings.motionText(if (removableVolume) R.string.motion_storage_sd else R.string.motion_storage_internal),
                 modifier = Modifier.size(20.dp), colorFilter = ColorFilter.tint(colors.muted))

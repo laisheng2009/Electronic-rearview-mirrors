@@ -34,6 +34,7 @@ public final class MotionMediaLibrary {
     private final MotionMediaIndex index;
     private final File leaseDirectory;
     private final Access access;
+    private final MotionThumbnailStore thumbnailStore;
 
     /** Narrow app-side facade for the worker-owned index; implementations must not expose paths. */
     public interface Access {
@@ -41,6 +42,8 @@ public final class MotionMediaLibrary {
         String query(Query query, MotionConfig config, String pageToken);
         String read(String volumeId, long mediaStoreId);
         boolean delete(String volumeId, long mediaStoreId);
+        boolean isWorkerAvailable();
+        ParcelFileDescriptor openThumbnail(String volumeId, long mediaStoreId, String expectedKey);
         boolean importLegacyIndex(ParcelFileDescriptor source) throws IOException;
     }
 
@@ -49,6 +52,7 @@ public final class MotionMediaLibrary {
         this.storage = new MotionStorage(this.context);
         this.leaseDirectory = new File(this.context.getFilesDir(), "motion/leases");
         this.access = null;
+        this.thumbnailStore = null;
         try {
             this.index = MotionMediaIndex.shared(new File(this.context.getFilesDir(), "motion/media-index.json"));
         } catch (IOException e) {
@@ -61,12 +65,16 @@ public final class MotionMediaLibrary {
         this.storage = new MotionStorage(shellContext);
         this.leaseDirectory = new File(shellContext.privateDirectory(), "leases");
         this.access = null;
+        MotionMediaIndex openedIndex;
         try {
-            this.index = MotionMediaIndex.shared(new File(shellContext.privateDirectory(), "media-index.json"));
+            openedIndex = MotionMediaIndex.shared(new File(shellContext.privateDirectory(), "media-index.json"));
         } catch (IOException e) {
             storage.close();
             throw new IllegalStateException("Cannot open shell Motion media index", e);
         }
+        this.index = openedIndex;
+        this.thumbnailStore = new MotionThumbnailStore(storage, index, leaseDirectory,
+                shellContext.privateDirectory());
     }
 
     /** Creates the existing UI-facing API over the authenticated worker Binder client. */
@@ -76,12 +84,50 @@ public final class MotionMediaLibrary {
         this.storage = null;
         this.index = null;
         this.leaseDirectory = null;
+        this.thumbnailStore = null;
         this.access = access;
     }
 
     public boolean importLegacyIndex(ParcelFileDescriptor source) throws IOException {
         if (access == null) throw new IllegalStateException("Legacy index import is worker-only");
         return access.importLegacyIndex(source);
+    }
+
+    /** Read-only lifecycle guard; unlike media operations this never starts or replaces a worker. */
+    public boolean isWorkerAvailable() {
+        return access == null || access.isWorkerAvailable();
+    }
+
+    /** Opens only a worker-prepared private cover via an owner-validated read-only descriptor. */
+    public ParcelFileDescriptor openThumbnail(Entry entry, String expectedKey) {
+        if (access == null || entry == null || entry.mediaStoreId <= 0
+                || !MotionThumbnailKey.isValid(expectedKey)) return null;
+        return access.openThumbnail(entry.volumeId, entry.mediaStoreId, expectedKey);
+    }
+
+    void prepareThumbnail(String uri) {
+        if (thumbnailStore != null) thumbnailStore.prepare(uri);
+    }
+
+    void scanAvailableThumbnails() {
+        if (thumbnailStore != null) thumbnailStore.scanAvailable();
+    }
+
+    ParcelFileDescriptor openPreparedThumbnail(String volumeId, long mediaStoreId, String expectedKey) {
+        if (thumbnailStore == null || volumeId == null || volumeId.isEmpty() || mediaStoreId <= 0
+                || !MotionThumbnailKey.isValid(expectedKey)) return null;
+        for (MotionMediaIndex.Record current : index.records()) {
+            if (!volumeId.equals(current.volumeId)
+                    || indexedMediaStoreId(Uri.parse(current.uri)) != mediaStoreId) continue;
+            if (!(MotionMediaIndex.COMPLETE.equals(current.status)
+                    || MotionMediaIndex.INTERRUPTED.equals(current.status))
+                    || !expectedKey.equals(MotionThumbnailKey.forRecord(current, mediaStoreId))) return null;
+            MotionStorage.Volume volume = storage.findVolume(volumeId);
+            if (volume != null && volume.mounted
+                    && !storage.isOwnedMedia(volume, Uri.parse(current.uri))) return null;
+            return thumbnailStore.open(volumeId, mediaStoreId, expectedKey, current);
+        }
+        return null;
     }
 
     public enum Sort { NEWEST_FIRST, OLDEST_FIRST }
@@ -278,6 +324,8 @@ public final class MotionMediaLibrary {
                     changed++;
                 } else if (storage.discardUnplayableInterrupted(volume, Uri.parse(row.uri), row.stagingUri)) {
                     index.remove(row.uri);
+                    if (thumbnailStore != null)
+                        thumbnailStore.removeForRecord(row, storage.mediaStoreId(volume, Uri.parse(row.uri)));
                     changed++;
                 }
             } catch (IOException | RuntimeException ignored) {
@@ -321,6 +369,7 @@ public final class MotionMediaLibrary {
                 catch (IOException ignored) { }
             }
         }
+        if (thumbnailStore != null) thumbnailStore.scanAvailable();
         return changed;
     }
 
@@ -335,6 +384,8 @@ public final class MotionMediaLibrary {
             boolean mounted = volume != null && volume.mounted;
             Uri uri = Uri.parse(record.uri);
             boolean available = mounted && storage.isOwnedMedia(volume, uri);
+            long mediaStoreId = storage.mediaStoreId(volume, uri);
+            if (mediaStoreId <= 0) mediaStoreId = indexedMediaStoreId(uri);
             Status status = status(record.status);
             if (!mounted) status = Status.UNAVAILABLE;
             ArrayList<Marker> markers = new ArrayList<>();
@@ -344,7 +395,7 @@ public final class MotionMediaLibrary {
                         marker.elapsedRealtimeMs - record.startElapsedRealtimeMs, marker.level));
             }
             result.add(new Entry(uri, record.name, record.volumeId,
-                    storage.mediaStoreId(volume, uri), record.segmentId,
+                    mediaStoreId, record.segmentId,
                     record.recordedAtMs, record.durationMs, record.sizeBytes, status, markers,
                     available, record.protectedFile, record.cameraOrder));
         }
@@ -570,6 +621,8 @@ public final class MotionMediaLibrary {
             try {
                 if (storage.deleteOwned(volume, entry.contentUri) == 1) {
                     index.remove(current.uri);
+                    if (thumbnailStore != null)
+                        thumbnailStore.removeForRecord(current, storage.mediaStoreId(volume, entry.contentUri));
                     deleted++;
                 } else failed++;
             } catch (IOException | RuntimeException e) {
@@ -610,6 +663,7 @@ public final class MotionMediaLibrary {
 
     public void close() {
         if (storage != null) {
+            if (thumbnailStore != null) thumbnailStore.close();
             storage.close();
         } else if (access instanceof AutoCloseable) {
             try { ((AutoCloseable) access).close(); }
@@ -678,6 +732,9 @@ public final class MotionMediaLibrary {
             }
             try {
                 index.remove(candidate.uri);
+                if (thumbnailStore != null)
+                    thumbnailStore.removeForRecord(candidate, storage.mediaStoreId(currentVolume,
+                            Uri.parse(candidate.uri)));
             } catch (IOException failure) {
                 return new StorageDecision(false, own, parts.allowance, "motion_archive_index_update_failed");
             }
@@ -727,6 +784,17 @@ public final class MotionMediaLibrary {
         return (query.volumeId == null || query.volumeId.equals(record.volumeId))
                 && (query.startInclusiveMs == null || record.recordedAtMs >= query.startInclusiveMs)
                 && (query.endExclusiveMs == null || record.recordedAtMs < query.endExclusiveMs);
+    }
+
+    private static long indexedMediaStoreId(Uri uri) {
+        if (uri == null || !"content".equals(uri.getScheme()) || !"media".equals(uri.getAuthority())) return -1;
+        List<String> segments = uri.getPathSegments();
+        if (segments.size() != 4 || !"video".equals(segments.get(1))
+                || !"media".equals(segments.get(2))) return -1;
+        try {
+            long id = Long.parseLong(segments.get(3));
+            return id > 0 ? id : -1;
+        } catch (NumberFormatException invalid) { return -1; }
     }
 
     private static Status status(String value) {

@@ -70,6 +70,8 @@
     <string name="motion_archive_no_storage">"没有已挂载的录像存储设备。连接存储后即可录像或浏览片段。"</string>
     <string name="motion_archive_unavailable">"此录像当前不可用。"</string>
     <string name="motion_archive_events">"%1$d 个录像 · 黄色 %2$d · 红色 %3$d"</string>
+    <string name="motion_archive_yellow_count">"黄色：%1$d"</string>
+    <string name="motion_archive_red_count">"红色：%1$d"</string>
     <string name="motion_archive_delete_confirm">"删除选中的 %1$d 个运动录像？此操作无法撤销。"</string>
     <string name="motion_archive_delete_result">"已删除 %1$d · 失败 %2$d · 跳过 %3$d"</string>
     <string name="motion_archive_size">"%1$s GB"</string>

@@ -17,7 +17,7 @@ public final class MotionDetectorProtocol {
     static final String CONFIG_PATH = STATE_ROOT + "/config.json";
     static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
     static final String EXTRA_SESSION = "motion_session_id";
-    static final int VERSION = 12;
+    static final int VERSION = 13;
     public static final String EXTRA_WINDOW_REPORTER = "motion_window_reporter";
     public static final String WINDOW_COMMANDS = "window_commands";
     public static final String WINDOW_CANCELLED = "window_cancelled";
@@ -58,6 +58,7 @@ public final class MotionDetectorProtocol {
     static final int TX_EXPLICIT_SHUTDOWN = IBinder.FIRST_CALL_TRANSACTION + 18;
     static final int TX_CHECK_START = IBinder.FIRST_CALL_TRANSACTION + 19;
     static final int TX_CHECK_CANCEL = IBinder.FIRST_CALL_TRANSACTION + 20;
+    static final int TX_OPEN_THUMBNAIL = IBinder.FIRST_CALL_TRANSACTION + 21;
 
     static final int CB_PREPARED = IBinder.FIRST_CALL_TRANSACTION;
     static final int CB_STATUS = IBinder.FIRST_CALL_TRANSACTION + 1;
