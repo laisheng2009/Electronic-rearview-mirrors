@@ -845,7 +845,7 @@ private fun MotionArchiveDialog(
                             items(entries, key = { it.contentUri.toString() }) { entry ->
                                 val id = entry.contentUri.toString()
                                 val removable = entry.volumeId in removableVolumeIds
-                                MotionArchiveCard(entry, id in visibleSelection, selectionMode, archiveState.thumbnailLoader,
+                                MotionArchiveCard(entry, id in visibleSelection, selectionMode, archiveState,
                                     removable,
                                     colors, strings, locale, zone,
                                     onClick = {
@@ -976,7 +976,7 @@ private fun MotionArchiveCard(
     entry: MotionMediaLibrary.Entry,
     selected: Boolean,
     selectionMode: Boolean,
-    thumbnailLoader: MotionThumbnailLoader,
+    archiveState: MotionArchiveState,
     removableVolume: Boolean,
     colors: UiPalette,
     strings: UiStrings,
@@ -1021,7 +1021,8 @@ private fun MotionArchiveCard(
                 if (entry.protectedFile) ", ${strings.motionText(R.string.motion_archive_protected_short)}" else ""
         }.padding(8.dp)) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(5.dp))) {
-            MotionArchiveThumbnail(entry, thumbnailLoader, colors, strings, Modifier.fillMaxSize())
+            MotionArchiveThumbnail(entry, archiveState, colors, strings,
+                Modifier.fillMaxSize())
             Text(strings.motionText(status), Modifier.align(Alignment.TopStart).padding(4.dp)
                 .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(6.dp)).padding(4.dp),
                 color = Color.White, fontSize = 11.sp, maxLines = 1)

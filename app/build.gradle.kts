@@ -79,6 +79,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.core:core:1.13.1")
+    implementation("io.coil-kt.coil3:coil-compose-core:3.0.4")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.85")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")

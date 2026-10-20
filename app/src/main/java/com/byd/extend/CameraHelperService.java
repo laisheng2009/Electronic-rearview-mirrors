@@ -18,6 +18,7 @@ import android.os.PowerManager;
 import android.os.Process;
 import android.os.ResultReceiver;
 import android.os.SystemClock;
+import android.util.Log;
 import android.widget.Toast;
 import java.io.File;
 import java.text.SimpleDateFormat;
@@ -31,6 +32,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import com.byd.extend.ui.AdbRecoveryUiBridge;
 import com.byd.extend.ui.UiLanguage;
 
@@ -50,7 +52,9 @@ public final class CameraHelperService extends Service {
     private static final String ACTION_ADB_READY =
             "com.byd.extend.action.ADB_READY";
     private static final String CHANNEL_ID = "guard_service";
+    private static final String TAG = "CameraHelperService";
     private static final int NOTIFICATION_ID = 8713;
+    private static final AtomicLong SERVICE_INSTANCE_SEQUENCE = new AtomicLong();
     private static final String ACTION_START =
             "com.byd.extend.action.START_PERSISTENT";
     private static final String ACTION_ACTIVITY_OPEN =
@@ -255,6 +259,9 @@ public final class CameraHelperService extends Service {
     private Handler runtimeHandler;
     private RuntimeLifecycleGate.Queue runtimeQueue;
     private AsyncServiceLog serviceLog;
+    private volatile String serviceInstanceId;
+    private volatile int latestStartId = -1;
+    private final AtomicLong foregroundOperationSequence = new AtomicLong();
     private AvasRecoveryDaemonController avasRecoveryDaemon;
     private PowerManager.WakeLock avasWakeLock;
     private volatile CameraHelperMain.HelperBinder helper;
@@ -263,7 +270,7 @@ public final class CameraHelperService extends Service {
     private MotionRuntime motionRuntime;
     private WeatherRuntime weatherRuntime;
     private boolean controllersInitialized;
-    private boolean foreground;
+    private volatile boolean foreground;
     private boolean activityVisible;
     private boolean cameraPreviewActive;
     private boolean avasStartupPermissionAttempted;
@@ -616,7 +623,7 @@ public final class CameraHelperService extends Service {
     }
 
     private void pauseRuntimeForImport() {
-        stopRuntime(true);
+        stopRuntime(true, "pause_runtime_for_import", "pause_runtime_for_import", -1);
         runtimeNeedsReinit = true;
     }
 
@@ -830,6 +837,7 @@ public final class CameraHelperService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        serviceInstanceId = Process.myPid() + "-" + SERVICE_INSTANCE_SEQUENCE.incrementAndGet();
         runtimeThread = new HandlerThread("service-runtime");
         runtimeThread.start();
         runtimeHandler = new Handler(runtimeThread.getLooper());
@@ -866,13 +874,16 @@ public final class CameraHelperService extends Service {
                     }
                 }));
         activeInstance = this;
-        lifecycle("service_create", "auto_start", GuardRecovery.isAutoStartEnabled(this),
+        recordServiceDiagnostic("service_create", -1, foreground, foreground,
+                "action", "onCreate", "reason", "service_create",
+                "operation", "service_lifecycle", "phase", "entry",
+                "auto_start", GuardRecovery.isAutoStartEnabled(this),
                 "user_shutdown", GuardRecovery.isUserShutdownActive(this));
         AvasRecoveryJournal.event(this, "service_recovery_create",
                 "auto_start", GuardRecovery.isAutoStartEnabled(this),
                 "user_shutdown", GuardRecovery.isUserShutdownActive(this));
         if (GuardRecovery.shouldRecover(this) && !LegacySettingsImporter.blocksRuntime(this)) {
-            startForegroundRuntime();
+            startForegroundRuntime("on_create_recovery", "onCreate", "service_create", -1);
         } else if (GuardRecovery.shouldRecover(this)) {
             lifecycle("runtime_blocked", "reason", "legacy_handover");
         }
@@ -880,11 +891,14 @@ public final class CameraHelperService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        latestStartId = startId;
         ServiceRuntimeCommand command =
                 ServiceRuntimeCommand.capture(intent, startId, ACTION_START);
         String action = command.action;
-        lifecycle("service_start", "action", action == null ? "" : action,
-                "reason", command.reason, "start_id", startId);
+        recordServiceDiagnostic("service_start", startId, foreground, foreground,
+                "action", action == null ? "" : action,
+                "reason", command.reason, "operation", "service_lifecycle", "phase", "entry",
+                "start_id", startId, "flags", flags);
         boolean blocked = LegacySettingsImporter.blocksRuntime(this);
         boolean targetAutoStart = ACTION_AUTO_START_CHANGED.equals(action)
                 ? command.enabled : GuardRecovery.isAutoStartEnabled(this);
@@ -897,7 +911,8 @@ public final class CameraHelperService extends Service {
         boolean manualRuntime = !targetUserShutdown
                 && (activityVisible || ACTION_ACTIVITY_OPEN.equals(action));
         if ((willRecover || helperRuntimeStarted || manualRuntime) && !blocked) {
-            startForegroundRuntime();
+            startForegroundRuntime(command.reason, action == null ? "" : action,
+                    "service_start", startId);
         }
         if (!postRuntime(() -> handleStartCommand(command))) {
             stopSelf(startId);
@@ -922,8 +937,8 @@ public final class CameraHelperService extends Service {
             if (adbReminder != null) adbReminder.close();
             setAvasWakeLock(false, "explicit_shutdown");
             avasRecoveryDaemon.reconcile(false, "explicit_shutdown");
-            stopRuntime(true);
-            stopServiceFromRuntime(command.startId);
+            stopRuntime(true, "explicit_shutdown", action, command.startId);
+            stopServiceFromRuntime(command.startId, "explicit_shutdown", action);
             return;
         }
         if (ACTION_FLUSH_LOGS.equals(action)) {
@@ -970,14 +985,14 @@ public final class CameraHelperService extends Service {
         boolean userShutdown = GuardRecovery.isUserShutdownActive(this);
         if (LegacySettingsImporter.blocksRuntime(this)) {
             lifecycle("runtime_blocked", "reason", "legacy_handover");
-            stopRuntime(true);
+            stopRuntime(true, "legacy_handover", action, command.startId);
             runtimeNeedsReinit = true;
             syncWeatherAccessibility(false);
             if (ACTION_WEATHER_REFRESH.equals(action)) {
                 sendWeatherResult(command.weatherReceiver, WEATHER_RESULT_FAILED,
                         runtimeText(this, R.string.runtime_finish_migration));
             }
-            stopServiceFromRuntime(command.startId);
+            stopServiceFromRuntime(command.startId, "legacy_handover", action);
             return;
         }
         if (ACTION_DIAGNOSTICS_CHANGED.equals(action)) {
@@ -1017,7 +1032,7 @@ public final class CameraHelperService extends Service {
         if (!shouldAdmitFullRuntime(
                 userShutdown, shouldRecover, helperRuntimeStarted, activityVisible, action)) {
             runtimeHandler.removeCallbacks(heartbeat);
-            stopServiceFromRuntime(command.startId);
+            stopServiceFromRuntime(command.startId, "runtime_not_required", action);
             return;
         }
         if (runtimeNeedsReinit) {
@@ -1113,11 +1128,8 @@ public final class CameraHelperService extends Service {
         startHeartbeat();
     }
 
-    private void stopServiceFromRuntime(int startId) {
-        mainHandler.post(() -> {
-            stopForegroundRuntime();
-            stopSelf(startId);
-        });
+    private void stopServiceFromRuntime(int startId, String reason, String action) {
+        postForegroundStop("stop_service", reason, action, startId, true);
     }
 
     static boolean shouldAdmitFullRuntime(
@@ -1410,13 +1422,16 @@ public final class CameraHelperService extends Service {
 
     @Override
     public void onDestroy() {
+        recordServiceDiagnostic("service_destroy_callback", -1, foreground, foreground,
+                "action", "onDestroy", "reason", "service_destroy",
+                "operation", "service_lifecycle", "phase", "entry");
         WeatherRefreshAccessibilityService.stopMicrophone();
         LocalAdbClient.removeAccessStateListener(serviceAdbListener);
         if (adbRecovery != null) adbRecovery.close();
         if (adbReminder != null) adbReminder.close();
         RuntimeLifecycleGate.TeardownResult teardown =
                 runtimeLifecycle.beginTeardown(runtimeQueue, this::destroyRuntime);
-        stopForegroundRuntime();
+        stopForegroundRuntime("service_destroy", "onDestroy", "on_destroy", -1, null, null);
         if (activeInstance == this) {
             activeInstance = null;
             // Teardown may discard a queued permission attempt before its finally can run.
@@ -1434,7 +1449,10 @@ public final class CameraHelperService extends Service {
         runtimeHandler.removeCallbacksAndMessages(null);
         boolean recover = GuardRecovery.shouldRecover(this);
         boolean explicitShutdown = GuardRecovery.isUserShutdownActive(this);
-        lifecycle("service_destroy", "recover", recover);
+        recordServiceDiagnostic("service_destroy", -1, foreground, foreground,
+                "action", "destroyRuntime", "reason", "on_destroy",
+                "operation", "service_lifecycle", "phase", "runtime_teardown",
+                "recover", recover);
         if (motionRuntime != null) { motionRuntime.close(); motionRuntime = null; }
         setAvasWakeLock(false, "service_teardown");
         if (avasRecoveryDaemon != null) {
@@ -1503,7 +1521,8 @@ public final class CameraHelperService extends Service {
         }
     }
 
-    private void stopRuntime(boolean terminateShells) {
+    private void stopRuntime(
+            boolean terminateShells, String reason, String action, int requestStartId) {
         runtimeHandler.removeCallbacks(heartbeat);
         runtimeHandler.removeCallbacks(resumeOverlay);
         runtimeHandler.removeCallbacks(retryCameraDiscovery);
@@ -1522,7 +1541,7 @@ public final class CameraHelperService extends Service {
                 getSharedPreferences("settings", MODE_PRIVATE))))) {
             avasRecoveryDaemon.reconcile(false, "runtime_stop");
         }
-        mainHandler.post(this::stopForegroundRuntime);
+        postForegroundStop("stop_runtime", reason, action, requestStartId, false);
         GuardRecovery.schedule(this);
     }
 
@@ -1624,17 +1643,145 @@ public final class CameraHelperService extends Service {
         return result == CameraHelperMain.DiscoveryResult.RETRYABLE_FAILURE && runtimeActive;
     }
 
-    private void startForegroundRuntime() {
-        if (foreground) return;
-        startForeground(NOTIFICATION_ID, notification());
-        foreground = true;
+    private void startForegroundRuntime(
+            String reason, String action, String requestOperation, int requestStartId) {
+        String operationId = nextForegroundOperationId();
+        boolean foregroundBefore = foreground;
+        if (foregroundBefore) {
+            recordForegroundTransition(operationId, "startForeground", requestOperation,
+                    "start", action, reason, requestStartId, "call", "skipped",
+                    foregroundBefore, foregroundBefore, null, null,
+                    "skip_reason", "cached_foreground_true");
+            return;
+        }
+        recordForegroundTransition(operationId, "startForeground", requestOperation,
+                "start", action, reason, requestStartId, "call", "entry",
+                foregroundBefore, foregroundBefore, null, null);
+        long startedAt = SystemClock.elapsedRealtimeNanos();
+        try {
+            startForeground(NOTIFICATION_ID, notification());
+            foreground = true;
+            recordForegroundTransition(operationId, "startForeground", requestOperation,
+                    "start", action, reason, requestStartId, "call", "returned",
+                    foregroundBefore, foreground, durationMs(startedAt), null);
+        } catch (RuntimeException | Error error) {
+            recordForegroundTransition(operationId, "startForeground", requestOperation,
+                    "start", action, reason, requestStartId, "call", "exception",
+                    foregroundBefore, foreground, durationMs(startedAt), null,
+                    "exception_class", error.getClass().getName(),
+                    "exception_message", error.getMessage() == null ? "" : error.getMessage());
+            Log.e(TAG, "Foreground start operation " + operationId + " failed", error);
+            throw error;
+        }
     }
 
-    private void stopForegroundRuntime() {
-        if (!foreground) return;
-        if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE);
-        else stopForeground(true);
-        foreground = false;
+    private void stopForegroundRuntime(
+            String reason, String action, String requestOperation, int requestStartId,
+            String operationId, Long queueDelayMs) {
+        if (operationId == null) operationId = nextForegroundOperationId();
+        boolean foregroundBefore = foreground;
+        if (!foregroundBefore) {
+            recordForegroundTransition(operationId, "stopForeground", requestOperation,
+                    "stop", action, reason, requestStartId, "call", "skipped",
+                    foregroundBefore, foregroundBefore, null, queueDelayMs,
+                    "skip_reason", "cached_foreground_false");
+            return;
+        }
+        recordForegroundTransition(operationId, "stopForeground", requestOperation,
+                "stop", action, reason, requestStartId, "call", "entry",
+                foregroundBefore, foregroundBefore, null, queueDelayMs);
+        long startedAt = SystemClock.elapsedRealtimeNanos();
+        try {
+            if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE);
+            else stopForeground(true);
+            foreground = false;
+            recordForegroundTransition(operationId, "stopForeground", requestOperation,
+                    "stop", action, reason, requestStartId, "call", "returned",
+                    foregroundBefore, foreground, durationMs(startedAt), queueDelayMs);
+        } catch (RuntimeException | Error error) {
+            recordForegroundTransition(operationId, "stopForeground", requestOperation,
+                    "stop", action, reason, requestStartId, "call", "exception",
+                    foregroundBefore, foreground, durationMs(startedAt), queueDelayMs,
+                    "exception_class", error.getClass().getName(),
+                    "exception_message", error.getMessage() == null ? "" : error.getMessage());
+            Log.e(TAG, "Foreground stop operation " + operationId + " failed", error);
+            throw error;
+        }
+    }
+
+    private void postForegroundStop(
+            String operation, String reason, String action, int requestStartId,
+            boolean stopService) {
+        String operationId = nextForegroundOperationId();
+        long scheduledAt = SystemClock.elapsedRealtimeNanos();
+        boolean scheduledForeground = foreground;
+        recordForegroundTransition(operationId, operation, operation, "stop", action, reason,
+                requestStartId, "schedule", "posting", scheduledForeground, scheduledForeground, null, null);
+        boolean accepted = mainHandler.post(() -> {
+            long queueDelayMs = Math.max(0L,
+                    (SystemClock.elapsedRealtimeNanos() - scheduledAt) / 1_000_000L);
+            recordForegroundTransition(operationId, operation, operation, "stop", action, reason,
+                    requestStartId, "execute", "entry", foreground, foreground, null,
+                    queueDelayMs);
+            stopForegroundRuntime(reason, action, operation, requestStartId,
+                    operationId, queueDelayMs);
+            if (stopService) {
+                boolean before = foreground;
+                stopSelf(requestStartId);
+                recordForegroundTransition(operationId, operation, operation, "stop_self",
+                        action, reason, requestStartId, "call", "returned", before, foreground,
+                        null, queueDelayMs);
+            }
+        });
+        boolean postedForeground = foreground;
+        recordForegroundTransition(operationId, operation, operation, "stop", action, reason,
+                requestStartId, "post_result", accepted ? "accepted" : "rejected",
+                postedForeground, postedForeground, null, null);
+    }
+
+    private String nextForegroundOperationId() {
+        return serviceInstanceId + "-fg-" + foregroundOperationSequence.incrementAndGet();
+    }
+
+    private static long durationMs(long startedAtNanos) {
+        return Math.max(0L, (SystemClock.elapsedRealtimeNanos() - startedAtNanos) / 1_000_000L);
+    }
+
+    private void recordForegroundTransition(
+            String operationId, String operation, String requestOperation,
+            String transition, String action, String reason, int requestStartId,
+            String phase, String outcome, boolean foregroundBefore, boolean foregroundAfter,
+            Long durationMs, Long queueDelayMs, Object... extraFields) {
+        List<Object> fields = new ArrayList<>();
+        fields.add("operation_id"); fields.add(operationId);
+        fields.add("operation"); fields.add(operation);
+        fields.add("request_operation"); fields.add(requestOperation);
+        fields.add("transition"); fields.add(transition);
+        fields.add("action"); fields.add(action == null ? "" : action);
+        fields.add("reason"); fields.add(reason == null ? "" : reason);
+        fields.add("phase"); fields.add(phase);
+        fields.add("outcome"); fields.add(outcome);
+        if (durationMs != null) { fields.add("duration_ms"); fields.add(durationMs); }
+        if (queueDelayMs != null) { fields.add("queue_delay_ms"); fields.add(queueDelayMs); }
+        if (extraFields != null) {
+            for (Object field : extraFields) fields.add(field);
+        }
+        recordServiceDiagnostic("foreground_transition", requestStartId,
+                foregroundBefore, foregroundAfter, fields.toArray());
+    }
+
+    private void recordServiceDiagnostic(
+            String kind, int requestStartId, boolean foregroundBefore,
+            boolean foregroundAfter, Object... fields) {
+        String line = ForegroundServiceDiagnostics.event(kind, Process.myPid(),
+                serviceInstanceId == null ? "" : serviceInstanceId,
+                Thread.currentThread().getName(), Thread.currentThread().getId(),
+                SystemClock.elapsedRealtime(), requestStartId, latestStartId,
+                foregroundBefore, foregroundAfter, fields);
+        if (line == null) return;
+        Log.i(TAG, line);
+        AsyncServiceLog activeLog = serviceLog;
+        if (activeLog != null) activeLog.appendRaw(line);
     }
 
     private Notification notification() {
