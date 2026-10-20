@@ -153,10 +153,11 @@ public final class CallsRuntime {
             return;
         }
         if (selectingContact) refreshContactCard();
+        if (callOperation != null && callOperation.stage == CallStage.WAITING_FOR_TARGET
+                && isCallTargetEvent(event.getEventType(), event.getPackageName()))
+            tryFindCallTarget(callOperation);
         if (event.getPackageName() != null
                 && XCALL_PACKAGE.contentEquals(event.getPackageName())) {
-            if (callOperation != null && callOperation.stage == CallStage.WAITING_FOR_TARGET)
-                tryFindCallTarget(callOperation);
             if (hintDismissRequest != null) tryDismissAssignedHint(hintDismissRequest);
         }
     }
@@ -709,18 +710,30 @@ public final class CallsRuntime {
         logStage("manual_hold_received", "profile=" + profile.name()
                 + " value=" + (source == CameraButtonBindings.Source.Sos ? 1 : 2)
                 + " sequence=" + operation.sequence);
+        handler.postDelayed(callTargetDeadline,
+                Math.max(0L, operation.startedAt + TARGET_WAIT_MS
+                        - SystemClock.elapsedRealtime()));
         tryFindCallTarget(operation);
-        if (callOperation == operation && operation.stage == CallStage.WAITING_FOR_TARGET)
-            handler.postDelayed(callTargetDeadline, TARGET_WAIT_MS);
     }
 
     private void tryFindCallTarget(CallOperation operation) {
+        if (operation == null || callOperation != operation
+                || operation.stage != CallStage.WAITING_FOR_TARGET) return;
+        if (targetSearchExpired(operation.startedAt, SystemClock.elapsedRealtime())) {
+            expireCallTargetSearch(operation);
+            return;
+        }
         if (!mayContinue(operation)) return;
         XCallScan scan = scanXCallTargets();
         try {
+            if (callOperation != operation || operation.stage != CallStage.WAITING_FOR_TARGET)
+                return;
+            operation.targetTreeIncomplete = scan.incomplete;
+            if (targetSearchExpired(operation.startedAt, SystemClock.elapsedRealtime())) {
+                expireCallTargetSearch(operation);
+                return;
+            }
             if (scan.incomplete) {
-                failCall(operation, R.string.calls_picker_oem_cancel_failed,
-                        "xcall_target_tree_incomplete");
                 return;
             }
             List<TargetNode> candidates = targetsForCall(scan);
@@ -739,10 +752,15 @@ public final class CallsRuntime {
                         "xcall_target_changed");
                 return;
             }
+            if (!mayContinue(operation)) return;
             operation.stage = CallStage.CHECKING_DISMISSAL;
             operation.clickedAt = SystemClock.elapsedRealtime();
             operation.lastConfirmSample = 0;
             operation.absentSamples = 0;
+            if (targetSearchExpired(operation.startedAt, SystemClock.elapsedRealtime())) {
+                expireCallTargetSearch(operation);
+                return;
+            }
             boolean clicked = target.node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
             logStage("oem_cancel_action", "target=" + simpleId(target.id)
                     + " accepted=" + clicked);
@@ -763,9 +781,20 @@ public final class CallsRuntime {
 
     private void onCallTargetDeadline() {
         CallOperation operation = callOperation;
-        if (operation != null && operation.stage == CallStage.WAITING_FOR_TARGET)
-            failCall(operation, R.string.calls_picker_oem_cancel_failed,
-                    "xcall_target_not_found");
+        if (operation == null || operation.stage != CallStage.WAITING_FOR_TARGET) return;
+        long now = SystemClock.elapsedRealtime();
+        long deadline = operation.startedAt + TARGET_WAIT_MS;
+        if (now < deadline) {
+            handler.postDelayed(callTargetDeadline, deadline - now);
+            return;
+        }
+        expireCallTargetSearch(operation);
+    }
+
+    private void expireCallTargetSearch(CallOperation operation) {
+        failCall(operation, R.string.calls_picker_oem_cancel_failed,
+                operation.targetTreeIncomplete
+                        ? "xcall_target_tree_incomplete" : "xcall_target_not_found");
     }
 
     private void confirmCallDismissal() {
@@ -1247,6 +1276,15 @@ public final class CallsRuntime {
                 || XCALL_CANCEL.equals(id);
     }
 
+    static boolean isCallTargetEvent(int eventType, CharSequence packageName) {
+        return eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+                || packageName != null && XCALL_PACKAGE.contentEquals(packageName);
+    }
+
+    static boolean targetSearchExpired(long startedAt, long now) {
+        return now >= startedAt + TARGET_WAIT_MS;
+    }
+
     private static String simpleId(String id) {
         if (XCALL_HANGUP.equals(id)) return "dialog_hangup";
         if (XCALL_FLOAT_HANGUP.equals(id)) return "float_end_call";
@@ -1388,6 +1426,7 @@ public final class CallsRuntime {
         final long sequence;
         final long startedAt;
         CallStage stage;
+        boolean targetTreeIncomplete;
         long clickedAt;
         long lastConfirmSample;
         int absentSamples;

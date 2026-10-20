@@ -30,7 +30,7 @@ final class CameraRuntimeClient {
     private volatile boolean detached;
     // Android registrations/bindService need a real AMS-owned process. Video stays in the helper.
     private ClusterFullscreenController cluster;
-    private OemCameraVisibilityRuntime pano;
+    private volatile OemCameraVisibilityRuntime pano;
     private boolean platformRegistered;
     private final BroadcastReceiver platformReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ignored, Intent intent) {
@@ -39,8 +39,9 @@ final class CameraRuntimeClient {
                     || "android.media.STREAM_MUTE_CHANGED_ACTION".equals(action)) {
                 platformCommand(CameraRuntimeHost.NAV_VOLUME, 0, "");
             } else {
-                platformCommand(CameraRuntimeHost.POWER,
-                        powerEvent(action), "");
+                int event = powerEvent(action);
+                if (shouldReconcilePano(event)) reconcilePano();
+                platformCommand(CameraRuntimeHost.POWER, event, "");
             }
         }
     };
@@ -50,6 +51,11 @@ final class CameraRuntimeClient {
         if (Intent.ACTION_USER_PRESENT.equals(action)) return CameraRuntimeHost.POWER_USER_PRESENT;
         return "android.intent.action.QUICKBOOT_POWERON".equals(action)
                 ? CameraRuntimeHost.POWER_QUICKBOOT : 0;
+    }
+    static boolean shouldReconcilePano(int event) {
+        return event == CameraRuntimeHost.POWER_SCREEN_ON
+                || event == CameraRuntimeHost.POWER_USER_PRESENT
+                || event == CameraRuntimeHost.POWER_QUICKBOOT;
     }
     private java.util.Map<String, Object> lastSettings = new java.util.HashMap<>();
     private final SharedPreferences.OnSharedPreferenceChangeListener preferenceListener =
@@ -245,7 +251,13 @@ final class CameraRuntimeClient {
                     (known, active, source) -> platformCommand(CameraRuntimeHost.PANO,
                             known ? (active ? 1 : 0) : -1, source), this::platformEvent);
             pano.start();
-        } else pano.reportStatus();
+        } else pano.reconcile();
+    }
+
+    private void reconcilePano() {
+        if (detached) return;
+        OemCameraVisibilityRuntime runtime = pano;
+        if (runtime != null) runtime.reconcile();
     }
 
     synchronized void acceptPlatformEvent(String line) {

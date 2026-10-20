@@ -7,14 +7,16 @@ import android.content.IntentFilter;
 import android.os.Handler;
 import android.os.Looper;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
 /**
- * Receives the OEM Pano application's visibility edge and one startup snapshot.
+ * Receives the OEM Pano application's visibility edge and lifecycle-triggered snapshots.
  *
  * <p>The stock process does not expose a stable public API for this state.  The tested broadcast
- * is therefore the live source and {@code sys.byd.pano_start} is read only during startup.  The
- * cached state is replayed for status requests; there is intentionally no property polling.</p>
+ * is therefore the live source and {@code sys.byd.pano_start} is read only during startup and
+ * platform reconciliation. The cached state is replayed for status requests; there is
+ * intentionally no property polling.</p>
  */
 final class OemCameraVisibilityRuntime {
     static final String ACTION_PANO = "byd.intent.action.pano";
@@ -54,6 +56,8 @@ final class OemCameraVisibilityRuntime {
     private final Handler handler;
     private final Listener listener;
     private final BiConsumer<String, Object[]> eventSink;
+    private final AtomicBoolean reconcilePending = new AtomicBoolean();
+    private final Object receiverLock = new Object();
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context receiverContext, Intent intent) {
@@ -65,6 +69,7 @@ final class OemCameraVisibilityRuntime {
 
     private volatile boolean started;
     private volatile boolean receiverRegistered;
+    private volatile boolean stopped;
     private final State state = new State();
 
     OemCameraVisibilityRuntime(
@@ -80,11 +85,17 @@ final class OemCameraVisibilityRuntime {
     }
 
     void start() {
-        runOnHandler(this::startOnHandler);
+        scheduleReconcile(true);
+    }
+
+    /** Rechecks the startup property after attach/reconnect or a platform wake signal. */
+    void reconcile() {
+        scheduleReconcile(false);
     }
 
     /** Called only after the service has sealed its runtime queue. */
     void stopForTeardown() {
+        stopped = true;
         stopOnHandler();
     }
 
@@ -93,49 +104,76 @@ final class OemCameraVisibilityRuntime {
         runOnHandler(() -> emitVisibility("status", ACTION_PANO));
     }
 
-    private void startOnHandler() {
-        if (started) return;
+    private void scheduleReconcile(boolean startup) {
+        if (stopped || !reconcilePending.compareAndSet(false, true)) return;
+        if (!handler.post(() -> {
+            try {
+                reconcileOnHandler(startup);
+            } finally {
+                reconcilePending.set(false);
+            }
+        })) reconcilePending.set(false);
+    }
+
+    private void reconcileOnHandler(boolean startup) {
+        if (stopped) return;
         started = true;
-        IntentFilter filter = new IntentFilter(ACTION_PANO);
-        try {
-            context.registerReceiver(receiver, filter, null, handler);
-            receiverRegistered = true;
+        String source = startup ? "startup_snapshot" : "reconcile";
+        String sourceEvent = startup ? "startup" : "reconcile";
+        if (!receiverRegistered) {
+            String registrationError = null;
+            synchronized (receiverLock) {
+                if (stopped) return;
+                try {
+                    context.registerReceiver(receiver, new IntentFilter(ACTION_PANO), null, handler);
+                    receiverRegistered = true;
+                } catch (Throwable error) {
+                    receiverRegistered = false;
+                    registrationError = summary(error);
+                }
+            }
+            if (registrationError != null) {
+                state.invalidate();
+                emit("oem_camera_visibility_listener", "action", "registered", "ok", false,
+                        "registered", false, "source_event", sourceEvent,
+                        "error", registrationError);
+                emitVisibility("registration_failed", ACTION_PANO, registrationError);
+                return;
+            }
             emit("oem_camera_visibility_listener", "action", "registered", "ok", true,
-                    "registered", true, "source_event", "startup");
-        } catch (Throwable error) {
-            receiverRegistered = false;
-            state.invalidate();
-            emit("oem_camera_visibility_listener", "action", "registered", "ok", false,
-                    "registered", false, "source_event", "startup",
-                    "error", summary(error));
-            emitVisibility("registration_failed", ACTION_PANO, summary(error));
-            return;
+                    "registered", true, "source_event", sourceEvent);
         }
-        // Exactly one property snapshot per service lifetime.  Later status requests replay
-        // the cached value instead of querying SystemProperties again.
+        if (stopped) return;
+        // One property read per explicit reconciliation; status requests only replay the cache.
         String snapshot;
         try {
             snapshot = readSystemProperty(STARTUP_PROPERTY);
         } catch (Throwable error) {
             state.invalidate();
-            emitVisibility("startup_snapshot", ACTION_PANO, summary(error));
+            emitVisibility(source, ACTION_PANO, summary(error));
             return;
         }
-        acceptState(snapshot, "startup_snapshot", ACTION_PANO);
+        acceptState(snapshot, source, ACTION_PANO);
     }
 
     private void stopOnHandler() {
-        if (!started) return;
+        if (!started && !receiverRegistered) return;
         started = false;
-        if (receiverRegistered) {
-            receiverRegistered = false;
-            try {
-                context.unregisterReceiver(receiver);
-            } catch (Throwable error) {
-                emit("oem_camera_visibility_listener", "action", "unregistered", "ok", false,
-                        "registered", false, "source_event", "stop",
-                        "error", summary(error));
+        String unregisterError = null;
+        synchronized (receiverLock) {
+            if (receiverRegistered) {
+                receiverRegistered = false;
+                try {
+                    context.unregisterReceiver(receiver);
+                } catch (Throwable error) {
+                    unregisterError = summary(error);
+                }
             }
+        }
+        if (unregisterError != null) {
+            emit("oem_camera_visibility_listener", "action", "unregistered", "ok", false,
+                    "registered", false, "source_event", "stop",
+                    "error", unregisterError);
         }
         state.invalidate();
         emit("oem_camera_visibility_listener", "action", "stopped", "ok", true,
@@ -143,7 +181,7 @@ final class OemCameraVisibilityRuntime {
     }
 
     private void acceptState(String raw, String source, String action) {
-        if (!started && !"status".equals(source)) return;
+        if (!started || stopped) return;
         if (!state.accept(raw)) {
             emitVisibility(source, action, "invalid_pano_state");
             return;
