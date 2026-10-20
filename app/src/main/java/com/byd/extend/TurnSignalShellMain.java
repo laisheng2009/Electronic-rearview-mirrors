@@ -234,8 +234,10 @@ public final class TurnSignalShellMain {
                 }
                 if (code == TurnSignalShellProtocol.TX_CAMERA_RUNTIME) {
                     CameraRuntimeHost cameras;
+                    boolean created;
                     synchronized (this) {
-                        if (cameraRuntime == null || cameraRuntime.isStopped()) cameraRuntime = new CameraRuntimeHost(
+                        created = cameraRuntime == null || cameraRuntime.isStopped();
+                        if (created) cameraRuntime = new CameraRuntimeHost(
                                 context, appUid, line -> {
                                     if (DiagnosticLogPolicy.shouldPersist(DiagnosticLogPolicy.kind(line))) {
                                         DiagnosticLogPolicy.print(line);
@@ -244,6 +246,10 @@ public final class TurnSignalShellMain {
                                 }, this::platformSignal);
                         cameras = cameraRuntime;
                     }
+                    if (created && avasRuntime != null) handler.post(() -> {
+                        if (cameraRuntime == cameras && !cameras.isStopped())
+                            avasRuntime.setCameraTelemetryEnabled(true);
+                    });
                     int cameraOperation = cameras.transact(data, reply);
                     if (cameraOperation == CameraRuntimeHost.ATTACH
                             || cameraOperation == CameraRuntimeHost.MOTION_BIND_WORKER) handler.post(() -> {
@@ -252,7 +258,16 @@ public final class TurnSignalShellMain {
                         emitPowerState("camera_runtime", false);
                     });
                     if (cameraOperation == CameraRuntimeHost.STOP) {
-                        synchronized (this) { if (cameraRuntime == cameras) cameraRuntime = null; }
+                        synchronized (this) {
+                            if (cameraRuntime == cameras) {
+                                cameraRuntime = null;
+                            }
+                        }
+                        if (avasRuntime != null) handler.post(() -> {
+                            CameraRuntimeHost current = cameraRuntime;
+                            if (current == null || current.isStopped())
+                                avasRuntime.setCameraTelemetryEnabled(false);
+                        });
                     }
                     return true;
                 }
@@ -556,6 +571,7 @@ public final class TurnSignalShellMain {
                         if (!keepMotion) {
                             if (cameras != null) cameras.shutdown();
                             cameraRuntime = null;
+                            if (avasRuntime != null) avasRuntime.setCameraTelemetryEnabled(false);
                         }
                         nonAvasStopped = true;
                         if (avasRuntime != null) {

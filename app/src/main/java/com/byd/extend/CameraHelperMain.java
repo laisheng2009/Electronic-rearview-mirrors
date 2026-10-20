@@ -185,7 +185,8 @@ final class CameraHelperMain {
             turnController.foregroundAdbFinished(authorized);
         }
 
-        void reportRetainedCameraState() {
+        synchronized void reportRetainedCameraState() {
+            emit("camera_vehicle_power_gate", "off", persistentSession.vehiclePowerOff);
             turnController.reportCameraShellState();
             emit("reverse_camera_state", "active", activeReverseControllerRequestId > 0,
                     "request_id", activeReverseControllerRequestId);
@@ -739,6 +740,10 @@ final class CameraHelperMain {
                 String requestedCameraTag,
                 String requestedCameraOwner,
                 int requestId) {
+            if (persistentSession.vehiclePowerOff) {
+                releaseSurface(requestedSurface);
+                return result("camera_error", "vehicle_power_off");
+            }
             if (requestedIndex < 0 || requestedIndex > 4) {
                 requestedSurface.release();
                 throw new IllegalArgumentException("Preview index must be 0..4");
@@ -1118,6 +1123,10 @@ final class CameraHelperMain {
                 Surface[] requestedSurfaces, int[] indexes, int[] profileIds,
                 String requestedOwner, String requestedView, String errorStage,
                 boolean closeExisting, int requestId) {
+            if (persistentSession.vehiclePowerOff) {
+                releaseSurfaces(requestedSurfaces);
+                return result("camera_error", "vehicle_power_off");
+            }
             ConsumerGroup persistentGroup = groupForOwner(requestedOwner);
             if (persistentGroup != null) {
                 return attachPersistentGroup(
@@ -1302,6 +1311,24 @@ final class CameraHelperMain {
                 Consumer<Boolean> completion) {
             turnController.setCameraOverlayVisible(
                     cameraId, requestId, surfaceGeneration, visible, completion);
+        }
+
+        synchronized void setVehiclePowerOff(boolean off) {
+            if (persistentSession.vehiclePowerOff == off) return;
+            persistentSession.vehiclePowerOff = off;
+            emit("camera_vehicle_power_gate", "off", off,
+                    "motion_retained", persistentSession.motionDetectionWanted);
+            if (off) {
+                cancelReverseWarmExpiry();
+                persistentSession.reverseWarmLease.clear();
+                // Close only ordinary consumers; Motion owns its detector/recorder independently.
+                for (String owner : new String[]{CAMERA_OWNER_ACTIVITY, CAMERA_OWNER_OVERLAY,
+                        CAMERA_OWNER_REVERSE, CAMERA_OWNER_PARKING, CAMERA_OWNER_MIRROR}) {
+                    closeCameraForOwner(owner, "vehicle_power_off");
+                }
+            }
+            updateSourceDemand("vehicle_power", () ->
+                    persistentSession.reconcileIfOpen(persistentPort()));
         }
 
         synchronized void setBlindSourceDemand(boolean rearEnabled, boolean frontEnabled) {
@@ -1770,6 +1797,10 @@ final class CameraHelperMain {
         synchronized String openStockAvm(
                 Surface requestedSurface, int viewpoint, boolean horizontal,
                 boolean stockDewarp, int requestId) {
+            if (persistentSession.vehiclePowerOff) {
+                releaseSurface(requestedSurface);
+                return result("camera_error", "vehicle_power_off");
+            }
             if (!StockAvmPreview.isAllowedViewpoint(viewpoint)) {
                 requestedSurface.release();
                 throw new IllegalArgumentException("Unsupported stock AVM viewpoint: " + viewpoint);
@@ -2459,6 +2490,10 @@ final class CameraHelperMain {
                 int requestId, String requestedView, boolean exclusive, boolean shellOwned,
                 int[] profileIds, String errorStage, boolean firstSurfaceDirect,
                 boolean[] initialActive) {
+            if (persistentSession.vehiclePowerOff && !persistentSession.isMotionGroup(target)) {
+                releaseSurfaces(requestedSurfaces);
+                return result("camera_error", "vehicle_power_off");
+            }
             String validation = validateBatch(requestedSurfaces, requestedIndexes);
             if (initialActive != null && (requestedSurfaces == null
                     || initialActive.length != requestedSurfaces.length)) {
@@ -3269,7 +3304,8 @@ final class CameraHelperMain {
                         reason, expectedRequestId,
                         this::emit, this::cancelPendingStock,
                         producerCameraId, producerEpoch, stockClosePending,
-                        settings.getBoolean(ReverseCameraController.PREF_ENABLED,
+                        !persistentSession.vehiclePowerOff
+                                && settings.getBoolean(ReverseCameraController.PREF_ENABLED,
                                 ReverseCameraController.DEFAULT_ENABLED));
             } catch (PersistentSessionFailure error) {
                 if (error.fatal) {
@@ -4058,6 +4094,7 @@ final class CameraHelperMain {
             final Surface[] sourceSurfaces = new Surface[5];
             final boolean[] sourceAttached = new boolean[5];
             boolean producerOpen;
+            boolean vehiclePowerOff;
             boolean failedOpenStopAttempted;
             Throwable failedOpenStopFailure;
             int activeProducerEpoch;
@@ -4075,6 +4112,12 @@ final class CameraHelperMain {
                             "Motion direction must be in range 0..3");
                 }
                 return motionPreviewGroups[direction];
+            }
+
+            boolean isMotionGroup(ConsumerGroup group) {
+                if (group == motionGroup) return true;
+                for (ConsumerGroup preview : motionPreviewGroups) if (group == preview) return true;
+                return false;
             }
 
             private ConsumerGroup[] consumerGroups() {
@@ -5387,7 +5430,7 @@ final class CameraHelperMain {
             }
 
             int retainedSourceDemandMask() {
-                int mask = blindStandbyDemandMask | mirrorDemandMask
+                int mask = vehiclePowerOff ? 0 : blindStandbyDemandMask | mirrorDemandMask
                         | reverseWarmLease.sourceMask();
                 for (ConsumerGroup group : consumerGroups()) {
                     if (group.has()) mask |= group.sourceDemandMask;

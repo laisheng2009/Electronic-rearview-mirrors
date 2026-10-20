@@ -55,6 +55,7 @@ final class AvasRuntime implements AutoCloseable {
     private boolean started;
     private volatile boolean closed;
     private volatile boolean motionTelemetryEnabled;
+    private volatile boolean cameraTelemetryEnabled;
     private volatile int lastMotionPower = Integer.MIN_VALUE;
     private volatile int lastMotionLock = Integer.MIN_VALUE;
     private volatile long lastMotionPowerSentAt = Long.MIN_VALUE;
@@ -206,6 +207,16 @@ final class AvasRuntime implements AutoCloseable {
         lastMotionPower = lastMotionLock = Integer.MIN_VALUE;
         lastMotionPowerSentAt = lastMotionLockSentAt = Long.MIN_VALUE;
         event("motion_telemetry_demand", "enabled", enabled);
+        if (!started) return;
+        if (enabled) telemetryController.activateForMotion();
+        else updateTelemetry();
+    }
+
+    synchronized void setCameraTelemetryEnabled(boolean enabled) {
+        if (closed || !enabled && !cameraTelemetryEnabled) return;
+        cameraTelemetryEnabled = enabled;
+        lastMotionPower = Integer.MIN_VALUE;
+        lastMotionPowerSentAt = Long.MIN_VALUE;
         if (!started) return;
         if (enabled) telemetryController.activateForMotion();
         else updateTelemetry();
@@ -680,7 +691,7 @@ final class AvasRuntime implements AutoCloseable {
 
     private synchronized void updateTelemetry() {
         if (!started || closed) return;
-        boolean enabled = motionTelemetryEnabled || config.engine.enabled;
+        boolean enabled = motionTelemetryEnabled || cameraTelemetryEnabled || config.engine.enabled;
         for (AvasConfig.Profile profile : config.profiles) enabled |= profile.enabled;
         MicrophoneSession microphone = microphoneSession;
         enabled |= microphone != null && !microphone.terminal();
@@ -689,7 +700,7 @@ final class AvasRuntime implements AutoCloseable {
     }
 
     private void publishMotionTelemetry(String signal, int value, boolean baseline) {
-        if (!motionTelemetryEnabled) return;
+        if (!motionTelemetryEnabled && !(cameraTelemetryEnabled && "power".equals(signal))) return;
         long now = SystemClock.elapsedRealtime();
         boolean resync;
         if ("power".equals(signal)) {

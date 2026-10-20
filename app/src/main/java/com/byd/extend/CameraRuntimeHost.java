@@ -48,6 +48,7 @@ final class CameraRuntimeHost {
     private final String motionSourceEpoch = java.util.UUID.randomUUID().toString();
     private final MotionWakeOwnership motionWake = new MotionWakeOwnership();
     private JSONObject motionPower, motionLock, motionDisplay;
+    private final CameraSourceDemand.PowerGate vehiclePower = new CameraSourceDemand.PowerGate();
     private final Runnable discoveryRetry = this::retryCameraDiscovery;
     private final Runnable applyCameraFrameRate = this::applyCameraFrameRateOnHandler;
 
@@ -161,7 +162,7 @@ final class CameraRuntimeHost {
                 case VISIBILITY: setVisibility(flag); break;
                 case PREVIEW:
                     preview = flag;
-                    blind.setSuspended(flag); parking.setSuspended(flag);
+                    applyVehiclePower();
                     break;
                 case TOGGLE_REVERSE:
                     if (!visible) reverse.requestSteeringToggle(0);
@@ -284,11 +285,10 @@ final class CameraRuntimeHost {
         mirror = new RearviewMirrorController(context, handler, this::event);
         discoverCamera();
         blind.setUiHidden(visible); parking.setUiHidden(visible);
-        blind.setSuspended(preview); parking.setSuspended(preview);
+        mirror.appVisibility(visible);
+        applyVehiclePower();
         blind.attachHelper(helper); parking.attachHelper(helper); reverse.attachHelper(helper);
         mirror.attachHelper(helper);
-        mirror.appVisibility(visible);
-        mirror.setRuntimeAllowed(true);
     }
 
     private void discoverCamera() {
@@ -319,7 +319,15 @@ final class CameraRuntimeHost {
         if (visible == next) return;
         visible = next;
         mirror.appVisibility(next); blind.setUiHidden(next); parking.setUiHidden(next);
-        if (!next) { preview = false; blind.setSuspended(false); parking.setSuspended(false); }
+        if (!next) { preview = false; applyVehiclePower(); }
+    }
+
+    private void applyVehiclePower() {
+        boolean allowed = vehiclePower.ordinaryAllowed();
+        blind.setSuspended(preview || !allowed);
+        parking.setSuspended(preview || !allowed);
+        reverse.setRuntimeAllowed(allowed);
+        mirror.setRuntimeAllowed(allowed);
     }
 
     private void clientDied(IBinder expected) {
@@ -368,6 +376,10 @@ final class CameraRuntimeHost {
             if (event != null && "motion_vehicle_state".equals(event.optString("kind"))) {
                 if ("power".equals(event.optString("signal"))) {
                     motionPower = event;
+                    if (vehiclePower.observe(event.optInt("value", -1))) {
+                        helper.setVehiclePowerOff(!vehiclePower.ordinaryAllowed());
+                        if (lifetime.started()) applyVehiclePower();
+                    }
                     if (AvasEventPolicy.normalizedPower(event.optInt("value", -1)) == 1) {
                         if (motionWake.takeRetainedForPowerOn(helper.motionProducerEpoch())) {
                             event("motion_retained_source_power_on", "session", motionSession);

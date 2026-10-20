@@ -695,6 +695,7 @@ public final class CameraProbeActivity extends ComponentActivity
     private volatile boolean cameraDiscovered;
     private volatile boolean requestedOpen;
     private boolean telemetryReady;
+    private boolean cameraVehiclePowerOff;
     private boolean manualGearPark;
     private boolean manualTurnRequestPending;
     private StatusUiState manualSignalStatus = new StatusUiState("", StatusTone.Neutral, false);
@@ -11435,6 +11436,12 @@ public final class CameraProbeActivity extends ComponentActivity
             try {
                 JSONObject json = parsed;
                 String kind = json.optString("kind");
+                if ("camera_vehicle_power_gate".equals(kind)) {
+                    boolean wasOff = cameraVehiclePowerOff;
+                    cameraVehiclePowerOff = json.optBoolean("off");
+                    if (wasOff && !cameraVehiclePowerOff) resumeSelectedCameraPreview();
+                    return;
+                }
                 if ("reverse_steering_state".equals(kind)) {
                     reverseSteeringSample = ReverseSteeringSample.fromEvent(json);
                     applyReverseSteering();
@@ -12220,7 +12227,7 @@ public final class CameraProbeActivity extends ComponentActivity
     }
 
     private boolean canStartActivityCamera() {
-        return canStartActivityCamera(
+        return !cameraVehiclePowerOff && canStartActivityCamera(
                 activityResumed, shutdownRequested, activityDestroyed,
                 activityClosePending, closingActivityCameraRequestId);
     }

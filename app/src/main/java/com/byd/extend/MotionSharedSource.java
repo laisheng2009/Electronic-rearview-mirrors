@@ -70,7 +70,9 @@ final class MotionSharedSource {
                 session, clock, root, 3, errors);
         composer = next; // Retain cleanup even if initialization times out.
         next.initialize(encoder);
-        pump.setOutputSize(width, Math.max(2, width * 2600 / 3840));
+        MotionCompositionLayout.Rect cell =
+                MotionCompositionLayout.cameraRectForCell(0, width, height);
+        pump.setOutputSize(cell.width() * 2, cell.height() * 2);
     }
 
     void stopRecording(Runnable closed) {

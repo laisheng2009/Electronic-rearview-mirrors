@@ -4,6 +4,22 @@ package com.byd.extend;
 final class CameraSourceDemand {
     private CameraSourceDemand() {}
 
+    /** Unknown readings do not undo the last confirmed vehicle power state. */
+    static final class PowerGate {
+        private boolean off;
+
+        boolean observe(int raw) {
+            int normalized = AvasEventPolicy.normalizedPower(raw);
+            if (normalized < 0) return false;
+            boolean next = normalized == 0;
+            if (off == next) return false;
+            off = next;
+            return true;
+        }
+
+        boolean ordinaryAllowed() { return !off; }
+    }
+
     static int bit(int sourceIndex) {
         if (sourceIndex < 0 || sourceIndex > 4) {
             throw new IllegalArgumentException("invalid camera source index " + sourceIndex);

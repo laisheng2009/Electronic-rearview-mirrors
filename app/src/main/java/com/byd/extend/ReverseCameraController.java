@@ -59,6 +59,7 @@ final class ReverseCameraController {
     private boolean cleanupRetryScheduled;
     private boolean visible;
     private boolean shutdown;
+    private boolean runtimeAllowed = true;
     private int requestSequence;
     private int activeRequestId;
     private boolean expectedClusterTarget;
@@ -117,6 +118,17 @@ final class ReverseCameraController {
             stop("settings_changed", false, sessionPolicy.eligible);
         }
         else evaluate();
+    }
+
+    void setRuntimeAllowed(boolean allowed) {
+        if (runtimeAllowed == allowed) return;
+        runtimeAllowed = allowed;
+        if (!allowed) {
+            if (helper != null) helper.clearReverseSourceDemand();
+            stop("vehicle_power_off", false);
+        } else {
+            evaluate();
+        }
     }
 
     /**
@@ -1037,7 +1049,7 @@ final class ReverseCameraController {
     }
 
     private boolean enabled() {
-        return settings.getBoolean(PREF_ENABLED, DEFAULT_ENABLED);
+        return runtimeAllowed && settings.getBoolean(PREF_ENABLED, DEFAULT_ENABLED);
     }
 
     private boolean switchByGear() {
