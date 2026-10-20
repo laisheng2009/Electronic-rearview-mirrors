@@ -1,8 +1,9 @@
 package com.byd.extend;
 
 import android.content.Context;
-import android.graphics.Matrix;
+import android.graphics.Outline;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.view.Surface;
 import android.view.SurfaceControl;
 import android.view.SurfaceHolder;
@@ -35,11 +36,16 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
     }
 
     private final Listener listener;
-    private final Matrix transform = new Matrix();
-    private final float[] matrixValues = new float[9];
+    private final Outline outline = new Outline();
+    private final Rect clip = new Rect();
+    private final int[] surfaceLocation = new int[2];
+    private final int[] clipLocation = new int[2];
     private Output current;
+    private SurfaceControl viewport;
     private boolean available;
     private Method setMatrix;
+    private Method setWindowCrop;
+    private Method setCornerRadius;
     private final android.view.ViewTreeObserver.OnPreDrawListener sync = () -> {
         updateLayer(); return true;
     };
@@ -69,11 +75,17 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
             Surface.class.getMethod("copyFrom", SurfaceControl.class).invoke(surface, layer);
             setMatrix = SurfaceControl.Transaction.class.getMethod("setMatrix",
                     SurfaceControl.class, float.class, float.class, float.class, float.class);
+            setWindowCrop = SurfaceControl.Transaction.class.getMethod("setWindowCrop",
+                    SurfaceControl.class, Rect.class);
+            setCornerRadius = SurfaceControl.Transaction.class.getMethod("setCornerRadius",
+                    SurfaceControl.class, float.class);
+            viewport = parent;
             current = new Output(layer, surface, width, height);
             updateLayer();
             return current;
         } catch (ReflectiveOperationException | RuntimeException failure) {
             current = null;
+            viewport = null;
             if (surface != null) surface.release();
             if (layer != null) layer.release();
             throw new IllegalStateException("direct camera layer creation failed", failure);
@@ -83,22 +95,15 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
     Output retireOutput() {
         Output previous = current;
         current = null;
+        viewport = null;
         if (previous != null) previous.hide();
         return previous;
     }
 
-    void transform(Matrix value) {
-        transform.set(value);
-        updateLayer();
-    }
-
     private void updateLayer() {
         Output output = current;
-        if (output == null || !output.layer.isValid() || getWidth() == 0 || getHeight() == 0) return;
-        Matrix bufferToView = new Matrix();
-        bufferToView.setScale((float) getWidth() / output.width, (float) getHeight() / output.height);
-        bufferToView.postConcat(transform);
-        bufferToView.getValues(matrixValues);
+        if (output == null || !output.layer.isValid() || viewport == null || !viewport.isValid()
+                || getWidth() == 0 || getHeight() == 0) return;
         float alpha = 1f;
         for (View view = this; view != null;) {
             alpha *= view.getAlpha();
@@ -107,13 +112,40 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
             view = parent instanceof View ? (View) parent : null;
         }
         try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
-            setMatrix.invoke(transaction, output.layer, matrixValues[Matrix.MSCALE_X],
-                    matrixValues[Matrix.MSKEW_Y], matrixValues[Matrix.MSKEW_X], matrixValues[Matrix.MSCALE_Y]);
-            transaction.setPosition(output.layer, matrixValues[Matrix.MTRANS_X], matrixValues[Matrix.MTRANS_Y])
+            // Arbitrary rotation belongs in GLES: app-UID SurfaceFlinger rejects it, and
+            // shell-UID rotated child layers cannot be clipped to a rectangular ancestor.
+            setMatrix.invoke(transaction, output.layer, (float) getWidth() / output.width,
+                    0f, 0f, (float) getHeight() / output.height);
+            float radius = viewportClip();
+            setWindowCrop.invoke(transaction, viewport, clip);
+            setCornerRadius.invoke(transaction, viewport, radius);
+            transaction.setPosition(output.layer, 0f, 0f)
                     .setLayer(output.layer, 1).setAlpha(output.layer, alpha).apply();
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("direct camera transform failed", failure);
         }
+    }
+
+    /** Native children do not inherit View outlines; mirror the enclosing pane's rounded bounds. */
+    private float viewportClip() {
+        clip.set(0, 0, getWidth(), getHeight());
+        getLocationInWindow(surfaceLocation);
+        for (ViewParent parent = getParent(); parent instanceof View;) {
+            View view = (View) parent;
+            if (view.getClipToOutline() && view.getOutlineProvider() != null) {
+                outline.setEmpty();
+                view.getOutlineProvider().getOutline(view, outline);
+                if (outline.getRect(clip)) {
+                    view.getLocationInWindow(clipLocation);
+                    clip.offset(clipLocation[0] - surfaceLocation[0],
+                            clipLocation[1] - surfaceLocation[1]);
+                    return Math.max(0f, outline.getRadius());
+                }
+            }
+            parent = view.getParent();
+        }
+        clip.set(0, 0, getWidth(), getHeight());
+        return 0f;
     }
 
     @Override protected void onAttachedToWindow() {

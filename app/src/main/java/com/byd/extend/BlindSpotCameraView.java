@@ -48,6 +48,7 @@ final class BlindSpotCameraView extends FrameLayout
     private TextureView textureView;
     private DirectCameraSurface directView;
     private CameraGpuOutput directOutput;
+    private float[] directGeometry = CameraGpuOutput.IDENTITY;
     private long directFrameTimestamp;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Surface cameraSurface;
@@ -130,9 +131,13 @@ final class BlindSpotCameraView extends FrameLayout
         return directView != null ? directView.available() : textureView != null && textureView.isAvailable();
     }
     void setOpaque(boolean opaque) { if (textureView != null) textureView.setOpaque(opaque); }
-    void setTransform(Matrix value) {
-        if (directView != null) directView.transform(value);
-        else if (textureView != null) textureView.setTransform(value);
+    void setTransform(Matrix value, int width, int height) {
+        if (directView != null) {
+            float[] values = new float[9];
+            value.getValues(values);
+            directGeometry = CameraRotation.gpuTransformValues(values, width, height);
+            if (directOutput != null) directOutput.updateGeometry(directGeometry);
+        } else if (textureView != null) textureView.setTransform(value);
     }
 
     void setCallback(Callback value) {
@@ -387,7 +392,7 @@ final class BlindSpotCameraView extends FrameLayout
         setRotation(0.0f);
         setScaleX(1.0f);
         setScaleY(1.0f);
-        setTransform(transform);
+        setTransform(transform, width, height);
         if (outputCropMask != null) {
             outputCropMask.setCrop(CameraRotation.transformedCropCornersForInput(
                     directCrop.left, directCrop.top,
@@ -625,6 +630,7 @@ final class BlindSpotCameraView extends FrameLayout
             directFrameTimestamp = timestamp;
             if (callback != null) callback.onCameraFrameUpdated(this, generation);
         }));
+        directOutput.updateGeometry(directGeometry);
         CameraGpuOutput.register(layer.surface, directOutput);
         cameraSurface = layer.surface;
         directFrameTimestamp = 0;

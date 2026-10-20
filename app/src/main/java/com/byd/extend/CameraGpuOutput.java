@@ -21,6 +21,8 @@ final class CameraGpuOutput extends Binder {
     private static final int RELEASE = BIND + 4;
     private static final int STOCK_CANVAS = BIND + 5;
     private static final int FRAME = BIND + 6;
+    private static final int GEOMETRY = BIND + 7;
+    static final float[] IDENTITY = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     private static final Map<Surface, Endpoint> OUTPUTS = new WeakHashMap<>();
     private static final class Endpoint {
         final IBinder binder;
@@ -33,6 +35,8 @@ final class CameraGpuOutput extends Binder {
     private final boolean lifecycleOnly;
     private final Consumer<CameraDewarpRenderer.Event> events;
     private CameraDewarpRenderer.MappingRequest request;
+    private float[] geometry = IDENTITY;
+    private long geometryRevision;
     private IBinder control;
     private Runnable stopped;
     private boolean released;
@@ -128,6 +132,30 @@ final class CameraGpuOutput extends Binder {
         finally { data.recycle(); }
     }
 
+    synchronized void updateGeometry(float[] value) {
+        validateGeometry(value);
+        if (released || java.util.Arrays.equals(geometry, value)) return;
+        geometry = value.clone();
+        geometryRevision++;
+        if (control == null) return;
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(DESCRIPTOR);
+            data.writeLong(geometryRevision);
+            data.writeFloatArray(geometry);
+            if (!control.transact(GEOMETRY, data, null, FLAG_ONEWAY)) disconnected();
+        } catch (RemoteException error) { disconnected(); }
+        finally { data.recycle(); }
+    }
+
+    private static void validateGeometry(float[] value) {
+        if (value == null || value.length != 16)
+            throw new IllegalArgumentException("invalid GPU geometry dimensions");
+        for (float coefficient : value) {
+            if (!Float.isFinite(coefficient)) throw new IllegalArgumentException("invalid GPU geometry");
+        }
+    }
+
     synchronized void release(Runnable onStopped) {
         if (released) return;
         released = true;
@@ -185,6 +213,8 @@ final class CameraGpuOutput extends Binder {
             reply.writeInt(lifecycleOnly ? 1 : 0);
             reply.writeInt(frameListener != null ? 1 : 0);
             writeMapping(reply, request);
+            reply.writeLong(geometryRevision);
+            reply.writeFloatArray(geometry);
             return true;
         }
         IBinder sender = data.readStrongBinder();
@@ -242,6 +272,8 @@ final class CameraGpuOutput extends Binder {
         final boolean lifecycleOnly;
         final boolean frameEvents;
         volatile CameraDewarpRenderer.MappingRequest request;
+        volatile float[] geometry = IDENTITY;
+        private long geometryRevision = -1;
         private boolean closed;
         private final DeathRecipient ownerDeath;
 
@@ -267,6 +299,7 @@ final class CameraGpuOutput extends Binder {
                     throw new IllegalArgumentException("invalid GPU output dimensions");
                 }
                 accept(readMapping(reply));
+                acceptGeometry(reply);
             } catch (RemoteException | RuntimeException error) {
                 try { close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
                 throw error;
@@ -277,10 +310,26 @@ final class CameraGpuOutput extends Binder {
             if (!closed && (request == null || next.token > request.token)) request = next;
         }
 
+        private synchronized void acceptGeometry(Parcel parcel) {
+            long revision = parcel.readLong();
+            float[] next = parcel.createFloatArray();
+            validateGeometry(next);
+            if (revision < 0) throw new IllegalArgumentException("invalid GPU geometry revision");
+            // A UI update may arrive before the BIND reply is consumed.
+            if (!closed && revision > geometryRevision) {
+                geometry = next;
+                geometryRevision = revision;
+            }
+        }
+
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
             if (Binder.getCallingUid() != ownerUid) throw new SecurityException("GPU control sender denied");
             data.enforceInterface(DESCRIPTOR);
             if (code == UPDATE) { accept(readMapping(data)); return true; }
+            if (code == GEOMETRY) {
+                acceptGeometry(data);
+                return true;
+            }
             if (code == RELEASE) { releaseTarget.run(); return true; }
             return false;
         }

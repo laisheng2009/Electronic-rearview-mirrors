@@ -66,6 +66,10 @@ final class DirectCameraSourceHub
                     + " vRawTexCoord=aTexCoord;\n"
                     + " vTexCoord=(uTextureMatrix*vec4(aTexCoord,0.0,1.0)).xy;\n"
                     + "}\n";
+    private static final String OUTPUT_VERTEX_SHADER =
+            "uniform mat4 uOutputMatrix;\n" + VERTEX_SHADER.replace(
+                    "gl_Position=vec4(aPosition,0.0,1.0);",
+                    "gl_Position=uOutputMatrix*vec4(aPosition,0.0,1.0);");
     static final String FRAGMENT_SHADER =
             "#extension GL_OES_EGL_image_external : require\n"
                     + "precision mediump float;\n"
@@ -449,6 +453,7 @@ final class DirectCameraSourceHub
         int positionLocation;
         int texCoordLocation;
         int matrixLocation;
+        int outputMatrixLocation;
         int textureLocation;
         int checkBoundsLocation;
         FloatBuffer positions;
@@ -643,10 +648,11 @@ final class DirectCameraSourceHub
             require(idleSurface != EGL14.EGL_NO_SURFACE, "EGL idle surface failed");
             makeCurrent(idleSurface);
             program = CameraDewarpRenderer.linkProgram(
-                    VERTEX_SHADER, SNAPSHOT_FRAGMENT_SHADER);
+                    OUTPUT_VERTEX_SHADER, SNAPSHOT_FRAGMENT_SHADER);
             positionLocation = GLES20.glGetAttribLocation(program, "aPosition");
             texCoordLocation = GLES20.glGetAttribLocation(program, "aTexCoord");
             matrixLocation = GLES20.glGetUniformLocation(program, "uTextureMatrix");
+            outputMatrixLocation = GLES20.glGetUniformLocation(program, "uOutputMatrix");
             textureLocation = GLES20.glGetUniformLocation(program, "uTexture");
             checkBoundsLocation = GLES20.glGetUniformLocation(program, "uCheckBounds");
             positions = buffer(new float[]{-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f});
@@ -995,8 +1001,11 @@ final class DirectCameraSourceHub
                     : target.mesh.prepare(target.mapping.request, target.mapping.width, target.mapping.height);
             boolean corrected = rendered != null && rendered.config.enabled && !target.mesh.rawFallback;
             GLES20.glUniform1i(checkBoundsLocation, corrected ? 1 : 0);
-            // Only correction can leave holes or sample outside the snapshot's full [0,1] quad.
-            if (corrected) {
+            boolean directGeometry = target.mapping != null && !target.mapping.lifecycleOnly;
+            GLES20.glUniformMatrix4fv(outputMatrixLocation, 1, false,
+                    directGeometry ? target.mapping.geometry : CameraGpuOutput.IDENTITY, 0);
+            // Rotation/Fit can leave uncovered pixels even when fisheye correction is off.
+            if (corrected || directGeometry) {
                 GLES20.glClearColor(0, 0, 0, 1);
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
             }

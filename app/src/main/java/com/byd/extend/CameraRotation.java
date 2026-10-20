@@ -13,6 +13,26 @@ final class CameraRotation {
 
     private CameraRotation() {}
 
+    /** View pixels (Y down) to GLES clip space (Y up), including homogeneous Stretch transforms. */
+    static float[] gpuTransformValues(float[] m, int width, int height) {
+        if (m == null || m.length != 9 || width <= 0 || height <= 0)
+            throw new IllegalArgumentException("valid view transform and dimensions required");
+        for (float value : m) {
+            if (!Float.isFinite(value)) throw new IllegalArgumentException("non-finite view transform");
+        }
+        float w = width, h = height;
+        float gx = m[6] * w / 2f, gy = m[7] * h / 2f;
+        float originW = gx + gy + m[8];
+        return new float[]{
+                m[0] - gx, gx - m[3] * w / h, 0, gx,
+                -m[1] * h / w + gy, m[4] - gy, 0, -gy,
+                0, 0, 1, 0,
+                m[0] + m[1] * h / w + 2f * m[2] / w - originW,
+                originW - m[3] * w / h - m[4] - 2f * m[5] / h,
+                0, originW
+        };
+    }
+
     static int clamp(int degrees) {
         return Math.max(MIN_DEGREES, Math.min(MAX_DEGREES, degrees));
     }

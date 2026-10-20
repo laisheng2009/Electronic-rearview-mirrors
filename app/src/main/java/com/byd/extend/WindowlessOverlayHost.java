@@ -148,6 +148,11 @@ final class WindowlessOverlayHost {
                 }
             }
             try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
+                // Android 12's occlusion check needs native descendants trusted, not only WindowInfo.
+                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    SurfaceControl.Transaction.class.getMethod("setTrustedOverlay",
+                            SurfaceControl.class, boolean.class).invoke(transaction, nextRoot, true);
+                }
                 if (nextClusterAttachment == null) {
                     setLayerStack(transaction, nextRoot, displayLayerStack(display));
                 }

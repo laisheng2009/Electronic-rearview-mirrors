@@ -2002,7 +2002,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
             texture.setRotation(0.0f);
             texture.setScaleX(1.0f);
             texture.setScaleY(1.0f);
-            texture.setTransform(transform);
+            texture.setTransform(transform, fitted.width, fitted.height);
         }
 
         void setCornerRadiusDp(int value) {
