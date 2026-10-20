@@ -98,6 +98,7 @@ internal fun MotionIntegrationScreen(
     colors: UiPalette,
     strings: UiStrings,
     cameraHost: @Composable (com.byd.extend.ui.CameraHostSlot) -> Unit,
+    archiveState: MotionArchiveState,
 ) {
     val context = LocalContext.current
     val store = remember(context) { MotionTemplateStore(context) }
@@ -178,7 +179,7 @@ internal fun MotionIntegrationScreen(
             }
         }
         CompositionLocalProvider(LocalMotionCameraHost provides cameraHost) {
-            MotionRecordingScreen(colors, strings)
+            MotionRecordingScreen(colors, strings, archiveState)
         }
     }
     if (dialog == 1 || dialog == 2) MotionLibraryDialog(dialog == 1, library, store, colors, strings,

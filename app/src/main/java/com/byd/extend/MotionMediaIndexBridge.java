@@ -20,9 +20,9 @@ import java.util.List;
 
 /** Fixed worker-side media/index operations; all record access is by volume and MediaStore ID. */
 public final class MotionMediaIndexBridge {
-    private static final int PAGE_SIZE = 32;
     private static final int MAX_LEGACY_INDEX_BYTES = 16 * 1024 * 1024;
     private final MotionMediaLibrary library;
+    private final MotionMediaPages pages = new MotionMediaPages();
 
     MotionMediaIndexBridge(MotionMediaLibrary library) {
         if (library == null) throw new IllegalArgumentException("Motion media library is required");
@@ -111,23 +111,19 @@ public final class MotionMediaIndexBridge {
         return fullyResolved;
     }
 
-    /** Returns a fixed-schema page. The opaque token is a decimal worker-generated row offset. */
+    /** Returns a fixed-schema page; decimal continuation tokens retain one coherent snapshot. */
     public synchronized String queryPage(MotionMediaLibrary.Query query, MotionConfig config,
             String pageToken) {
         MotionMediaLibrary.Query actual = query == null
                 ? MotionMediaLibrary.Query.recent() : query;
-        List<MotionMediaLibrary.Entry> all = library.query(actual);
-        int offset = parseOffset(pageToken, all.size());
-        int end = Math.min(all.size(), offset + PAGE_SIZE);
-        JSONArray entries = new JSONArray();
-        for (int i = offset; i < end; i++) entries.put(encodeEntry(all.get(i)));
-        JSONObject root = new JSONObject();
         try {
-            root.put("version", 1);
-            root.put("entries", entries);
-            root.put("stats", encodeStats(library.queryStats(config)));
-            root.put("nextPageToken", end < all.size() ? Integer.toString(end) : JSONObject.NULL);
-            return root.toString();
+            String queryKey = new JSONArray().put(actual.startInclusiveMs)
+                    .put(actual.endExclusiveMs).put(actual.volumeId).put(actual.sort.name())
+                    .put(config == null ? JSONObject.NULL : config.toJson()).toString();
+            if (pageToken != null && !pageToken.isEmpty()) return pages.next(queryKey, pageToken);
+            ArrayList<JSONObject> entries = new ArrayList<>();
+            for (MotionMediaLibrary.Entry entry : library.query(actual)) entries.add(encodeEntry(entry));
+            return pages.start(queryKey, entries, encodeStats(library.queryStats(config)));
         } catch (JSONException failure) {
             throw new IllegalStateException("Cannot encode worker Motion media page", failure);
         }
@@ -253,18 +249,6 @@ public final class MotionMediaIndexBridge {
                     || "external_primary".equals(legacyVolumeId)))) return volume;
         }
         return null;
-    }
-
-    private static int parseOffset(String token, int size) {
-        if (token == null || token.isEmpty()) return 0;
-        try {
-            int offset = Integer.parseInt(token);
-            if (offset < 0 || offset >= size || !Integer.toString(offset).equals(token))
-                throw new IllegalArgumentException("Invalid Motion page token");
-            return offset;
-        } catch (NumberFormatException invalid) {
-            throw new IllegalArgumentException("Invalid Motion page token", invalid);
-        }
     }
 
     private static byte[] readBounded(InputStream input, int maximumBytes) throws IOException {

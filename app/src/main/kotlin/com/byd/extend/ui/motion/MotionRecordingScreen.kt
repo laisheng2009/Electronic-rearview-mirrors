@@ -24,17 +24,15 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -46,7 +44,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
@@ -54,7 +51,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
@@ -73,18 +69,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.byd.extend.MotionConfig
-import com.byd.extend.MotionDetectorClient
 import com.byd.extend.MotionDirectionIcon
 import com.byd.extend.MotionMediaLibrary
 import com.byd.extend.MotionRuntime
@@ -99,15 +91,13 @@ import com.byd.extend.ui.SwitchLine
 import com.byd.extend.ui.UiPalette
 import com.byd.extend.ui.UiStrings
 import com.byd.extend.ui.icons.DirectionsCar
-import com.byd.extend.ui.icons.OpenInFull
+import com.byd.extend.ui.icons.Checklist
 import com.byd.extend.ui.icons.Videocam
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.collect
 import java.time.DayOfWeek
-import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
@@ -118,8 +108,6 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private const val MOTION_GB = 1_000_000_000L
-private const val MOTION_PLAYER_TAG = "MotionPlayer"
-
 private data class RecordingOptions(
     val enabled: Boolean,
     val before: Int,
@@ -157,21 +145,20 @@ private data class RecordingOptions(
 }
 
 @Composable
-internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
+internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings, archiveState: MotionArchiveState) {
     val context = LocalContext.current
     val preferences = remember(context) {
         context.getSharedPreferences(MotionConfig.RECORDING_PREFS, Context.MODE_PRIVATE)
     }
-    val mediaLibrary = remember(context) {
-        MotionMediaLibrary(context.applicationContext, MotionDetectorClient(context.applicationContext))
-    }
-    DisposableEffect(mediaLibrary) {
-        onDispose { mediaLibrary.close() }
+    DisposableEffect(archiveState) {
+        onDispose {
+            archiveState.playerEntry = null
+            archiveState.archiveOpen = false
+        }
     }
     var options by remember(context) { mutableStateOf(RecordingOptions.from(MotionConfig.read(context))) }
-    var stats by remember { mutableStateOf<MotionMediaLibrary.Stats?>(null) }
+    val stats = archiveState.stats
     var composition by rememberSaveable { mutableStateOf(false) }
-    var archive by rememberSaveable { mutableStateOf(false) }
     var refreshKey by remember { mutableIntStateOf(0) }
     var microphoneGranted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
@@ -192,6 +179,7 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
         options = next
         next.write(preferences)
         MotionRuntime.settingsChanged(context)
+        refreshKey++
     }
 
     LaunchedEffect(microphoneGranted, options.audio) {
@@ -275,19 +263,10 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(lifecycle, options, refreshKey, mediaLibrary) {
+    LaunchedEffect(lifecycle, refreshKey, archiveState, archiveState.playerEntry, archiveState.archiveOpen) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
-                try {
-                    stats = withContext(Dispatchers.IO) {
-                        mediaLibrary.refresh()
-                        mediaLibrary.queryStats(MotionConfig.read(context))
-                    }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    stats = null
-                }
+                if (archiveState.playerEntry == null) archiveState.refreshSnapshot()
                 delay(5_000)
             }
         }
@@ -368,7 +347,7 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
     Section(strings.motionText(R.string.motion_archive), colors) {
         Text(strings.motionText(R.string.motion_archive_hint), color = colors.muted, fontSize = 13.sp)
         ActionButton(strings.motionText(R.string.motion_archive), Icons.Outlined.Videocam,
-            colors, Modifier.fillMaxWidth()) { archive = true }
+            colors, Modifier.fillMaxWidth()) { archiveState.archiveOpen = true }
     }
 
     if (composition) MotionCompositionDialog(options.cameraOrder, colors, strings,
@@ -398,8 +377,11 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings) {
             }
         }
     }
-    if (archive) MotionArchiveDialog(mediaLibrary, stats, colors, strings,
-        onClose = { archive = false }, onChanged = { refreshKey++ })
+    if (archiveState.archiveOpen) MotionArchiveDialog(archiveState, colors, strings,
+        onClose = {
+            archiveState.playerEntry = null
+            archiveState.archiveOpen = false
+        })
 }
 
 @Composable
@@ -630,74 +612,76 @@ private fun DrawScope.motionHatch(color: Color, left: Float, right: Float) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MotionArchiveDialog(
-    library: MotionMediaLibrary,
-    initialStats: MotionMediaLibrary.Stats?,
+    archiveState: MotionArchiveState,
     colors: UiPalette,
     strings: UiStrings,
     onClose: () -> Unit,
-    onChanged: () -> Unit,
 ) {
     val context = LocalContext.current
     val locale = motionLocale(context)
     val zone = ZoneId.systemDefault()
-    val thumbnailLoader = remember(context) { MotionThumbnailLoader(context.applicationContext) }
-    DisposableEffect(thumbnailLoader) { onDispose { thumbnailLoader.close() } }
     val pickerContext = remember(context, locale) {
         ContextThemeWrapper(context, context.theme).apply {
             applyOverrideConfiguration(Configuration().apply { setLocales(LocaleList(locale)) })
         }
     }
-    var month by remember { mutableStateOf(YearMonth.now()) }
-    var selectedDate by remember { mutableStateOf<LocalDate?>(null) }
-    var rangeFrom by remember { mutableStateOf<LocalDate?>(null) }
-    var rangeTo by remember { mutableStateOf<LocalDate?>(null) }
-    var monthDays by remember { mutableStateOf(emptyList<MotionMediaLibrary.Day>()) }
-    var entries by remember { mutableStateOf(emptyList<MotionMediaLibrary.Entry>()) }
-    var stats by remember { mutableStateOf(initialStats) }
-    var selectedVolumeId by rememberSaveable { mutableStateOf<String?>(null) }
-    var sort by rememberSaveable { mutableIntStateOf(0) }
+    val month = archiveState.month
+    val selectedDate = archiveState.selectedDate
+    val rangeFrom = archiveState.rangeFrom
+    val rangeTo = archiveState.rangeTo
+    val stats = archiveState.stats
+    val sort = archiveState.sort
     var selectedForDelete by remember { mutableStateOf(emptySet<String>()) }
     var confirmDelete by remember { mutableStateOf(false) }
-    var playerEntry by remember { mutableStateOf<MotionMediaLibrary.Entry?>(null) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
-    var loading by remember { mutableStateOf(true) }
-    var loadFailed by remember { mutableStateOf(false) }
-    var refreshKey by remember { mutableIntStateOf(0) }
-    val gridState = rememberLazyGridState()
     var deleteResult by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<List<MotionMediaLibrary.Entry>?>(null) }
     var pendingDeletePermission by remember { mutableStateOf<List<MotionMediaLibrary.Entry>?>(null) }
     val rangeIncomplete = (rangeFrom == null) != (rangeTo == null)
     val rangeBounds = if (rangeFrom != null && rangeTo != null) motionArchiveDateRange(rangeFrom!!, rangeTo!!, zone) else null
     val rangeInvalid = rangeFrom != null && rangeTo != null && rangeBounds == null
+    val loading = archiveState.loading
+    val loadFailed = archiveState.loadFailed
+    val snapshotEntries = archiveState.entries
+    val tabletVolumeId = archiveState.tabletVolumeId
+    val removableVolumeIds = archiveState.removableVolumeIds
+    val storageFilter = archiveState.storageFilter
+    val storageEntries = remember(snapshotEntries, storageFilter, tabletVolumeId, removableVolumeIds) {
+        snapshotEntries.filter { entry ->
+            motionArchiveVolumeMatches(storageFilter, entry.volumeId, tabletVolumeId, removableVolumeIds)
+        }
+    }
+    val monthBounds = remember(month, zone) { motionArchiveBounds(month, null, null, null, zone)!! }
+    val monthDays = remember(storageEntries, monthBounds, zone) {
+        motionArchiveDays(storageEntries.filter { motionArchiveContains(monthBounds, it.recordedAtMillis) }, zone)
+    }
+    val entryBounds = remember(month, selectedDate, rangeFrom, rangeTo, zone) {
+        motionArchiveBounds(month, selectedDate, rangeFrom, rangeTo, zone)
+    }
+    val entries = remember(snapshotEntries, entryBounds, sort, rangeIncomplete, rangeInvalid,
+        storageFilter, tabletVolumeId, removableVolumeIds) {
+        if (rangeIncomplete || rangeInvalid) emptyList()
+        else {
+            val byKey = snapshotEntries.associateBy { it.contentUri.toString() }
+            val order = motionArchiveProject(
+                snapshotEntries.map { MotionArchiveRecordMetadata(
+                    it.contentUri.toString(), it.recordedAtMillis, it.volumeId,
+                ) },
+                storageFilter, tabletVolumeId, removableVolumeIds, entryBounds, oldestFirst = sort != 0,
+            )
+            order.mapNotNull(byKey::get)
+        }
+    }
+    val gridKey = MotionArchiveGridKey(month, selectedDate, rangeFrom, rangeTo, storageFilter, sort)
+    val savedPosition = archiveState.gridPositions[gridKey] ?: MotionArchiveGridPosition(0, 0)
+    val gridState = remember(gridKey) { LazyGridState(savedPosition.index, savedPosition.offset) }
+    LaunchedEffect(gridKey, gridState) {
+        snapshotFlow { MotionArchiveGridPosition(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset) }
+            .collect { archiveState.gridPositions[gridKey] = it }
+    }
     val rangeFormatter = remember(locale, zone) {
         DateTimeFormatter.ofPattern("dd.MM.yyyy", locale)
     }
-    val availableVolumes = stats?.volumes.orEmpty().filter { it.mounted }
-    val volumeLabels = availableVolumes.map { volume ->
-        when {
-            volume.primary -> strings.motionText(R.string.tablet)
-            volume.label.isNotBlank() -> volume.label
-            volume.removable -> strings.motionText(R.string.motion_storage_sd)
-            else -> volume.id
-        }
-    }
-    val duplicateVolumeLabels = volumeLabels.groupingBy { it }.eachCount()
-    val storageFilterOptions = buildList {
-        add(null to strings.motionText(R.string.motion_archive_all_short))
-        availableVolumes.forEachIndexed { index, volume ->
-            val label = volumeLabels[index]
-            val uniqueLabel = if ((duplicateVolumeLabels[label] ?: 0) > 1)
-                "$label · ${volume.id.takeLast(4)}" else label
-            add(volume.id to uniqueLabel)
-        }
-    }
-    val volumeId = selectedVolumeId?.takeIf { selectedId -> availableVolumes.any { it.id == selectedId } }
-    val storageFilterUnavailable = selectedVolumeId != null && volumeId == null
-    SideEffect {
-        if (storageFilterUnavailable) selectedVolumeId = null
-    }
-    val selectedStorageFilter = storageFilterOptions.indexOfFirst { it.first == volumeId }.coerceAtLeast(0)
     val dayFormatter = remember(locale) { DateTimeFormatter.ofPattern("d MMM yyyy", locale) }
     var datePicker by remember { mutableStateOf<DatePickerDialog?>(null) }
     DisposableEffect(Unit) {
@@ -718,76 +702,20 @@ private fun MotionArchiveDialog(
         val initial = (if (isStart) rangeFrom else rangeTo) ?: fallback
         datePicker = DatePickerDialog(pickerContext, { _, year, monthIndex, day ->
             val chosen = LocalDate.of(year, monthIndex + 1, day)
-            selectedDate = null
-            month = YearMonth.from(chosen)
-            if (isStart) rangeFrom = chosen else rangeTo = chosen
+            archiveState.selectedDate = null
+            archiveState.month = YearMonth.from(chosen)
+            if (isStart) archiveState.rangeFrom = chosen else archiveState.rangeTo = chosen
         }, initial.year, initial.monthValue - 1, initial.dayOfMonth).also { it.show() }
-    }
-    LaunchedEffect(library) {
-        try {
-            val latestAvailable = withContext(Dispatchers.IO) {
-                library.refresh()
-                library.query(MotionMediaLibrary.Query(null, null, null, MotionMediaLibrary.Sort.NEWEST_FIRST))
-                    .firstOrNull { it.available }
-            }
-            if (latestAvailable != null) {
-                val date = Instant.ofEpochMilli(latestAvailable.recordedAtMillis).atZone(zone).toLocalDate()
-                selectedDate = date
-                month = YearMonth.from(date)
-            }
-            stats = withContext(Dispatchers.IO) { library.queryStats(MotionConfig.read(context)) }
-            loadFailed = false
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { loadFailed = true }
-    }
-    LaunchedEffect(month, volumeId, storageFilterUnavailable, sort, refreshKey) {
-        if (storageFilterUnavailable) {
-            monthDays = emptyList()
-            return@LaunchedEffect
-        }
-        val bounds = motionArchiveBounds(month, null, null, null, zone) ?: return@LaunchedEffect
-        try {
-            monthDays = withContext(Dispatchers.IO) {
-                library.queryDays(MotionMediaLibrary.Query(
-                    bounds.startMillis, bounds.endMillis,
-                    volumeId, if (sort == 0) MotionMediaLibrary.Sort.NEWEST_FIRST else MotionMediaLibrary.Sort.OLDEST_FIRST))
-            }
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { loadFailed = true }
-    }
-    LaunchedEffect(month, selectedDate, rangeFrom, rangeTo, volumeId, storageFilterUnavailable, sort, refreshKey) {
-        loading = true
-        entries = emptyList()
-        val bounds = motionArchiveBounds(month, selectedDate, rangeFrom, rangeTo, zone)
-        if (bounds == null || storageFilterUnavailable) {
-            selectedForDelete = emptySet()
-            loadFailed = false
-            loading = false
-            return@LaunchedEffect
-        }
-        try {
-            entries = withContext(Dispatchers.IO) {
-                library.query(MotionMediaLibrary.Query(bounds.startMillis, bounds.endMillis, volumeId,
-                    if (sort == 0) MotionMediaLibrary.Sort.NEWEST_FIRST else MotionMediaLibrary.Sort.OLDEST_FIRST))
-            }
-            selectedForDelete = selectedForDelete.intersect(entries.filter(::canDelete).map { it.contentUri.toString() }.toSet())
-            loadFailed = false
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { loadFailed = true; entries = emptyList(); selectedForDelete = emptySet() }
-        finally { loading = false }
     }
     LaunchedEffect(pendingDelete) {
         val chosen = pendingDelete ?: return@LaunchedEffect
         try {
-            val result = withContext(Dispatchers.IO) { library.deleteSelected(chosen) }
+            val result = archiveState.deleteSelected(chosen)
             selectedForDelete = emptySet()
             deleteResult = strings.motionText(R.string.motion_archive_delete_result,
                 result.deletedCount, result.failedCount, result.skippedCount)
-            refreshKey++
-            stats = withContext(Dispatchers.IO) { library.queryStats(MotionConfig.read(context)) }
-            onChanged()
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { loadFailed = true }
+        catch (_: Exception) { /* Owner preserves the last good snapshot and exposes the error state. */ }
         finally { pendingDelete = null }
     }
 
@@ -812,18 +740,37 @@ private fun MotionArchiveDialog(
                 }
                 ActionButton(strings.motionText(R.string.motion_close), colors = colors, onClick = onClose)
             }
-            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
+            if (!archiveState.hasSnapshot) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(strings.motionText(if (loading) R.string.motion_storage_loading
+                        else R.string.motion_storage_unreadable), color = colors.muted,
+                        fontSize = 15.sp, textAlign = TextAlign.Center)
+                }
+            } else BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
                 val calendarWidth = minOf(196.dp, maxWidth * .233f)
                 val columns = if (maxWidth - calendarWidth >= 780.dp) 3 else 2
                 Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     Column(Modifier.width(calendarWidth).fillMaxHeight(),
                         verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         CalendarPicker(month, selectedDate, monthDays.map { it.date }.toSet(), locale, colors, strings,
-                            onMonth = { month = it; selectedDate = null; rangeFrom = null; rangeTo = null },
-                            onDate = { selectedDate = it; rangeFrom = null; rangeTo = null })
+                            onMonth = {
+                                archiveState.month = it
+                                archiveState.selectedDate = null
+                                archiveState.rangeFrom = null
+                                archiveState.rangeTo = null
+                            },
+                            onDate = {
+                                archiveState.selectedDate = it
+                                archiveState.rangeFrom = null
+                                archiveState.rangeTo = null
+                            })
                         Text(strings.motionText(R.string.motion_archive_days_hint), color = colors.muted, fontSize = 12.sp)
                         ActionButton(strings.motionText(R.string.motion_archive_month), colors = colors,
-                            modifier = Modifier.fillMaxWidth(), height = 36.dp) { selectedDate = null; rangeFrom = null; rangeTo = null }
+                            modifier = Modifier.fillMaxWidth(), height = 36.dp) {
+                            archiveState.selectedDate = null
+                            archiveState.rangeFrom = null
+                            archiveState.rangeTo = null
+                        }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             ActionButton("${strings.motionText(R.string.motion_archive_from)}\n${rangeFrom?.format(rangeFormatter) ?: "—"}",
                                 colors = colors, modifier = Modifier.weight(1f), height = 48.dp, maxLines = 2) { showRangePicker(true) }
@@ -832,7 +779,8 @@ private fun MotionArchiveDialog(
                         }
                         ActionButton(strings.motionText(R.string.motion_archive_clear_range), colors = colors,
                             modifier = Modifier.fillMaxWidth(), height = 36.dp, enabled = rangeFrom != null || rangeTo != null) {
-                            rangeFrom = null; rangeTo = null
+                            archiveState.rangeFrom = null
+                            archiveState.rangeTo = null
                         }
                         if (rangeIncomplete || rangeInvalid) Text(strings.motionText(
                             if (rangeIncomplete) R.string.motion_archive_range_incomplete else R.string.motion_archive_range_invalid),
@@ -841,13 +789,15 @@ private fun MotionArchiveDialog(
                     Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            ChoiceField("", storageFilterOptions.map { it.second }, selectedStorageFilter,
-                                onSelect = { index -> selectedVolumeId = storageFilterOptions.getOrNull(index)?.first },
-                                colors = colors, modifier = Modifier.weight(1f), hudCompact = true)
+                            Segmented(listOf(strings.motionText(R.string.motion_archive_all_short),
+                                strings.motionText(R.string.tablet), strings.motionText(R.string.motion_storage_sd)),
+                                archiveState.storageFilter.ordinal, colors, Modifier.weight(1f)) { index ->
+                                    archiveState.storageFilter = MotionArchiveStorageFilter.values()[index]
+                                }
                             ActionButton("${strings.motionText(if (sort == 0) R.string.motion_archive_newest
                                 else R.string.motion_archive_oldest)} ${if (sort == 0) "↓" else "↑"}",
-                                colors = colors, modifier = Modifier.width(166.dp), height = 42.dp) { sort = 1 - sort }
-                            ActionButton(if (selectionMode) "✓" else "☷", colors = colors,
+                                colors = colors, modifier = Modifier.width(166.dp), height = 42.dp) { archiveState.sort = 1 - sort }
+                            ActionButton("", Icons.Outlined.Checklist, colors,
                                 modifier = Modifier.width(42.dp).semantics {
                                     contentDescription = strings.motionText(R.string.motion_archive_multiselect)
                                     selected = selectionMode
@@ -902,15 +852,15 @@ private fun MotionArchiveDialog(
                             verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             items(entries, key = { it.contentUri.toString() }) { entry ->
                                 val id = entry.contentUri.toString()
-                                val volume = stats?.volumes?.firstOrNull { it.id == entry.volumeId }
-                                MotionArchiveCard(entry, id in visibleSelection, selectionMode, thumbnailLoader,
-                                    volume?.removable == true,
+                                val removable = entry.volumeId in removableVolumeIds
+                                MotionArchiveCard(entry, id in visibleSelection, selectionMode, archiveState.thumbnailLoader,
+                                    removable,
                                     colors, strings, locale, zone,
                                     onClick = {
                                         if (selectionMode) {
                                             if (canDelete(entry)) selectedForDelete = if (id in selectedForDelete)
                                                 selectedForDelete - id else selectedForDelete + id
-                                        } else if (entry.available) playerEntry = entry
+                                        } else if (entry.available) archiveState.playerEntry = entry
                                         else Toast.makeText(context, strings.motionText(R.string.motion_archive_unavailable),
                                             Toast.LENGTH_SHORT).show()
                                     }, onLongClick = {
@@ -952,7 +902,17 @@ private fun MotionArchiveDialog(
             }
         }
     }
-    playerEntry?.let { entry -> MotionPlayerDialog(entry, colors, strings, locale) { playerEntry = null } }
+    archiveState.playerEntry?.let { entry ->
+        MotionPlayerDialog(
+            entries = entries.filter { it.available },
+            initialEntry = entry,
+            colors = colors,
+            strings = strings,
+            locale = locale,
+            onSelectEntry = { archiveState.playerEntry = it },
+            onClose = { archiveState.playerEntry = null },
+        )
+    }
 }
 
 private fun canDelete(entry: MotionMediaLibrary.Entry) =
@@ -1084,162 +1044,6 @@ private fun MotionArchiveCard(
             Image(painterResource(if (removableVolume) R.drawable.ic_archive_sd_card else R.drawable.ic_archive_tablet),
                 contentDescription = strings.motionText(if (removableVolume) R.string.motion_storage_sd else R.string.motion_storage_internal),
                 modifier = Modifier.size(20.dp), colorFilter = ColorFilter.tint(colors.muted))
-        }
-    }
-}
-
-@Composable
-private fun MotionPlayerDialog(
-    entry: MotionMediaLibrary.Entry,
-    colors: UiPalette,
-    strings: UiStrings,
-    locale: Locale,
-    onClose: () -> Unit,
-) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val hostState = remember(entry.contentUri) { mutableStateOf<MotionTexturePlayer?>(null) }
-    var lifecycleActive by remember(lifecycleOwner) {
-        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
-    }
-    var position by remember(entry.contentUri) { mutableIntStateOf(0) }
-    var playerDuration by remember(entry.contentUri) { mutableLongStateOf(entry.durationMs.coerceAtLeast(1L)) }
-    var selectedDirection by rememberSaveable(entry.contentUri.toString()) { mutableIntStateOf(-1) }
-    var fullScreen by rememberSaveable(entry.contentUri.toString()) { mutableStateOf(false) }
-    var playbackFailed by remember(entry.contentUri) { mutableStateOf(false) }
-    val duration = playerDuration.coerceAtLeast(1L)
-    val cameraLabels = listOf(R.string.motion_player_composition, R.string.motion_camera_front,
-        R.string.motion_camera_rear, R.string.motion_camera_left, R.string.motion_camera_right)
-    val canCrop = remember(entry.cameraOrder?.toList()) {
-        (0..3).map { direction ->
-            com.byd.extend.MotionCompositionLayout.cameraRectForDirection(
-                direction, entry.cameraOrder, 1920, 1080) != null
-        }
-    }
-    DisposableEffect(hostState) { onDispose { hostState.value?.release() } }
-    DisposableEffect(lifecycleOwner, hostState) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_START -> {
-                    lifecycleActive = true
-                    hostState.value?.setPlaybackAllowed(true)
-                }
-                Lifecycle.Event.ON_STOP -> {
-                    lifecycleActive = false
-                    hostState.value?.setPlaybackAllowed(false)
-                }
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        hostState.value?.setPlaybackAllowed(lifecycleActive)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-    LaunchedEffect(entry.contentUri) {
-        while (isActive) {
-            position = hostState.value?.currentPositionOrZero() ?: 0
-            delay(250)
-        }
-    }
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(
-        usePlatformDefaultWidth = false, decorFitsSystemWindows = !fullScreen)) {
-        val dialogView = LocalView.current
-        val dialogWindow = (dialogView.parent as? DialogWindowProvider)?.window
-        DisposableEffect(dialogWindow, fullScreen) {
-            val controller = dialogWindow?.let { WindowInsetsControllerCompat(it, it.decorView) }
-            if (fullScreen) controller?.hide(WindowInsetsCompat.Type.systemBars())
-            else controller?.show(WindowInsetsCompat.Type.systemBars())
-            onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
-        }
-        val playerShape = if (fullScreen) RectangleShape else RoundedCornerShape(10.dp)
-        Column(Modifier.fillMaxSize(if (fullScreen) 1f else .96f).clip(playerShape).background(colors.surface)
-            .border(1.dp, colors.borderStrong, playerShape).padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(entry.title, Modifier.weight(1f), color = colors.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                ActionButton(strings.motionText(if (fullScreen) R.string.motion_player_windowed
-                    else R.string.motion_player_fullscreen), Icons.Outlined.OpenInFull, colors,
-                    onClick = { fullScreen = !fullScreen })
-                ActionButton(strings.motionText(R.string.motion_close), colors = colors, onClick = onClose)
-            }
-            Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(Modifier.width(128.dp).fillMaxHeight().selectableGroup(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    cameraLabels.forEachIndexed { index, label ->
-                        val direction = index - 1
-                        val enabled = index == 0 || canCrop.getOrElse(direction) { false }
-                        val chosen = selectedDirection == direction
-                        Column(Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(7.dp))
-                            .background(if (chosen) colors.active else colors.panelAlt)
-                            .border(1.dp, if (chosen) colors.accent else colors.border, RoundedCornerShape(7.dp))
-                            .semantics { contentDescription = strings.motionText(label) }
-                            .selectable(chosen, enabled = enabled, role = Role.Tab) { selectedDirection = direction }
-                            .padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center) {
-                            if (direction < 0) CompositionGridGlyph(colors, Modifier.size(28.dp))
-                            else Image(painterResource(MotionDirectionIcon.drawableFor(direction)),
-                                contentDescription = null, modifier = Modifier.size(28.dp))
-                            Text(strings.motionText(label), color = if (enabled) colors.text else colors.muted,
-                                fontSize = 14.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
-                key(entry.contentUri) {
-                    AndroidView(factory = { viewContext ->
-                        MotionTexturePlayer(viewContext, entry.contentUri, entry.cameraOrder,
-                            onPrepared = { actualDuration ->
-                                if (actualDuration > 0) playerDuration = actualDuration.toLong()
-                            },
-                            onError = { what, extra ->
-                                Log.e(MOTION_PLAYER_TAG, "Playback failed for ${entry.contentUri}: what=$what extra=$extra")
-                                playbackFailed = true
-                                Toast.makeText(context, strings.motionText(R.string.motion_player_error), Toast.LENGTH_LONG).show()
-                            }).also { host ->
-                            hostState.value = host
-                                host.setPlaybackAllowed(lifecycleActive)
-                            host.showCrop(selectedDirection)
-                        }
-                    }, modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(6.dp)),
-                        update = { it.showCrop(selectedDirection) })
-                }
-            }
-            if (playbackFailed) Text(strings.motionText(R.string.motion_player_error),
-                color = colors.yellow, fontSize = 13.sp)
-            Canvas(Modifier.fillMaxWidth().height(22.dp).clip(RoundedCornerShape(4.dp))
-                .background(colors.panelAlt).pointerInput(entry.contentUri, duration) {
-                    detectTapGestures { point ->
-                        val target = (point.x / size.width * duration.toFloat()).toLong().coerceIn(0L, duration)
-                        hostState.value?.seekTo(target.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
-                    }
-                }) {
-                val progressX = size.width * (position.toDouble() / duration).toFloat().coerceIn(0f, 1f)
-                drawRect(colors.accent.copy(alpha = .55f), size = Size(progressX, size.height))
-                entry.markers.filter { (it.level == 1 || it.level == 2) && it.positionMs < duration }
-                    .sortedBy { it.level }.forEach { marker ->
-                    val startMs = marker.positionMs.coerceIn(0L, duration)
-                    val intervalMs = marker.durationMs.coerceAtLeast(0L).coerceAtMost(duration - startMs)
-                    val startX = size.width * (startMs.toDouble() / duration).toFloat()
-                    val intervalWidth = size.width * (intervalMs.toDouble() / duration).toFloat()
-                    val minimumWidth = 2.dp.toPx().coerceAtMost(size.width)
-                    val left = startX.coerceAtMost((size.width - minimumWidth).coerceAtLeast(0f))
-                    val bandWidth = maxOf(intervalWidth, minimumWidth).coerceAtMost(size.width - left)
-                    drawRect(if (marker.level == 2) colors.red else colors.yellow,
-                        topLeft = Offset(left, 0f), size = Size(bandWidth, size.height))
-                }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(formatDuration(position.toLong()), color = colors.muted, fontSize = 12.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    val yellow = entry.markers.count { it.level == 1 }
-                    val red = entry.markers.count { it.level == 2 }
-                    if (yellow > 0) Text("${strings.motionText(R.string.motion_archive_yellow)}: $yellow",
-                        color = colors.yellow, fontSize = 12.sp)
-                    if (red > 0) Text("${strings.motionText(R.string.motion_archive_red)}: $red",
-                        color = colors.red, fontSize = 12.sp)
-                }
-                Text(formatDuration(duration), color = colors.muted, fontSize = 12.sp)
-            }
         }
     }
 }

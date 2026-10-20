@@ -1,11 +1,55 @@
 package com.byd.extend.ui.motion
 
 import java.time.DayOfWeek
+import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
+import com.byd.extend.MotionMediaLibrary
+
+internal enum class MotionArchiveStorageFilter { ALL, TABLET, SD }
+
+internal data class MotionArchiveDateRecord(val recordedAtMillis: Long, val available: Boolean)
+
+internal data class MotionArchiveGridKey(
+    val month: YearMonth,
+    val selectedDate: LocalDate?,
+    val rangeFrom: LocalDate?,
+    val rangeTo: LocalDate?,
+    val storageFilter: MotionArchiveStorageFilter,
+    val sort: Int,
+)
+
+internal data class MotionArchiveGridPosition(val index: Int, val offset: Int)
 
 internal data class MotionArchiveBounds(val startMillis: Long, val endMillis: Long)
+
+internal data class MotionArchiveRecordMetadata(
+    val key: String,
+    val recordedAtMillis: Long,
+    val volumeId: String,
+)
+
+internal fun motionArchiveProject(
+    records: Iterable<MotionArchiveRecordMetadata>,
+    filter: MotionArchiveStorageFilter,
+    tabletVolumeId: String?,
+    removableVolumeIds: Set<String>,
+    bounds: MotionArchiveBounds?,
+    oldestFirst: Boolean,
+): List<String> {
+    if (bounds == null) return emptyList()
+    val matched = records.filter { record ->
+        motionArchiveVolumeMatches(filter, record.volumeId, tabletVolumeId, removableVolumeIds) &&
+            motionArchiveContains(bounds, record.recordedAtMillis)
+    }
+    val ordered = if (oldestFirst) matched.sortedWith(
+        compareBy<MotionArchiveRecordMetadata> { it.recordedAtMillis }.thenBy { it.key },
+    ) else matched.sortedWith(
+        compareByDescending<MotionArchiveRecordMetadata> { it.recordedAtMillis }.thenBy { it.key },
+    )
+    return ordered.map { it.key }
+}
 
 internal data class MotionStoragePermissionNeeds(val read: Boolean, val write: Boolean)
 
@@ -25,6 +69,54 @@ internal fun motionArchiveDateRange(from: LocalDate, to: LocalDate, zone: ZoneId
     val start = from.atStartOfDay(zone).toInstant()
     val end = to.plusDays(1).atStartOfDay(zone).toInstant()
     return if (start.isBefore(end)) MotionArchiveBounds(start.toEpochMilli(), end.toEpochMilli()) else null
+}
+
+internal fun motionArchiveLatestAvailableDate(records: Iterable<MotionArchiveDateRecord>, zone: ZoneId): LocalDate? =
+    records.asSequence().filter { it.available }.maxByOrNull { it.recordedAtMillis }
+        ?.let { Instant.ofEpochMilli(it.recordedAtMillis).atZone(zone).toLocalDate() }
+
+internal fun motionArchiveVolumeMatches(
+    filter: MotionArchiveStorageFilter,
+    volumeId: String,
+    tabletVolumeId: String?,
+    removableVolumeIds: Set<String>,
+): Boolean = when (filter) {
+    MotionArchiveStorageFilter.ALL -> true
+    MotionArchiveStorageFilter.TABLET -> volumeId == tabletVolumeId
+    MotionArchiveStorageFilter.SD -> volumeId in removableVolumeIds
+}
+
+internal fun motionArchiveContains(bounds: MotionArchiveBounds, recordedAtMillis: Long) =
+    recordedAtMillis >= bounds.startMillis && recordedAtMillis < bounds.endMillis
+
+internal data class MotionArchiveDay(
+    val date: LocalDate,
+    val entryCount: Int,
+    val yellowEvents: Int,
+    val redEvents: Int,
+)
+
+internal fun motionArchiveDays(entries: Iterable<MotionMediaLibrary.Entry>, zone: ZoneId): List<MotionArchiveDay> {
+    data class MutableDay(val date: LocalDate, val entries: MutableList<MotionMediaLibrary.Entry> = mutableListOf())
+    val days = sortedMapOf<LocalDate, MutableDay>()
+    entries.forEach { entry ->
+        val date = Instant.ofEpochMilli(entry.recordedAtMillis).atZone(zone).toLocalDate()
+        days.getOrPut(date) { MutableDay(date) }.entries += entry
+    }
+    return days.values.map { day ->
+        val events = HashSet<String>()
+        var yellow = 0
+        var red = 0
+        day.entries.forEach { entry -> entry.markers.forEach { marker ->
+            val key = if (marker.eventId.isEmpty())
+                "${entry.contentUri}|${marker.elapsedRealtimeMs}|${marker.level}" else marker.eventId
+            if (events.add(key)) when (marker.level) {
+                1 -> yellow++
+                2 -> red++
+            }
+        } }
+        MotionArchiveDay(day.date, day.entries.size, yellow, red)
+    }
 }
 
 internal fun motionArchiveBounds(

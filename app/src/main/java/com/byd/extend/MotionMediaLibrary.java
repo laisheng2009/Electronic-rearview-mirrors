@@ -219,6 +219,16 @@ public final class MotionMediaLibrary {
         }
     }
 
+    public static final class Snapshot {
+        public final List<Entry> entries;
+        public final Stats stats;
+
+        private Snapshot(List<Entry> entries, Stats stats) {
+            this.entries = Collections.unmodifiableList(entries);
+            this.stats = stats;
+        }
+    }
+
     public static final class DeleteResult {
         public final int deletedCount;
         public final int failedCount;
@@ -316,7 +326,7 @@ public final class MotionMediaLibrary {
 
     public List<Entry> query(Query query) {
         Query actual = query == null ? Query.recent() : query;
-        if (access != null) return queryRemote(actual, MotionConfig.read(context));
+        if (access != null) return queryRemote(actual, MotionConfig.read(context)).entries;
         ArrayList<Entry> result = new ArrayList<>();
         Map<String, MotionStorage.Volume> volumes = volumeMap();
         for (MotionMediaIndex.Record record : index.records()) {
@@ -344,13 +354,22 @@ public final class MotionMediaLibrary {
         return result;
     }
 
-    private List<Entry> queryRemote(Query query, MotionConfig config) {
+    /** Reads the archive and statistics in one pagination cycle, without a second storage scan. */
+    public Snapshot loadSnapshot(MotionConfig config) {
+        MotionConfig actual = config == null ? MotionConfig.read(context) : config;
+        if (access != null) return queryRemote(Query.recent(), actual);
+        return new Snapshot(query(Query.recent()), queryStats(actual));
+    }
+
+    private Snapshot queryRemote(Query query, MotionConfig config) {
         ArrayList<Entry> result = new ArrayList<>();
+        Stats stats = null;
         String pageToken = null;
         java.util.HashSet<String> tokens = new java.util.HashSet<>();
         for (int pages = 0; pages < 10000; pages++) {
             JSONObject response = parseResponse(access.query(query, config, pageToken));
             try {
+                if (stats == null) stats = readStats(response.getJSONObject("stats"));
                 JSONArray entries = response.getJSONArray("entries");
                 for (int i = 0; i < entries.length(); i++) result.add(readEntry(entries.getJSONObject(i)));
                 if (response.isNull("nextPageToken")) break;
@@ -366,7 +385,7 @@ public final class MotionMediaLibrary {
         Comparator<Entry> order = Comparator.comparingLong(entry -> entry.recordedAtMillis);
         if (query.sort == Sort.NEWEST_FIRST) order = order.reversed();
         result.sort(order.thenComparing(entry -> entry.contentUri.toString()));
-        return result;
+        return new Snapshot(result, stats);
     }
 
     private static JSONObject parseResponse(String encoded) {

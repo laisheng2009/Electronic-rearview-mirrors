@@ -1,0 +1,10 @@
+<resources>
+    <string name="motion_player_previous">Previous recording</string>
+    <string name="motion_player_play">Play</string>
+    <string name="motion_player_pause">Pause</string>
+    <string name="motion_player_next">Next recording</string>
+    <string name="motion_player_restart">Restart</string>
+    <string name="motion_player_speed">Playback speed</string>
+    <string name="motion_player_seek">Playback position</string>
+    <string name="motion_player_speed_error">Playback speed could not be applied.</string>
+</resources>

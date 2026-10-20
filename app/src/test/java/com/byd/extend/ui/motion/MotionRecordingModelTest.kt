@@ -1,6 +1,7 @@
 package com.byd.extend.ui.motion
 
 import java.time.DayOfWeek
+import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
@@ -52,6 +53,64 @@ class MotionRecordingModelTest {
         val zone = ZoneId.of("UTC")
         assertNull(motionArchiveBounds(month, day, day, null, zone))
         assertNull(motionArchiveBounds(month, day, day.plusDays(1), day, zone))
+    }
+
+    @Test fun firstArchiveDateUsesLatestAvailableEntryInDeviceZone() {
+        val zone = ZoneId.of("Europe/Kyiv")
+        val records = listOf(
+            MotionArchiveDateRecord(Instant.parse("2026-10-18T20:00:00Z").toEpochMilli(), true),
+            MotionArchiveDateRecord(Instant.parse("2026-10-19T22:30:00Z").toEpochMilli(), false),
+            MotionArchiveDateRecord(Instant.parse("2026-10-19T20:30:00Z").toEpochMilli(), true),
+        )
+
+        assertEquals(LocalDate.of(2026, 10, 19), motionArchiveLatestAvailableDate(records, zone))
+        assertNull(motionArchiveLatestAvailableDate(records.filterNot { it.available }, zone))
+    }
+
+    @Test fun archiveStorageSegmentsUseTheTabletIdAndAllRemovableIds() {
+        val removable = setOf("sd-a", "sd-b")
+        assertTrue(motionArchiveVolumeMatches(MotionArchiveStorageFilter.ALL, "unknown", "tablet", removable))
+        assertTrue(motionArchiveVolumeMatches(MotionArchiveStorageFilter.TABLET, "tablet", "tablet", removable))
+        assertFalse(motionArchiveVolumeMatches(MotionArchiveStorageFilter.TABLET, "sd-a", "tablet", removable))
+        assertTrue(motionArchiveVolumeMatches(MotionArchiveStorageFilter.SD, "sd-b", "tablet", removable))
+        assertFalse(motionArchiveVolumeMatches(MotionArchiveStorageFilter.SD, "unknown", "tablet", removable))
+    }
+
+    @Test fun archiveDateFilterUsesHalfOpenBoundaries() {
+        val bounds = MotionArchiveBounds(100L, 200L)
+        assertFalse(motionArchiveContains(bounds, 99L))
+        assertTrue(motionArchiveContains(bounds, 100L))
+        assertTrue(motionArchiveContains(bounds, 199L))
+        assertFalse(motionArchiveContains(bounds, 200L))
+    }
+
+    @Test fun archiveProjectionFiltersAndSortsSnapshotMetadataWithoutLosingSelectionBounds() {
+        val bounds = MotionArchiveBounds(100L, 200L)
+        val snapshot = listOf(
+            MotionArchiveRecordMetadata("sd-later", 180L, "sd-a"),
+            MotionArchiveRecordMetadata("sd-earlier", 110L, "sd-a"),
+            MotionArchiveRecordMetadata("tablet", 190L, "tablet"),
+            MotionArchiveRecordMetadata("outside", 200L, "sd-a"),
+        )
+
+        assertEquals(listOf("sd-later", "sd-earlier"), motionArchiveProject(
+            snapshot, MotionArchiveStorageFilter.SD, "tablet", setOf("sd-a"), bounds, oldestFirst = false,
+        ))
+        assertEquals(listOf("sd-earlier", "sd-later"), motionArchiveProject(
+            snapshot, MotionArchiveStorageFilter.SD, "tablet", setOf("sd-a"), bounds, oldestFirst = true,
+        ))
+        assertEquals(listOf("tablet"), motionArchiveProject(
+            snapshot, MotionArchiveStorageFilter.TABLET, "tablet", setOf("sd-a"), bounds, oldestFirst = false,
+        ))
+
+        val afterSnapshotAdd = snapshot + MotionArchiveRecordMetadata("sd-new", 195L, "sd-a")
+        assertEquals(listOf("sd-new", "sd-later", "sd-earlier"), motionArchiveProject(
+            afterSnapshotAdd, MotionArchiveStorageFilter.SD, "tablet", setOf("sd-a"), bounds, oldestFirst = false,
+        ))
+        val afterSnapshotDelete = afterSnapshotAdd.filterNot { it.key == "sd-later" }
+        assertEquals(listOf("sd-new", "sd-earlier"), motionArchiveProject(
+            afterSnapshotDelete, MotionArchiveStorageFilter.SD, "tablet", setOf("sd-a"), bounds, oldestFirst = false,
+        ))
     }
 
     @Test fun recordingStoragePermissionsMatchApiRequirements() {

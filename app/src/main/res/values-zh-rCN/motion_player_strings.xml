@@ -1,0 +1,10 @@
+<resources>
+    <string name="motion_player_previous">上一段录像</string>
+    <string name="motion_player_play">播放</string>
+    <string name="motion_player_pause">暂停</string>
+    <string name="motion_player_next">下一段录像</string>
+    <string name="motion_player_restart">从头播放</string>
+    <string name="motion_player_speed">播放速度</string>
+    <string name="motion_player_seek">播放位置</string>
+    <string name="motion_player_speed_error">无法应用播放速度。</string>
+</resources>

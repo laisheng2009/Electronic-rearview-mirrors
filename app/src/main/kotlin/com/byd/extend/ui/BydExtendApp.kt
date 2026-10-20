@@ -53,6 +53,7 @@ import com.byd.extend.ui.icons.Videocam
 import com.byd.extend.ui.icons.Visibility
 import com.byd.extend.ui.icons.VolumeUp
 import com.byd.extend.ui.motion.MotionIntegrationScreen
+import com.byd.extend.ui.motion.MotionArchiveState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.LinearProgressIndicator
@@ -131,6 +132,11 @@ fun BydExtendApp(
     contentReady: Boolean = true,
 ) {
     val context = LocalContext.current
+    val appContext = context.applicationContext
+    val motionArchiveState = remember(appContext) { MotionArchiveState(appContext) }
+    DisposableEffect(motionArchiveState) {
+        onDispose { motionArchiveState.close() }
+    }
     val lifecycleOwner = LocalView.current.findViewTreeLifecycleOwner()
     val strings = remember(state.language, context) { UiStrings(state.language, context) }
     val colors = remember(state.theme) { palette(state.theme) }
@@ -208,7 +214,7 @@ fun BydExtendApp(
                     when (state.activeTab) {
                         RootTab.Signals -> SignalsScreen(
                             state.signals, state.avas, state.adbRecovery, strings, colors, dispatchAction,
-                            sidebarScroll, cameraHost)
+                            sidebarScroll, cameraHost, motionArchiveState)
                         RootTab.Blind -> BlindScreen(state.blind, strings, colors, dispatchAction, cameraHost, onPreview)
                         RootTab.Parking -> ParkingScreen(state.parking, strings, colors, dispatchAction, cameraHost, onPreview)
                         RootTab.Reverse -> ReverseScreen(state.reverse, strings, colors, dispatchAction, cameraHost, onPreview)
@@ -392,6 +398,7 @@ private fun SignalsScreen(
     onAction: (BydExtendUiAction) -> Unit,
     sidebarScroll: ScrollState,
     cameraHost: @Composable (CameraHostSlot) -> Unit,
+    motionArchiveState: MotionArchiveState,
 ) {
     var editingCallsProfile by rememberSaveable {
         mutableStateOf<com.byd.extend.CallsSettings.Profile?>(null)
@@ -533,7 +540,7 @@ private fun SignalsScreen(
                     }
                     SignalsCategory.Motion -> Column(Modifier.fillMaxSize()
                         .verticalScroll(LocalPrimaryScroll.current)) {
-                        MotionIntegrationScreen(colors, strings, cameraHost)
+                        MotionIntegrationScreen(colors, strings, cameraHost, motionArchiveState)
                     }
                 }
             }

@@ -1,0 +1,10 @@
+<resources>
+    <string name="motion_player_previous">Попередній запис</string>
+    <string name="motion_player_play">Відтворити</string>
+    <string name="motion_player_pause">Пауза</string>
+    <string name="motion_player_next">Наступний запис</string>
+    <string name="motion_player_restart">Спочатку</string>
+    <string name="motion_player_speed">Швидкість відтворення</string>
+    <string name="motion_player_seek">Позиція відтворення</string>
+    <string name="motion_player_speed_error">Не вдалося застосувати швидкість відтворення.</string>
+</resources>

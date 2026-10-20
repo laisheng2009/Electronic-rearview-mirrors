@@ -9,8 +9,6 @@ import android.view.Gravity
 import android.view.Surface
 import android.view.TextureView
 import android.widget.FrameLayout
-import android.widget.MediaController
-import android.widget.MediaController.MediaPlayerControl
 import com.byd.extend.MotionCompositionLayout
 
 /** One media pipeline for composition and all four camera crops. Changing the crop never seeks or reloads. */
@@ -19,35 +17,38 @@ internal class MotionTexturePlayer(
     uri: Uri,
     private val cameraOrder: IntArray?,
     private val onPrepared: (durationMs: Int) -> Unit,
+    private val onSeekSettled: (positionMs: Int) -> Unit,
+    private val onCompletion: () -> Unit,
     private val onError: (what: Int, extra: Int) -> Unit,
-) : FrameLayout(context), TextureView.SurfaceTextureListener, MediaPlayerControl {
+) : FrameLayout(context), TextureView.SurfaceTextureListener {
     private val texture = TextureView(context)
-    private val controller = MediaController(context)
+    private val seeks = MotionSeekQueue()
     private var mediaPlayer: MediaPlayer? = null
     private var surface: Surface? = null
     private var prepared = false
     private var preparing = false
     private var released = false
+    private var failed = false
     private var cropDirection = -1
     private var videoWidth = 0
     private var videoHeight = 0
     private var resumeOnSurfaceAvailable = false
     private var playbackAllowed = true
-    private var failed = false
+    private var scrubbing = false
+    private var scrubWasPlaying = false
+    private var resumeAfterSeek = false
+    private var startAfterSeek = false
+
+    val isReady: Boolean get() = prepared && !released && !failed
+    val isSeeking: Boolean get() = seeks.isActive
 
     init {
         setBackgroundColor(android.graphics.Color.BLACK)
         clipChildren = true
         clipToPadding = true
         texture.surfaceTextureListener = this
-        texture.isClickable = true
-        texture.setOnClickListener { controller.show(3_000) }
         addView(texture, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT, Gravity.CENTER))
-        controller.setMediaPlayer(this)
-        controller.setAnchorView(this)
-        controller.isEnabled = false
         try {
-            // Assign first so even a failing setDataSource path releases this exact instance.
             val player = MediaPlayer()
             mediaPlayer = player
             player.setAudioStreamType(AudioManager.STREAM_MUSIC)
@@ -58,7 +59,6 @@ internal class MotionTexturePlayer(
                     videoWidth = it.videoWidth
                     videoHeight = it.videoHeight
                     updateViewport()
-                    controller.isEnabled = true
                     onPrepared(it.duration.coerceAtLeast(0))
                     if (surface != null && playbackAllowed) it.start()
                     else resumeOnSurfaceAvailable = surface == null && playbackAllowed
@@ -69,6 +69,16 @@ internal class MotionTexturePlayer(
                     videoWidth = width
                     videoHeight = height
                     updateViewport()
+                }
+            }
+            player.setOnSeekCompleteListener {
+                if (!released && !failed && seeks.complete(::issueSeek)) finishSeekSequence()
+            }
+            player.setOnCompletionListener {
+                if (!released && !failed) {
+                    startAfterSeek = false
+                    resumeAfterSeek = false
+                    onCompletion()
                 }
             }
             player.setOnErrorListener { _, what, extra ->
@@ -93,15 +103,95 @@ internal class MotionTexturePlayer(
         playbackAllowed = allowed
         if (!allowed) {
             resumeOnSurfaceAvailable = false
-            pause()
+            resumeAfterSeek = false
+            startAfterSeek = false
+            scrubWasPlaying = false
+            scrubbing = false
+            pauseMedia()
         }
+    }
+
+    fun play() {
+        if (!isReady || !playbackAllowed) return
+        if (seeks.isActive) {
+            startAfterSeek = true
+            return
+        }
+        if (surface == null) {
+            resumeOnSurfaceAvailable = true
+            return
+        }
+        try { mediaPlayer?.start() } catch (_: IllegalStateException) { }
+    }
+
+    fun pause() {
+        startAfterSeek = false
+        resumeAfterSeek = false
+        pauseMedia()
+    }
+
+    fun togglePlayback(): Boolean {
+        if (isPlaying || startAfterSeek || resumeAfterSeek) {
+            pause()
+            return false
+        }
+        if (currentPosition >= duration) restart() else play()
+        return true
+    }
+
+    fun restart(): Boolean {
+        if (!isReady) return false
+        startAfterSeek = true
+        requestSeek(0)
+        if (!seeks.isActive) finishSeekSequence()
+        return true
+    }
+
+    fun setPlaybackSpeed(speed: Float): Boolean {
+        if (!isReady || !speed.isFinite() || speed <= 0f) return false
+        val player = mediaPlayer ?: return false
+        val wasPlaying = isPlaying
+        return try {
+            player.playbackParams = player.playbackParams.setSpeed(speed)
+            if (!wasPlaying) {
+                if (safeBoolean { player.isPlaying }) player.pause()
+                if (safeBoolean { player.isPlaying }) return false
+            }
+            true
+        } catch (_: RuntimeException) {
+            if (!wasPlaying) pauseMedia()
+            false
+        }
+    }
+
+    fun beginScrubbing() {
+        if (!isReady || scrubbing) return
+        scrubWasPlaying = isPlaying
+        scrubbing = true
+        if (scrubWasPlaying) pauseMedia()
+    }
+
+    fun seekTo(positionMs: Int) {
+        requestSeek(positionMs)
+    }
+
+    fun finishScrubbing(positionMs: Int) {
+        if (!scrubbing) {
+            requestSeek(positionMs)
+            return
+        }
+        requestSeek(positionMs)
+        resumeAfterSeek = scrubWasPlaying && playbackAllowed
+        scrubWasPlaying = false
+        scrubbing = false
+        if (!seeks.isActive) finishSeekSequence()
     }
 
     fun release() {
         if (released) return
         released = true
-        controller.hide()
-        controller.isEnabled = false
+        texture.surfaceTextureListener = null
+        seeks.clear()
         releasePlayerAndSurface()
         prepared = false
         preparing = false
@@ -113,10 +203,9 @@ internal class MotionTexturePlayer(
         surface = Surface(surfaceTexture)
         try {
             mediaPlayer?.setSurface(surface)
-            if (prepared && resumeOnSurfaceAvailable && playbackAllowed) {
-                mediaPlayer?.start()
-                resumeOnSurfaceAvailable = false
-            } else prepareWhenReady()
+            if (prepared && resumeOnSurfaceAvailable && playbackAllowed) mediaPlayer?.start()
+            else prepareWhenReady()
+            resumeOnSurfaceAvailable = false
         } catch (_: IllegalStateException) {
             fail(0, 0)
         }
@@ -128,10 +217,8 @@ internal class MotionTexturePlayer(
     }
 
     override fun onSurfaceTextureDestroyed(surfaceTexture: android.graphics.SurfaceTexture): Boolean {
-        if (isPlaying) {
-            try { mediaPlayer?.pause() } catch (_: IllegalStateException) { }
-            resumeOnSurfaceAvailable = true
-        }
+        resumeOnSurfaceAvailable = isPlaying
+        if (resumeOnSurfaceAvailable) pauseMedia()
         try { mediaPlayer?.setSurface(null) } catch (_: IllegalStateException) { }
         surface?.release()
         surface = null
@@ -156,14 +243,40 @@ internal class MotionTexturePlayer(
         }
     }
 
+    private fun requestSeek(positionMs: Int) {
+        if (!isReady) return
+        seeks.request(positionMs.coerceIn(0, duration), ::issueSeek)
+    }
+
+    private fun issueSeek(positionMs: Int) {
+        try {
+            mediaPlayer?.seekTo(positionMs.toLong(), MediaPlayer.SEEK_CLOSEST)
+        } catch (_: RuntimeException) {
+            fail(0, 0)
+        }
+    }
+
+    private fun finishSeekSequence() {
+        if (released || failed || scrubbing) return
+        val shouldPlay = startAfterSeek || resumeAfterSeek
+        startAfterSeek = false
+        resumeAfterSeek = false
+        if (shouldPlay) play()
+        onSeekSettled(currentPosition)
+    }
+
     private fun fail(what: Int, extra: Int) {
         if (released || failed) return
         failed = true
         prepared = false
         preparing = false
-        controller.isEnabled = false
+        seeks.clear()
         releasePlayerAndSurface()
         onError(what, extra)
+    }
+
+    private fun pauseMedia() {
+        if (isPlaying) try { mediaPlayer?.pause() } catch (_: IllegalStateException) { }
     }
 
     private fun releasePlayerAndSurface() {
@@ -185,7 +298,7 @@ internal class MotionTexturePlayer(
         val sourceWidth = crop?.width() ?: videoWidth
         val sourceHeight = crop?.height() ?: videoHeight
         if (sourceWidth <= 0 || sourceHeight <= 0) return
-        val aspect = sourceWidth.toFloat() / sourceHeight.toFloat()
+        val aspect = sourceWidth.toFloat() / sourceHeight
         val viewportWidth = minOf(width.toFloat(), height * aspect).toInt().coerceAtLeast(1)
         val viewportHeight = minOf(height.toFloat(), width / aspect).toInt().coerceAtLeast(1)
         if (texture.layoutParams.width != viewportWidth || texture.layoutParams.height != viewportHeight) {
@@ -204,31 +317,42 @@ internal class MotionTexturePlayer(
         texture.setTransform(transform)
     }
 
-    override fun start() {
-        if (!released && prepared && surface != null && playbackAllowed)
-            try { mediaPlayer?.start() } catch (_: IllegalStateException) { }
-    }
-
-    override fun pause() {
-        if (isPlaying) try { mediaPlayer?.pause() } catch (_: IllegalStateException) { }
-    }
-
-    override fun getDuration(): Int = if (prepared) safeInt { mediaPlayer?.duration ?: 0 } else 0
-
-    override fun getCurrentPosition(): Int = if (prepared) safeInt { mediaPlayer?.currentPosition ?: 0 } else 0
-
-    override fun seekTo(pos: Int) {
-        if (prepared) try { mediaPlayer?.seekTo(pos.coerceAtLeast(0)) } catch (_: IllegalStateException) { }
-    }
-
-    override fun isPlaying(): Boolean = prepared && safeBoolean { mediaPlayer?.isPlaying == true }
-
-    override fun getBufferPercentage(): Int = 0
-    override fun canPause(): Boolean = true
-    override fun canSeekBackward(): Boolean = prepared
-    override fun canSeekForward(): Boolean = prepared
-    override fun getAudioSessionId(): Int = try { mediaPlayer?.audioSessionId ?: 0 } catch (_: IllegalStateException) { 0 }
+    private val duration: Int get() = if (prepared) safeInt { mediaPlayer?.duration ?: 0 } else 0
+    private val currentPosition: Int get() = if (prepared) safeInt { mediaPlayer?.currentPosition ?: 0 } else 0
+    val isPlaying: Boolean get() = prepared && safeBoolean { mediaPlayer?.isPlaying == true }
 
     private inline fun safeInt(read: () -> Int): Int = try { read().coerceAtLeast(0) } catch (_: IllegalStateException) { 0 }
     private inline fun safeBoolean(read: () -> Boolean): Boolean = try { read() } catch (_: IllegalStateException) { false }
+}
+
+/** Keeps one decoder seek active and replaces its queued target with the latest pointer position. */
+internal class MotionSeekQueue {
+    private var pendingTarget: Int? = null
+    var isActive: Boolean = false
+        private set
+
+    fun request(target: Int, issue: (Int) -> Unit) {
+        if (isActive) pendingTarget = target
+        else {
+            isActive = true
+            issue(target)
+        }
+    }
+
+    /** Returns true when the current seek was the last queued target. */
+    fun complete(issue: (Int) -> Unit): Boolean {
+        val next = pendingTarget
+        if (next == null) {
+            isActive = false
+            return true
+        }
+        pendingTarget = null
+        issue(next)
+        return false
+    }
+
+    fun clear() {
+        pendingTarget = null
+        isActive = false
+    }
 }
