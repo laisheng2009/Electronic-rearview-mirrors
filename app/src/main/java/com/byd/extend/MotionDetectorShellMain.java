@@ -884,8 +884,10 @@ public final class MotionDetectorShellMain {
                 control.postDelayed(recordingTailFinished, config.afterSeconds * 1000L);
                 state = "recording_tail";
             } else {
-                state = stopRecording("eligibility_ended", false) ? "prepared" : "recording_detach_pending";
-                if (composer == null && !detachAndCloseReader(false))
+                boolean recordingStopped = stopRecording("eligibility_ended", false);
+                boolean readerDetached = composer == null && detachAndCloseReader(false);
+                state = recordingStopped && readerDetached ? "prepared" : "recording_detach_pending";
+                if (composer == null && !readerDetached)
                     sendError(id, "camera_detach", "shared Surface detach remains pending");
             }
             sendStatus(id, state, "fresh Motion telemetry no longer meets the configured activation mode");
@@ -1941,7 +1943,10 @@ public final class MotionDetectorShellMain {
             if (teardownPending) continuePendingTeardown();
             else if (sameSession(id) && eligible && config != null && config.recordingEnabled)
                 startRecording(id);
-            else if (!eligible && manualCheck == null) detachAndCloseReader(false);
+            else if (sameSession(id) && !eligible && manualCheck == null) {
+                if (recordingTailPending()) finishRecordingTailIfReady(id);
+                else detachAndCloseReader(false);
+            }
             updateCameraDemand();
             return;
         }
@@ -1966,17 +1971,31 @@ public final class MotionDetectorShellMain {
             return;
         }
         String id = sessionId;
+        if (id == null || eligible || !"recording_tail".equals(state)) return;
         boolean stopped = stopRecording("postroll_finished", false);
-        if (stopped && !eligible) stopped = detachAndCloseReader(false);
         if (id == null || !sameSession(id)) return;
-        if (stopped) {
-            state = "prepared";
-            sendStatus(id, state, "recording post-roll completed and encoder detached");
-        } else {
+        if (stopped && finishRecordingTailIfReady(id)) {
+            updateCameraDemand();
+            return;
+        }
+        if (!stopped || recordingTailPending()) {
             state = "recording_teardown_pending";
             sendStatus(id, state, "camera host has not confirmed encoder drain; consumer resources retained");
         }
         updateCameraDemand();
+    }
+
+    private boolean recordingTailPending() {
+        return "recording_tail".equals(state) || "recording_teardown_pending".equals(state);
+    }
+
+    private boolean finishRecordingTailIfReady(String id) {
+        if (!sameSession(id) || eligible || manualCheck != null || !recordingTailPending()
+                || recordingAttached || composer != null || recorder != null
+                || !detachAndCloseReader(false)) return false;
+        state = "prepared";
+        sendStatus(id, state, "recording post-roll completed and encoder detached");
+        return true;
     }
 
     private boolean stopRecording(String reason, boolean surfacesDrained) {
@@ -2003,7 +2022,17 @@ public final class MotionDetectorShellMain {
                 oldComposer.close(() -> control.post(() -> {
                     if (composer != oldComposer || !sameSession(id)) return;
                     if (teardownPending) continuePendingTeardown();
-                    else stopRecording(reason);
+                    else {
+                        boolean stopped = stopRecording(reason);
+                        if (stopped && sameSession(id)) {
+                            if (eligible && config != null && config.recordingEnabled)
+                                startRecording(id);
+                            else if (!eligible && manualCheck == null) {
+                                if (recordingTailPending()) finishRecordingTailIfReady(id);
+                                else detachAndCloseReader(false);
+                            }
+                        }
+                    }
                     updateCameraDemand();
                 }));
                 composer = null;
@@ -2231,17 +2260,21 @@ public final class MotionDetectorShellMain {
             if (sessionId != null) sendError(sessionId, "shared_source_close", summary(error));
             return false;
         }
-        reader = null;
-        surface = null;
-        try { if (oldReader != null) oldReader.close(); }
-        catch (Throwable error) {
+        try {
+            if (oldReader != null) oldReader.close();
+            reader = null;
+        } catch (Throwable error) {
             String id = sessionId;
             if (id != null) sendError(id, "camera_reader_close", summary(error));
+            return false;
         }
-        try { if (oldSurface != null) oldSurface.release(); }
-        catch (Throwable error) {
+        try {
+            if (oldSurface != null) oldSurface.release();
+            surface = null;
+        } catch (Throwable error) {
             String id = sessionId;
             if (id != null) sendError(id, "camera_surface_release", summary(error));
+            return false;
         }
         return true;
     }

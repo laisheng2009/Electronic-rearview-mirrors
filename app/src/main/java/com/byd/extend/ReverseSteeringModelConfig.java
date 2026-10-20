@@ -252,6 +252,9 @@ final class ReverseSteeringModelConfig {
         if ("uked".equals(carType) && "uked".equals(subCarType) && modelValue == 286) {
             return "BYD";
         }
+        if ("uge".equals(carType) && "uge".equals(subCarType) && modelValue == 201) {
+            return "BYD";
+        }
         return null;
     }
 

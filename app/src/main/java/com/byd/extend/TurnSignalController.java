@@ -3354,11 +3354,19 @@ final class TurnSignalController {
     }
 
     private void closeStockAvmNow(String reason, StockAvmOpenState state) {
+        String closeReason = reason == null ? "unknown" : reason;
         int requestId = state.requestId;
         IBinder value = state.shell;
+        if (state.requestScoped && requestId > 0 && value != null
+                && state.cameraEpoch > 0 && state.avmEpoch > 0) {
+            emit("camera_shell_close_owner", "request_id", requestId,
+                    "reason", closeReason,
+                    "camera_shell_epoch", state.cameraEpoch,
+                    "avm_shell_epoch", state.avmEpoch);
+        }
         if (!avmPing(value)) {
             emit("camera_closed", "renderer", "stock_avm_shell",
-                    "view", "unknown", "reason", reason == null ? "unknown" : reason,
+                    "view", "unknown", "reason", closeReason,
                     "request_id", requestId,
                     "camera_shell_epoch", state.cameraEpoch,
                     "avm_shell_epoch", state.avmEpoch,
@@ -3369,12 +3377,12 @@ final class TurnSignalController {
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(StockAvmShellProtocol.DESCRIPTOR);
-            data.writeString(reason == null ? "unknown" : reason);
+            data.writeString(closeReason);
             data.writeInt(requestId);
             requireTransact(value, StockAvmShellProtocol.TX_CLOSE, data, reply);
         } catch (Throwable error) {
             emit("camera_error", "renderer", "stock_avm_shell",
-                    "stage", "close", "request_id", requestId,
+                    "stage", "close", "reason", closeReason, "request_id", requestId,
                     "camera_shell_epoch", state.cameraEpoch,
                     "avm_shell_epoch", state.avmEpoch,
                     "error", summary(error));
@@ -3801,7 +3809,7 @@ final class TurnSignalController {
 
     private StockAvmOpenState beginStockAvmOpen(int requestId) {
         StockAvmOpenState previous;
-        StockAvmOpenState next = new StockAvmOpenState(requestId);
+        StockAvmOpenState next = new StockAvmOpenState(requestId, true);
         synchronized (this) {
             next.cameraEpoch = cameraHelperEpoch;
             next.avmEpoch = avmShellEpoch;
@@ -4095,6 +4103,7 @@ final class TurnSignalController {
 
     private static final class StockAvmOpenState {
         final int requestId;
+        final boolean requestScoped;
         volatile IBinder shell;
         volatile long cameraEpoch;
         volatile long avmEpoch;
@@ -4103,7 +4112,12 @@ final class TurnSignalController {
         final AtomicBoolean published = new AtomicBoolean();
 
         StockAvmOpenState(int requestId) {
+            this(requestId, false);
+        }
+
+        StockAvmOpenState(int requestId, boolean requestScoped) {
             this.requestId = requestId;
+            this.requestScoped = requestScoped;
         }
     }
 

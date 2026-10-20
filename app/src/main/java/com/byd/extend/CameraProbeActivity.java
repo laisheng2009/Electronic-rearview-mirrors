@@ -864,6 +864,8 @@ public final class CameraProbeActivity extends ComponentActivity
     private int activeActivityConsumerGeneration;
     private volatile int[] activeActivityInputGenerations = new int[0];
     private int closingActivityCameraRequestId;
+    private final ActivityCameraCloseIdentity activityCameraCloseIdentity =
+            new ActivityCameraCloseIdentity();
     private boolean activeActivityCameraOpened;
     private boolean activeActivityCameraFresh;
     private boolean automaticPreviewIntent;
@@ -1023,7 +1025,7 @@ public final class CameraProbeActivity extends ComponentActivity
             activeActivityInputGenerations = new int[0];
             activeActivityCameraOpened = false;
             activeActivityCameraFresh = false;
-            closingActivityCameraRequestId = 0;
+            clearActivityCameraCloseIdentity();
             activityClosePending = false;
             activityColdResetInFlight = false;
             activeReverseControllerRequestId = 0;
@@ -1398,6 +1400,8 @@ public final class CameraProbeActivity extends ComponentActivity
         clearRuntimeDialog();
         resumeTabWarmup.clear();
         if (requestedOpen || cameraHandoffPending) closeCamera("activity_destroyed");
+        clearActivityCameraCloseIdentity();
+        activityClosePending = false;
         releaseAllProductionCameraHosts();
         clearResumeAutoPreview();
         stopCalibrationCopies(true);
@@ -1857,7 +1861,8 @@ public final class CameraProbeActivity extends ComponentActivity
         runtimeDialogConfirm = confirm;
         runtimeDialogDismiss = dismiss;
         productionUi.showDialog(new DialogUiState(kind, title, message, null, cancellable, true,
-                true, confirmLabel, dismissLabel, confirm != null, markdown,
+                true, confirmLabel, dismissLabel, confirm != null,
+                markdown == null ? "" : markdown,
                 owner == RuntimeDialogOwner.UPDATE));
         return true;
     }
@@ -9855,7 +9860,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 ? new int[0] : inputGenerations.clone();
         activeActivityCameraOpened = false;
         activeActivityCameraFresh = false;
-        closingActivityCameraRequestId = 0;
+        clearActivityCameraCloseIdentity();
         if (automatic) {
             if (selectedTab == TAB_REVERSE_CAMERAS) {
                 stopReverseCalibrationCopies(true);
@@ -10047,6 +10052,9 @@ public final class CameraProbeActivity extends ComponentActivity
             }
             IBinder current = helper;
             if (closingRequestId > 0 && current != null) {
+                if (activityCameraCloseIdentity.requestId() != closingRequestId) {
+                    captureActivityCameraCloseIdentity(closingRequestId, reason);
+                }
                 final int dormantRequestId = closingRequestId;
                 record("close_requested", "reason", reason,
                         "camera_owner", CameraHelperMain.CAMERA_OWNER_ACTIVITY,
@@ -10074,7 +10082,7 @@ public final class CameraProbeActivity extends ComponentActivity
         if (closingRequestId <= 0) closingRequestId = activeActivityCameraRequestId;
         final int exactClosingRequestId = closingRequestId;
         int closingConsumerGeneration = activeActivityConsumerGeneration;
-        closingActivityCameraRequestId = exactClosingRequestId;
+        captureActivityCameraCloseIdentity(exactClosingRequestId, reason);
         requestedOpen = false;
         stopCalibrationCopies(true);
         clearPreview(reason);
@@ -10103,6 +10111,54 @@ public final class CameraProbeActivity extends ComponentActivity
                 "Camera closed", StatusTone.Warning, false);
         updateControls();
         return wasOpen && current != null;
+    }
+
+    private void captureActivityCameraCloseIdentity(int requestId, String reason) {
+        closingActivityCameraRequestId = requestId;
+        activityCameraCloseIdentity.capture(requestId, reason,
+                activityCameraShellEpoch);
+    }
+
+    private void clearActivityCameraCloseIdentity() {
+        closingActivityCameraRequestId = 0;
+        activityCameraCloseIdentity.clear();
+    }
+
+    private boolean matchesActivityCameraClose(JSONObject event) {
+        return event != null && activityCameraCloseIdentity.matchesTerminal(
+                event.optInt("request_id", 0), event.optString("reason"),
+                event.optLong("camera_shell_epoch", 0),
+                event.optLong("avm_shell_epoch", 0),
+                "stock_avm_shell".equals(event.optString("renderer")));
+    }
+
+    private boolean matchesActivityCameraCloseFailure(JSONObject event) {
+        return event != null && activityCameraCloseIdentity.matchesCloseFailure(
+                event.optInt("request_id", 0), event.optString("reason"),
+                event.optLong("camera_shell_epoch", 0),
+                event.optLong("avm_shell_epoch", 0),
+                "stock_avm_shell".equals(event.optString("renderer")));
+    }
+
+    private void failOwnedActivityCameraClose(int requestId, String failure) {
+        String reason = activityCameraCloseIdentity.reason();
+        if (requestId <= 0 || requestId != activityCameraCloseIdentity.requestId()
+                || reason == null) return;
+        if (CameraTransition.reasonEquals(
+                reason, CameraHelperMain.ACTIVITY_RESUME_COLD_RESET)
+                && activityColdResetInFlight && cameraTransition.matches(reason)) {
+            failActivityColdReset(requestId, failure);
+        } else if (CameraTransition.owns(reason) && cameraTransition.matches(reason)) {
+            failCameraTransition(reason, failure);
+        } else if ("activity_stopped".equals(reason) && activityClosePending) {
+            finishActivityStoppedClose(requestId, failure);
+        } else {
+            record("activity_camera_close", "state", "failed", "reason", reason,
+                    "request_id", requestId, "error", failure);
+            activityClosePending = false;
+            clearActivityCameraCloseIdentity();
+            updateControls();
+        }
     }
 
     private void stopActivityCameraManually(String reason) {
@@ -10138,7 +10194,7 @@ public final class CameraProbeActivity extends ComponentActivity
         transitionTargetTab = -1;
         transitionTargetInputReady = false;
         activityClosePending = false;
-        closingActivityCameraRequestId = 0;
+        clearActivityCameraCloseIdentity();
         record("camera_transition_completed", "token", token, "source", source,
                 "selected_tab", selectedTab);
         if (shouldRenewTransitionInputAfterClose(
@@ -10159,7 +10215,7 @@ public final class CameraProbeActivity extends ComponentActivity
         transitionTargetTab = -1;
         transitionTargetInputReady = false;
         activityClosePending = false;
-        closingActivityCameraRequestId = 0;
+        clearActivityCameraCloseIdentity();
         clearResumeAutoPreview();
         retireAutomaticPreviewInputs();
         record("camera_transition_close_failed", "token", token, "error", failure);
@@ -10392,24 +10448,21 @@ public final class CameraProbeActivity extends ComponentActivity
         String renderer = event.optString("renderer");
         int requestId = event.optInt("request_id", 0);
         if ("stock_avm_shell_died".equals(kind)
-                && (activityClosePending || cameraTransition.pending())
-                && isCurrentReverseBackgroundEvent(true, true,
-                        closingActivityCameraRequestId, activityCameraShellEpoch,
-                        activityAvmShellEpoch, event)) {
+                && activityCameraCloseIdentity.matchesShellDeath(requestId,
+                        event.optLong("camera_shell_epoch", 0),
+                        event.optLong("avm_shell_epoch", 0))) {
             String error = event.optString("error", "stock background closed unexpectedly");
-            String token = cameraTransition.pendingToken();
-            if (activityColdResetInFlight) failActivityColdReset(requestId, error);
-            else if (token != null) failCameraTransition(token, error);
-            else finishActivityStoppedClose(requestId, error);
+            failOwnedActivityCameraClose(requestId, error);
             return true;
         }
-        // A requested whole-composition close still needs its matching shell acknowledgement.
-        if (isMatchingStockShellCloseError(renderer, event.optString("stage"),
-                closingActivityCameraRequestId, requestId)
-                || "camera_closed".equals(kind)
-                && closingActivityCameraRequestId > 0
-                && closingActivityCameraRequestId == requestId
-                && (activityClosePending || cameraTransition.pending())) return false;
+        if (("camera_closed".equals(kind) && matchesActivityCameraClose(event))
+                || ("camera_closed".equals(kind)
+                && !event.optString("error").isEmpty()
+                && matchesActivityCameraCloseFailure(event))
+                || ("camera_error".equals(kind)
+                && isMatchingStockShellCloseError(renderer, event.optString("stage"),
+                        activityCameraCloseIdentity.requestId(), requestId)
+                && matchesActivityCameraCloseFailure(event))) return false;
         if (!isCurrentReverseBackgroundEvent(activePreview == reverseCameraPreview
                         && reverseCameraPreview != null, requestedOpen,
                 activeActivityCameraRequestId, activityCameraShellEpoch,
@@ -10949,7 +11002,8 @@ public final class CameraProbeActivity extends ComponentActivity
             String reason, int requestId, String result, Throwable error) {
         if (CameraTransition.reasonEquals(
                 reason, CameraHelperMain.ACTIVITY_RESUME_COLD_RESET)) {
-            if (!cameraTransition.matches(reason) || !activityColdResetInFlight) {
+            if (!activityCameraCloseIdentity.matchesOperation(requestId, reason)
+                    || !cameraTransition.matches(reason) || !activityColdResetInFlight) {
                 clearStaleColdResetInFlight(reason);
                 record("activity_camera_cold_reset", "state", "ignored",
                         "request_id", requestId, "reason", "stale_reply");
@@ -10962,6 +11016,8 @@ public final class CameraProbeActivity extends ComponentActivity
             if (isDeferredColdResetReply(result)) {
                 activityColdResetInFlight = false;
                 cameraTransition.cancel();
+                activityClosePending = false;
+                clearActivityCameraCloseIdentity();
                 record("activity_camera_cold_reset", "state", "deferred_reverse",
                         "request_id", requestId);
                 return;
@@ -10978,6 +11034,7 @@ public final class CameraProbeActivity extends ComponentActivity
                     return;
                 }
                 closingActivityCameraRequestId = expectedShellRequestId;
+                activityCameraCloseIdentity.updateRequestId(expectedShellRequestId);
                 record("activity_camera_cold_reset", "state", "waiting_shell_close",
                         "request_id", requestId,
                         "shell_request_id", expectedShellRequestId);
@@ -10991,8 +11048,8 @@ public final class CameraProbeActivity extends ComponentActivity
             return;
         }
         if ("activity_stopped".equals(reason)) {
-            if (!activityClosePending || closingActivityCameraRequestId <= 0
-                    || requestId != closingActivityCameraRequestId) {
+            if (!activityClosePending
+                    || !activityCameraCloseIdentity.matchesOperation(requestId, reason)) {
                 record("activity_camera_close", "state", "ignored",
                         "reason", "stale_reply", "request_id", requestId,
                         "expected_request_id", closingActivityCameraRequestId);
@@ -11013,6 +11070,11 @@ public final class CameraProbeActivity extends ComponentActivity
             return;
         }
         if (CameraTransition.owns(reason)) {
+            if (!activityCameraCloseIdentity.matchesOperation(requestId, reason)) {
+                record("camera_transition_ignored", "token", reason,
+                        "source", "stale_close_reply", "request_id", requestId);
+                return;
+            }
             boolean queued = error == null && isStockShellCloseQueued(result);
             boolean successful = error == null && isSuccessfulCameraCloseReply(result);
             if (queued) return;
@@ -11043,7 +11105,7 @@ public final class CameraProbeActivity extends ComponentActivity
         activityColdResetRequired = false;
         activityColdResetFailed = false;
         activityClosePending = false;
-        closingActivityCameraRequestId = 0;
+        clearActivityCameraCloseIdentity();
         retireAutomaticPreviewInputs();
         ensureAutomaticPreviewInputs();
         record("activity_camera_cold_reset", "state", "completed",
@@ -11057,6 +11119,8 @@ public final class CameraProbeActivity extends ComponentActivity
         activityColdResetFailed = true;
         activityColdResetRequired = false;
         cameraTransition.cancel();
+        activityClosePending = false;
+        clearActivityCameraCloseIdentity();
         record("activity_camera_cold_reset", "state", "failed",
                 "request_id", requestId, "error", failure);
         updateControls();
@@ -11068,6 +11132,10 @@ public final class CameraProbeActivity extends ComponentActivity
         // arrived on the serialized executor.
         if (activityColdResetInFlight && !cameraTransition.pending()) {
             activityColdResetInFlight = false;
+            if (activityCameraCloseIdentity.matchesReason(reason)) {
+                activityClosePending = false;
+                clearActivityCameraCloseIdentity();
+            }
             if (shouldRetainColdResetAfterCancel(
                     activityResumed, shutdownRequested)) {
                 activityColdResetRequired = true;
@@ -11091,11 +11159,11 @@ public final class CameraProbeActivity extends ComponentActivity
             record("activity_camera_close", "state", "failed",
                     "reason", "activity_stopped", "request_id", requestId,
                     "error", failure);
-            closingActivityCameraRequestId = 0;
+            clearActivityCameraCloseIdentity();
             updateControls();
             return;
         }
-        closingActivityCameraRequestId = 0;
+        clearActivityCameraCloseIdentity();
         if (!shouldRenewSelectedInputAfterClose(
                 activityDestroyed, shutdownRequested, activityResumed)) return;
         resumeTabWarmup.clear();
@@ -11573,19 +11641,14 @@ public final class CameraProbeActivity extends ComponentActivity
                 // Validate a stock death against the live epoch before retiring that epoch.
                 boolean backgroundHandled = handleReversePreviewBackgroundEvent(json);
                 if (!backgroundHandled && "stock_avm_shell_died".equals(kind)
-                        && isMatchingCurrentAvmShellEpoch(json)
-                        && isMatchingActivityCameraShellEpoch(activityCameraShellEpoch,
-                                json.optLong("camera_shell_epoch", 0))) {
+                        && activityCameraCloseIdentity.matchesShellDeath(
+                                json.optInt("request_id", 0),
+                                json.optLong("camera_shell_epoch", 0),
+                                json.optLong("avm_shell_epoch", 0))) {
                     int deadRequest = json.optInt("request_id", 0);
-                    if (deadRequest > 0 && deadRequest == closingActivityCameraRequestId
-                            && (activityClosePending || cameraTransition.pending())) {
-                        String failure = json.optString("error", "stock renderer died");
-                        String token = cameraTransition.pendingToken();
-                        if (activityColdResetInFlight) failActivityColdReset(deadRequest, failure);
-                        else if (token != null) failCameraTransition(token, failure);
-                        else finishActivityStoppedClose(deadRequest, failure);
-                        backgroundHandled = true;
-                    }
+                    failOwnedActivityCameraClose(deadRequest,
+                            json.optString("error", "stock renderer died"));
+                    backgroundHandled = true;
                 }
                 rememberActivityAvmShellEpoch(json, false);
                 if (backgroundHandled) return;
@@ -11725,20 +11788,10 @@ public final class CameraProbeActivity extends ComponentActivity
                     int requestId = json.optInt("request_id", 0);
                     if (isMatchingStockShellCloseError(
                             json.optString("renderer"), json.optString("stage"),
-                            closingActivityCameraRequestId, requestId)
-                            && isMatchingActivityCameraShellEpoch(activityCameraShellEpoch,
-                                    json.optLong("camera_shell_epoch", 0))
-                            && (json.optLong("avm_shell_epoch", 0) <= 0
-                                    || isMatchingCurrentAvmShellEpoch(json))) {
+                            activityCameraCloseIdentity.requestId(), requestId)
+                            && matchesActivityCameraCloseFailure(json)) {
                         String failure = json.optString("error", "stock shell close failed");
-                        String transitionToken = cameraTransition.pendingToken();
-                        if (transitionToken != null) {
-                            failCameraTransition(transitionToken, failure);
-                        } else if (activityClosePending) {
-                            finishActivityStoppedClose(requestId, failure);
-                        } else {
-                            recordIgnoredActivityCameraEvent(kind, json);
-                        }
+                        failOwnedActivityCameraClose(requestId, failure);
                         return;
                     }
                     boolean accepted = isCurrentActivityCameraEvent(
@@ -11787,7 +11840,7 @@ public final class CameraProbeActivity extends ComponentActivity
                         activeActivityCameraOpened = false;
                         activeActivityCameraFresh = false;
                         activeActivityInputGenerations = new int[0];
-                        closingActivityCameraRequestId = 0;
+                        clearActivityCameraCloseIdentity();
                         pendingCameraViewpoint = -1;
                         pendingCameraDebug = false;
                         stopCalibrationCopies(true);
@@ -11805,10 +11858,16 @@ public final class CameraProbeActivity extends ComponentActivity
                     int requestId = json.optInt("request_id", 0);
                     String renderer = json.optString("renderer");
                     String error = json.optString("error", "");
+                    if (!error.isEmpty() && matchesActivityCameraCloseFailure(json)) {
+                        failOwnedActivityCameraClose(requestId, error);
+                        return;
+                    }
                     if (CameraTransition.reasonEquals(
                             reason, CameraHelperMain.ACTIVITY_RESUME_COLD_RESET)) {
-                        boolean requestMatches = closingActivityCameraRequestId > 0
-                                && closingActivityCameraRequestId == requestId;
+                        boolean requestMatches = activityCameraCloseIdentity.matchesTerminal(
+                                requestId, reason,
+                                json.optLong("camera_shell_epoch", 0),
+                                json.optLong("avm_shell_epoch", 0), true);
                         boolean shellEvent = "stock_avm_shell".equals(renderer)
                                 && "camera_closed".equals(kind);
                         if (!activityColdResetInFlight || !cameraTransition.matches(reason)
@@ -11818,16 +11877,17 @@ public final class CameraProbeActivity extends ComponentActivity
                             return;
                         }
                         boolean cameraEpochMatches = isMatchingActivityCameraShellEpochStrict(
-                                activityCameraShellEpoch,
+                                activityCameraCloseIdentity.cameraShellEpoch(),
                                 json.optLong("camera_shell_epoch", 0));
-                        boolean avmEpochMatches = isMatchingCurrentAvmShellEpoch(json);
+                        boolean avmEpochMatches = activityCameraCloseIdentity.avmShellEpoch()
+                                == json.optLong("avm_shell_epoch", 0);
                         if (!cameraEpochMatches || !avmEpochMatches) {
                             clearStaleColdResetInFlight(reason);
                             recordIgnoredActivityCameraEvent(kind, json);
                         } else if (!isMatchingColdResetShellCallback(
                                 reason, reason, renderer, kind, error,
-                                closingActivityCameraRequestId, requestId,
-                                activityCameraShellEpoch,
+                                activityCameraCloseIdentity.requestId(), requestId,
+                                activityCameraCloseIdentity.cameraShellEpoch(),
                                 json.optLong("camera_shell_epoch", 0))) {
                             failActivityColdReset(requestId,
                                     error == null || error.isEmpty()
@@ -11839,7 +11899,7 @@ public final class CameraProbeActivity extends ComponentActivity
                     }
                     if (isMatchingPendingActivityShellClose(
                             activityClosePending, closingActivityCameraRequestId,
-                            requestId, renderer)) {
+                            requestId, renderer) && matchesActivityCameraClose(json)) {
                         finishActivityStoppedClose(
                                 requestId, error == null || error.isEmpty() ? null : error);
                         return;
@@ -11861,20 +11921,22 @@ public final class CameraProbeActivity extends ComponentActivity
                     if (CameraTransition.owns(reason)) {
                         if ("stock_avm_shell".equals(renderer)) {
                             boolean identityMatches = cameraTransition.matches(reason)
-                                    && closingActivityCameraRequestId > 0
-                                    && closingActivityCameraRequestId == requestId
+                                    && matchesActivityCameraClose(json)
                                     && isMatchingActivityCameraShellEpochStrict(
-                                    activityCameraShellEpoch,
+                                    activityCameraCloseIdentity.cameraShellEpoch(),
                                     json.optLong("camera_shell_epoch", 0))
-                                    && isMatchingCurrentAvmShellEpoch(json);
+                                    && isMatchingActivityAvmShellEpoch(
+                                    activityCameraCloseIdentity.avmShellEpoch(),
+                                    json.optLong("avm_shell_epoch", 0));
                             if (!identityMatches) {
                                 recordIgnoredActivityCameraEvent(kind, json);
                             } else if (isMatchingPendingActivityTransitionShellClose(
                                     cameraTransition.pendingToken(), reason, renderer, kind, error,
-                                    closingActivityCameraRequestId, requestId,
-                                    activityCameraShellEpoch,
+                                    activityCameraCloseIdentity.requestId(), requestId,
+                                    activityCameraCloseIdentity.cameraShellEpoch(),
                                     json.optLong("camera_shell_epoch", 0),
-                                    activityAvmShellEpoch, json.optLong("avm_shell_epoch", 0))) {
+                                    activityCameraCloseIdentity.avmShellEpoch(),
+                                    json.optLong("avm_shell_epoch", 0))) {
                                 finishCameraTransition(reason, "shell_callback");
                             } else {
                                 failCameraTransition(reason, error);
@@ -11891,6 +11953,10 @@ public final class CameraProbeActivity extends ComponentActivity
                                     "reason", reason, "request_id", requestId);
                             return;
                         }
+                        if (!error.isEmpty()) {
+                            failOwnedActivityCameraClose(requestId, error);
+                            return;
+                        }
                         if (shouldArmAutoPreviewAfterCameraClose(reason)) {
                             armResumeAutoPreview();
                         }
@@ -11901,7 +11967,7 @@ public final class CameraProbeActivity extends ComponentActivity
                         activeActivityCameraOpened = false;
                         activeActivityCameraFresh = false;
                         activeActivityInputGenerations = new int[0];
-                        closingActivityCameraRequestId = 0;
+                        clearActivityCameraCloseIdentity();
                         pendingCameraViewpoint = -1;
                         pendingCameraDebug = false;
                         stopCalibrationCopies(true);
@@ -12184,6 +12250,10 @@ public final class CameraProbeActivity extends ComponentActivity
         cameraShellRecoveryPending = !reverseFailClosed;
         boolean previewClaimed = requestedOpen || cameraHandoffPending;
         cameraTransition.cancel();
+        if (activityCameraCloseIdentity.ownsCameraShellEpoch(shellEpoch)) {
+            activityClosePending = false;
+            clearActivityCameraCloseIdentity();
+        }
         if (reverseFailClosed) clearReverseShellFailureState();
         if (cameraPreview != null) cameraPreview.removeCallbacks(finishCameraHandoff);
         if (debugPreview != null) debugPreview.removeCallbacks(finishCameraHandoff);
@@ -12221,10 +12291,20 @@ public final class CameraProbeActivity extends ComponentActivity
     private void rememberActivityAvmShellEpoch(
             JSONObject event, boolean acceptedCameraOpen) {
         if (event == null) return;
+        String kind = event.optString("kind");
+        String renderer = event.optString("renderer");
+        int requestId = event.optInt("request_id", 0);
+        long cameraEpoch = event.optLong("camera_shell_epoch", 0);
+        long avmEpoch = event.optLong("avm_shell_epoch", 0);
+        if ("camera_shell_close_owner".equals(kind)) {
+            // The controller emits this from the exact request-scoped state being closed,
+            // including cleanup for an open canceled before it can publish as camera_opened.
+            activityCameraCloseIdentity.bindStockCloseOwner(
+                    requestId, event.optString("reason"), cameraEpoch, avmEpoch);
+        }
         activityAvmShellEpoch = nextActivityAvmShellEpoch(
                 activityAvmShellEpoch,
-                event.optString("kind"), event.optString("renderer"),
-                event.optLong("avm_shell_epoch", 0), acceptedCameraOpen);
+                kind, renderer, avmEpoch, acceptedCameraOpen);
     }
 
     static long nextActivityAvmShellEpoch(
@@ -12252,7 +12332,7 @@ public final class CameraProbeActivity extends ComponentActivity
     private void clearReverseShellFailureState() {
         clearResumeAutoPreview();
         activityClosePending = false;
-        closingActivityCameraRequestId = 0;
+        clearActivityCameraCloseIdentity();
         activityColdResetRequired = false;
         activityColdResetInFlight = false;
         activityColdResetFailed = false;
@@ -12705,7 +12785,13 @@ public final class CameraProbeActivity extends ComponentActivity
 
     private boolean isCurrentActivityCameraTerminalEvent(
             int eventRequestId, JSONObject event) {
-        if (!isCurrentActivityCameraTerminalEvent(eventRequestId)) return false;
+        if (!requestedOpen) {
+            return matchesActivityCameraClose(event)
+                    || (!event.optString("error").isEmpty()
+                    && matchesActivityCameraCloseFailure(event));
+        }
+        if (activeActivityCameraRequestId <= 0
+                || activeActivityCameraRequestId != eventRequestId) return false;
         if (!isMatchingActivityCameraShellEpoch(
                 activityCameraShellEpoch, event.optLong("camera_shell_epoch", 0))) {
             return false;
