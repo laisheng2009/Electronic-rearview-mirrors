@@ -64,6 +64,7 @@ public final class MotionDetectorShellMain {
                 Context system = (Context) activityThreadClass.getMethod("getSystemContext")
                         .invoke(activityThread);
                 if (system == null) throw new IllegalStateException("system context unavailable");
+                CameraShellMain.initializeSystemFontsForShell();
                 MotionDetectorShellMain daemon = new MotionDetectorShellMain(appUid, identity, system);
                 System.out.println("motion_native_environment LD_LIBRARY_PATH=" + System.getenv("LD_LIBRARY_PATH")
                         + " java.library.path=" + System.getProperty("java.library.path"));
