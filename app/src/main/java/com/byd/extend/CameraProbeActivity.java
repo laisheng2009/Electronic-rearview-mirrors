@@ -5021,7 +5021,7 @@ public final class CameraProbeActivity extends ComponentActivity
             if (CameraFrameRate.load(preferences) == fps) return;
             preferences.edit().putInt(CameraFrameRate.PREF, fps).apply();
             record("camera_frame_rate_selected", "requested_fps", fps);
-            CameraHelperService.cameraSettingsChanged(this);
+            // The preference sync reconnects sources without closing unchanged consumer windows.
         }
     }
 

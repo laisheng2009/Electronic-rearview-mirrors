@@ -49,6 +49,20 @@ final class CameraRuntimeHost {
     private final MotionWakeOwnership motionWake = new MotionWakeOwnership();
     private JSONObject motionPower, motionLock, motionDisplay;
     private final Runnable discoveryRetry = this::retryCameraDiscovery;
+    private final Runnable applyCameraFrameRate = this::applyCameraFrameRateOnHandler;
+
+    private void applyCameraFrameRateOnHandler() {
+        if (lifetime.stopped()) return;
+        int oldEpoch = helper.motionProducerEpoch();
+        helper.applyCameraFrameRate();
+        int newEpoch = helper.motionProducerEpoch();
+        if (motionSession != null && oldEpoch > 0 && newEpoch > 0 && oldEpoch != newEpoch) {
+            boolean rebound = motionWake.rebindProducerEpoch(motionSession, oldEpoch, newEpoch);
+            event("motion_wake_producer_epoch_rebound", "session", motionSession,
+                    "old_producer_epoch", oldEpoch, "producer_epoch", newEpoch,
+                    "wake_rebound", rebound);
+        }
+    }
     private IBinder cameraEndpointFor(IBinder owner) { return new Binder() {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
             if (Binder.getCallingUid() != appUid) throw new SecurityException("camera caller denied");
@@ -106,7 +120,7 @@ final class CameraRuntimeHost {
                     boolean initialAppSnapshot = !appSettingsReceived;
                     Bundle changes = context.settings.reconcile(settings, initialAppSnapshot);
                     appSettingsReceived = true;
-                    helper.applyCameraFrameRate();
+                    scheduleCameraFrameRateApply();
                     if (!lifetime.started()) {
                         visible = initialVisible; preview = initialPreview;
                         context.uiVisible = visible;
@@ -125,7 +139,7 @@ final class CameraRuntimeHost {
                 case SETTINGS:
                     context.overlayAllowed = flag;
                     Bundle unsaved = context.settings.updateFromClient(settings);
-                    helper.applyCameraFrameRate();
+                    scheduleCameraFrameRateApply();
                     if (!"sync".equals(scope)) applySettings(scope);
                     return unsaved;
                 case ACK_SETTINGS: context.settings.acknowledge(settings); break;
@@ -293,6 +307,11 @@ final class CameraRuntimeHost {
                 == CameraHelperMain.DiscoveryResult.RETRYABLE_FAILURE) {
             handler.postDelayed(discoveryRetry, 3_000);
         }
+    }
+
+    private void scheduleCameraFrameRateApply() {
+        handler.removeCallbacks(applyCameraFrameRate);
+        handler.post(applyCameraFrameRate);
     }
 
     private void setVisibility(boolean next) {
@@ -520,6 +539,7 @@ final class CameraRuntimeHost {
             clearMotion();
             unlinkClient();
             handler.removeCallbacks(discoveryRetry);
+            handler.removeCallbacks(applyCameraFrameRate);
             if (reverse != null) reverse.shutdown();
             if (mirror != null) mirror.shutdown();
             if (blind != null) blind.shutdown();

@@ -90,6 +90,51 @@ public final class CameraOutputCalculationTest {
         assertEquals(0, report.producerTimestampRepeated);
     }
 
+    @Test public void fpsMeasurementWaitsForNewBuffersAndDoesNotCountTheReconnectGap() {
+        long second = 1_000_000_000L;
+        DirectCameraSourceHub.FpsMeasurementWindow window =
+                new DirectCameraSourceHub.FpsMeasurementWindow(1, 15, second);
+        assertFalse(window.start(2 * second, 0));
+        assertFalse(window.start(second - 1, 42));
+        assertEquals(0, window.startedNs);
+        assertTrue(window.start(4 * second, 42));
+        assertFalse(window.start(5 * second, 43));
+        assertEquals(4 * second, window.startedNs);
+        assertEquals(19 * second, window.untilNs);
+        assertFalse(DirectCameraSourceHub.isFpsStatsWindowActive(
+                3 * second, 1, 1, window.startedNs, window.untilNs));
+        assertTrue(DirectCameraSourceHub.isFpsStatsWindowActive(
+                18 * second, 1, 1, window.startedNs, window.untilNs));
+        assertFalse(DirectCameraSourceHub.isFpsStatsWindowActive(
+                19 * second, 1, 1, window.startedNs, window.untilNs));
+        assertFalse(DirectCameraSourceHub.isFpsStatsWindowActive(
+                18 * second, 1, 2, window.startedNs, window.untilNs));
+    }
+
+    @Test public void fpsCountsRejectRepeatedAndInvalidProducerTimestampsAcrossReports() {
+        DirectCameraSourceHub.StatsWindow stats = new DirectCameraSourceHub.StatsWindow();
+        assertNull(sourceFrame(stats, 1_000, 10));
+        assertNull(sourceFrame(stats, 2_000, 10));
+        assertNull(sourceFrame(stats, 3_000, 0));
+        DirectCameraSourceHub.Stats first = sourceFrame(stats, 6_000, 11);
+        assertEquals(4, first.callbacks);
+        assertEquals(1, first.producerTimestampRepeated);
+        assertEquals(1, first.producerTimestampInvalid);
+        assertNull(sourceFrame(stats, 7_000, 11));
+        DirectCameraSourceHub.Stats second = sourceFrame(stats, 11_000, 12);
+        assertEquals(2, second.callbacks);
+        assertEquals(1, second.producerTimestampRepeated);
+        assertEquals(0, second.producerTimestampInvalid);
+        assertEquals(4_000_000_000L, second.callbackGapMaxNs);
+    }
+
+    private static DirectCameraSourceHub.Stats sourceFrame(
+            DirectCameraSourceHub.StatsWindow stats, long ms, long timestamp) {
+        return stats.record(ms * 1_000_000L, timestamp, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                null, null, 0, 1920, 1300);
+    }
+
     private static DirectCameraSourceHub.Stats outputFrame(
             DirectCameraSourceHub.StatsWindow stats, long ms) {
         long ns = ms * 1_000_000L;

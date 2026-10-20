@@ -36,4 +36,23 @@ public class MotionWakeOwnershipTest {
         assertTrue(wake.consume("a", 7, true, false, 400));
         assertFalse(wake.takeRetainedForPowerOn(8));
     }
+
+    @Test public void producerReconnectRebindsPendingWakeWithoutExtendingDeadline() {
+        MotionWakeOwnership wake = new MotionWakeOwnership();
+        wake.arm("session", 7, 100);
+
+        assertTrue(wake.rebindProducerEpoch("session", 7, 8));
+        assertFalse(wake.rebindProducerEpoch("other", 8, 9));
+        assertFalse(wake.consume("session", 8, true, false, 10_101));
+    }
+
+    @Test public void producerReconnectRebindsConsumedWakeForSameSession() {
+        MotionWakeOwnership wake = new MotionWakeOwnership();
+        wake.arm("session", 7, 100);
+        assertTrue(wake.consume("session", 7, true, false, 200));
+
+        assertTrue(wake.rebindProducerEpoch("session", 7, 8));
+        assertTrue(wake.takeRetainedForPowerOn(8));
+        assertFalse(wake.takeRetainedForPowerOn(8));
+    }
 }

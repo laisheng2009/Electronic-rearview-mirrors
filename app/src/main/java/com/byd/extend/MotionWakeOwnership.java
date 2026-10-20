@@ -5,6 +5,7 @@ final class MotionWakeOwnership {
     private String session;
     private int producerEpoch;
     private long expiresAt;
+    private String retainedSession;
     private int retainedProducerEpoch;
 
     void arm(String session, int producerEpoch, long nowMs) {
@@ -20,8 +21,26 @@ final class MotionWakeOwnership {
                 && this.producerEpoch == producerEpoch && powerOff && !quickboot
                 && nowMs <= expiresAt;
         clearPending();
+        retainedSession = matches ? session : null;
         retainedProducerEpoch = matches ? producerEpoch : 0;
         return matches;
+    }
+
+    /** Rebinds only this session's live wake identity; the original deadline is unchanged. */
+    boolean rebindProducerEpoch(String session, int oldEpoch, int newEpoch) {
+        if (session == null || oldEpoch <= 0 || newEpoch <= 0) return false;
+        boolean rebound = false;
+        if (this.session != null && this.session.equals(session)
+                && producerEpoch == oldEpoch) {
+            producerEpoch = newEpoch;
+            rebound = true;
+        }
+        if (retainedSession != null && retainedSession.equals(session)
+                && retainedProducerEpoch == oldEpoch) {
+            retainedProducerEpoch = newEpoch;
+            rebound = true;
+        }
+        return rebound;
     }
 
     boolean takeRetainedForPowerOn(int producerEpoch) {
@@ -30,6 +49,6 @@ final class MotionWakeOwnership {
         return matches;
     }
 
-    void clearPending() { session = null; expiresAt = 0; }
-    void clear() { clearPending(); retainedProducerEpoch = 0; }
+    void clearPending() { session = null; producerEpoch = 0; expiresAt = 0; }
+    void clear() { clearPending(); retainedSession = null; retainedProducerEpoch = 0; }
 }

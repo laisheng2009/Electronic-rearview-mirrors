@@ -84,6 +84,10 @@ final class CameraFramePump {
                 | (Math.min(sourceHeight, height) & 0xffffffffL);
     }
 
+    void finishDiagnostics(Runnable action) {
+        if (!closed) handler.post(action);
+    }
+
     private void initialize() {
         context = EGL14.eglCreateContext(display, config, sharedContext,
                 new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, glVersion, EGL14.EGL_NONE}, 0);
@@ -133,7 +137,10 @@ final class CameraFramePump {
             try {
                 timestamp = input.getTimestamp();
                 // A late callback can find only the placeholder left by releaseTexImage().
-                if (timestamp <= 0 || timestamp == lastFrameTimestamp) return;
+                if (timestamp <= 0 || timestamp == lastFrameTimestamp) {
+                    listener.acquired(started, timestamp, updated - started, 0, count);
+                    return;
+                }
                 lastFrameTimestamp = timestamp;
                 input.getTransformMatrix(matrix);
                 if (!matrixReported) {
