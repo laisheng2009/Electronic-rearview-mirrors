@@ -140,6 +140,8 @@ final class CameraHelperMain {
         private Surface[] pendingReversePreviewSurfaces = new Surface[0];
         private int pendingReversePreviewRequestId;
 
+        private final Context renderingContext;
+
         HelperBinder(Context context, Consumer<String> logSink) {
             this(context, new Handler(Looper.getMainLooper()), logSink);
         }
@@ -149,6 +151,7 @@ final class CameraHelperMain {
                 throw new IllegalArgumentException("callbackHandler is null");
             }
             this.callbackHandler = callbackHandler;
+            this.renderingContext = context;
             this.logSink = logSink;
             counters = context.getSharedPreferences(COUNTER_PREFS, Context.MODE_PRIVATE);
             settings = context.getSharedPreferences("settings", Context.MODE_PRIVATE);
@@ -2251,7 +2254,7 @@ final class CameraHelperMain {
                 PersistentCameraPort port = new ReflectivePersistentCameraPort(opened);
                 openedPort = port;
                 int openedHubGeneration = ++sourceHubGeneration;
-                openedHub = DirectCameraSourceHub.create(new DirectCameraSourceHub.Listener() {
+                openedHub = DirectCameraSourceHub.create(renderingContext, new DirectCameraSourceHub.Listener() {
                     @Override
                     public void onConsumerFailure(
                             Surface failedSurface, int index, int failedRequestId,

@@ -109,7 +109,7 @@ public final class MotionDetectorShellMain {
     private MotionMediaLibrary mediaLibrary;
     private MotionMediaIndexBridge mediaBridge;
     private MotionVideoRecorder recorder;
-    private MotionGpuComposer composer;
+    private MotionRecordingOutput composer;
     private PowerManager.WakeLock wakeLock;
     private int recordingGeneration;
     private int recordingRequestId;
@@ -170,6 +170,7 @@ public final class MotionDetectorShellMain {
     private Surface surface;
     private long frameNumber;
     private final FramePerformance framePerformance = new FramePerformance();
+    private final FrameCadence frameCadence = new FrameCadence();
     private final int[] loggedFrameLayout = new int[8];
     private String lastReportedDetectorState = "";
     private boolean firstInferenceReceived;
@@ -812,6 +813,10 @@ public final class MotionDetectorShellMain {
                     "release", Build.VERSION.RELEASE, "display", Build.DISPLAY,
                     "incremental", Build.VERSION.INCREMENTAL, "model", Build.MODEL);
             setup.prepare();
+            ApplicationInfo owner = systemContext.getPackageManager().getApplicationInfo(
+                    MotionShellMediaContext.OWNER_PACKAGE, 0);
+            MotionYuvPacker.loadNative(new File(owner.nativeLibraryDir, "libmotion_yuv.so").getPath());
+            logEvent("motion_packer_ready", id, "implementation", "native_nv12");
             assets = setup.assets;
             sensitivity = setup.sensitivity;
             setup.stage = "native_init";
@@ -901,6 +906,7 @@ public final class MotionDetectorShellMain {
         if (attached || reader != null || surface != null)
             throw new IllegalStateException("motion Surface attachment is in an uncertain state");
         framePerformance.reset();
+        frameCadence.reset();
         java.util.Arrays.fill(loggedFrameLayout, 0);
         reader = ImageReader.newInstance(MotionDetectorProtocol.INPUT_WIDTH,
                 MotionDetectorProtocol.INPUT_HEIGHT, ImageFormat.YUV_420_888, 2);
@@ -945,6 +951,8 @@ public final class MotionDetectorShellMain {
         try {
             check = manualCheck;
             if (check != null && check.finishing) return;
+            // Drain skipped Images without packing, inference, or holding up the producer.
+            if (!frameCadence.take(SystemClock.elapsedRealtimeNanos())) return;
             if (frame.getFormat() != ImageFormat.YUV_420_888
                     || frame.getWidth() != MotionDetectorProtocol.INPUT_WIDTH
                     || frame.getHeight() != MotionDetectorProtocol.INPUT_HEIGHT)
@@ -1057,6 +1065,19 @@ public final class MotionDetectorShellMain {
         framePerformance.reset();
     }
 
+    /** Start-to-start limit on the control thread; missed slots never create a catch-up burst. */
+    static final class FrameCadence {
+        private long nextStartNs;
+
+        boolean take(long nowNs) {
+            if (nowNs < nextStartNs) return false;
+            nextStartNs = nowNs + 400_000_000L;
+            return true;
+        }
+
+        void reset() { nextStartNs = 0L; }
+    }
+
     /** Control-thread measurements of completed pack/detect calls, not process CPU time. */
     static final class FramePerformance {
         long frames, startNs, endNs;
@@ -1119,6 +1140,7 @@ public final class MotionDetectorShellMain {
             if (operation == MotionDetectorProtocol.CAMERA_RECORD_ATTACH) {
                 data.writeTypedArray(recording, 0);
                 data.writeInt(requestId);
+                composer.writeToParcel(data);
             }
             // Only an attempted transaction can leave a remote binding after an uncertain reply.
             if (operation == MotionDetectorProtocol.CAMERA_BIND_WORKER) workerBound = true;
@@ -1811,7 +1833,7 @@ public final class MotionDetectorShellMain {
             if (!recorder.isBuffering() || recorder.inputSurface() == null)
                 throw new IllegalStateException("hardware video encoder did not start");
             Surface encoderSurface = recorder.retainInputSurface();
-            composer = new MotionGpuComposer(mediaContext,
+            composer = new MotionRecordingOutput(
                     recorder.width(), recorder.height(), recordingConfig.cameraOrder, id,
                     recorder.frameTimestamp(),
                     detail -> control.post(() -> {
@@ -1944,7 +1966,7 @@ public final class MotionDetectorShellMain {
             }
         } else if (surfacesDrained) recordingAttached = false;
 
-        MotionGpuComposer oldComposer = composer;
+        MotionRecordingOutput oldComposer = composer;
         if (oldComposer != null) {
             try {
                 oldComposer.close(() -> control.post(() -> {

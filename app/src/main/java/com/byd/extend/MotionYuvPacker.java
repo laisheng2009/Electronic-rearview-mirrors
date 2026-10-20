@@ -4,7 +4,14 @@ import java.nio.ByteBuffer;
 
 /** Packs real YUV_420_888 plane views into the native library's NV12 byte layout. */
 final class MotionYuvPacker {
+    private static volatile boolean nativeLoaded;
     private MotionYuvPacker() {}
+
+    static synchronized void loadNative(String libraryPath) {
+        if (nativeLoaded) return;
+        System.load(libraryPath);
+        nativeLoaded = true;
+    }
 
     static int outputSize(int width, int height) {
         requireEvenDimensions(width, height);
@@ -21,6 +28,13 @@ final class MotionYuvPacker {
         validate(u, width / 2, height / 2);
         validate(v, width / 2, height / 2);
 
+        if (nativeLoaded && y.buffer.isDirect() && u.buffer.isDirect() && v.buffer.isDirect()) {
+            packDirect(y.buffer, y.buffer.position(), y.rowStride, y.pixelStride,
+                    u.buffer, u.buffer.position(), u.rowStride, u.pixelStride,
+                    v.buffer, v.buffer.position(), v.rowStride, v.pixelStride,
+                    width, height, output);
+            return;
+        }
         copyPlane(y, width, height, output, 0, 1);
         int chromaOffset = width * height;
         for (int row = 0; row < height / 2; row++) {
@@ -31,6 +45,12 @@ final class MotionYuvPacker {
             }
         }
     }
+
+    private static native void packDirect(
+            ByteBuffer y, int yOffset, int yRow, int yPixel,
+            ByteBuffer u, int uOffset, int uRow, int uPixel,
+            ByteBuffer v, int vOffset, int vRow, int vPixel,
+            int width, int height, byte[] output);
 
     private static void copyPlane(Plane plane, int width, int height, byte[] output,
             int outputOffset, int outputPixelStride) {

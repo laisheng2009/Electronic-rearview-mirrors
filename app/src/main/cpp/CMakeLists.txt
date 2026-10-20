@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(motion_yuv LANGUAGES CXX)
+add_library(motion_yuv SHARED motion_yuv.cpp)
+target_compile_features(motion_yuv PRIVATE cxx_std_17)
+target_compile_options(motion_yuv PRIVATE -O3 -Wall -Wextra -Werror)

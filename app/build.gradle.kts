@@ -7,6 +7,14 @@ plugins {
 android {
     namespace = "com.byd.extend"
     compileSdk = 35
+    ndkVersion = "30.0.15729638"
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "4.1.2"
+        }
+    }
 
     buildFeatures {
         buildConfig = true
@@ -14,6 +22,8 @@ android {
     }
 
     packaging {
+        // The shell worker loads our JNI library by the installed package's nativeLibraryDir.
+        jniLibs.useLegacyPackaging = true
         // BC modules duplicate this Java 9 OSGi descriptor; Android does not use it.
         resources.excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         resources.merges += "META-INF/LICENSE.md"
@@ -25,6 +35,7 @@ android {
         targetSdk = 29
         versionCode = 120
         versionName = "1.8.0"
+        externalNativeBuild { cmake { arguments += "-DANDROID_STL=none" } }
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",

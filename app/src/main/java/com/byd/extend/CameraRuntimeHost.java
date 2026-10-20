@@ -176,8 +176,13 @@ final class CameraRuntimeHost {
         android.view.Surface[] recording = operation == MOTION_RECORD_ATTACH
                 ? data.createTypedArray(android.view.Surface.CREATOR) : null;
         int requestId = operation == MOTION_RECORD_ATTACH ? data.readInt() : 0;
+        MotionRecordingOutput recordingOutput = null;
         boolean[] consumed = {false};
         try {
+            if (operation == MOTION_RECORD_ATTACH) {
+                recordingOutput = MotionRecordingOutput.readFromParcel(data, session, recording);
+                recordingOutput.register();
+            }
             if (!MotionDetectorProtocol.validSession(session) || data.dataAvail() != 0)
                 throw new IllegalArgumentException("invalid motion session");
             call(() -> {
@@ -234,6 +239,7 @@ final class CameraRuntimeHost {
             if (operation == MOTION_BIND_WORKER) reply.writeString(motionSourceEpoch);
             return operation;
         } finally {
+            if (recordingOutput != null) recordingOutput.unregister();
             if (!consumed[0]) {
                 if (detector != null) detector.release();
                 if (recording != null) for (android.view.Surface surface : recording)

@@ -9189,7 +9189,7 @@ public final class CameraProbeActivity extends ComponentActivity
                 calibrationDewarpSwitch != null && calibrationDewarpSwitch.isChecked(),
                 calibrationPreview != null && calibrationPreview.usesRawFallback());
         TextureView source = ui.copyRawMirror
-                ? calibrationRawMirror : calibrationPreview;
+                ? calibrationRawMirror : calibrationPreview.textureView();
         boolean sourceAvailable = source != null && source.isAvailable();
         int width = sourceAvailable ? source.getWidth() : 0;
         int height = sourceAvailable ? source.getHeight() : 0;

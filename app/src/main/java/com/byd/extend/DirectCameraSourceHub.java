@@ -95,18 +95,22 @@ final class DirectCameraSourceHub
     private Handler coordinatorHandler;
     private EGLDisplay display = EGL14.EGL_NO_DISPLAY;
     private EGLConfig config;
+    private EGLContext sharedContext = EGL14.EGL_NO_CONTEXT;
+    private int sharedGlVersion = 3;
+    private final android.content.Context renderingContext;
     private volatile boolean closed;
     private volatile long fpsStatsWindowId;
     private volatile long fpsStatsWindowStartedNs;
     private volatile long fpsStatsWindowUntilNs;
     private volatile int fpsStatsRequestedRate;
 
-    private DirectCameraSourceHub(Listener listener) {
+    private DirectCameraSourceHub(android.content.Context renderingContext, Listener listener) {
+        this.renderingContext = renderingContext;
         this.listener = listener;
     }
 
-    static DirectCameraSourceHub create(Listener listener) throws Exception {
-        DirectCameraSourceHub result = new DirectCameraSourceHub(listener);
+    static DirectCameraSourceHub create(android.content.Context context, Listener listener) throws Exception {
+        DirectCameraSourceHub result = new DirectCameraSourceHub(context, listener);
         result.coordinatorThread.start();
         result.coordinatorHandler = new Handler(result.coordinatorThread.getLooper());
         try {
@@ -179,6 +183,9 @@ final class DirectCameraSourceHub
                         }
                     }
                     SourceWorker sourceWorker = worker(indexes[i]);
+                    MotionRecordingOutput recording = MotionRecordingOutput.find(surfaces[i]);
+                    if (recording != null)
+                        recording.prepare(renderingContext, sharedContext, sharedGlVersion);
                     Target target = sourceWorker.attachTarget(
                             surfaces[i], indexes[i], requestId, producerEpoch,
                             initialActive == null || initialActive[i], initialActive != null);
@@ -201,6 +208,11 @@ final class DirectCameraSourceHub
                 }
                 if (error instanceof Exception) throw (Exception) error;
                 throw new Exception(error);
+            } finally {
+                for (Surface surface : surfaces) {
+                    MotionRecordingOutput recording = MotionRecordingOutput.find(surface);
+                    if (recording != null) recording.closeUnused();
+                }
             }
             return null;
         });
@@ -318,10 +330,21 @@ final class DirectCameraSourceHub
         require(EGL14.eglChooseConfig(display, attributes, 0, configs, 0, 1, count, 0)
                 && count[0] > 0, "EGL config unavailable");
         config = configs[0];
+        sharedContext = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
+                new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, sharedGlVersion, EGL14.EGL_NONE}, 0);
+        if (sharedContext == EGL14.EGL_NO_CONTEXT) {
+            EGL14.eglGetError();
+            sharedGlVersion = 2;
+            sharedContext = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
+                    new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, sharedGlVersion, EGL14.EGL_NONE}, 0);
+        }
+        require(sharedContext != EGL14.EGL_NO_CONTEXT, "shared camera context failed");
     }
 
     private void releaseDisplay() {
         if (display == EGL14.EGL_NO_DISPLAY) return;
+        if (sharedContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, sharedContext);
+        sharedContext = EGL14.EGL_NO_CONTEXT;
         EGL14.eglTerminate(display);
         display = EGL14.EGL_NO_DISPLAY;
         config = null;
@@ -481,6 +504,7 @@ final class DirectCameraSourceHub
                 throws Exception {
             return call(() -> {
                 require(value != null && value.isValid(), "downstream Surface is invalid");
+                MotionRecordingOutput recording = MotionRecordingOutput.find(value);
                 // Lease first: the owner must not abandon its TextureView during EGL attachment.
                 CameraGpuOutput.Binding mapping = CameraGpuOutput.bind(value, () -> postCoordinator(() -> {
                     try {
@@ -491,9 +515,10 @@ final class DirectCameraSourceHub
                 }));
                 EGLSurface eglSurface;
                 try {
-                    eglSurface = EGL14.eglCreateWindowSurface(display, config, value,
-                            new int[]{EGL14.EGL_NONE}, 0);
-                    require(eglSurface != EGL14.EGL_NO_SURFACE, "downstream EGL surface failed");
+                    eglSurface = recording == null ? EGL14.eglCreateWindowSurface(display, config, value,
+                            new int[]{EGL14.EGL_NONE}, 0) : EGL14.EGL_NO_SURFACE;
+                    require(recording != null || eglSurface != EGL14.EGL_NO_SURFACE,
+                            "downstream EGL surface failed");
                 } catch (Throwable failure) {
                     if (mapping != null) mapping.close();
                     throw failure;
@@ -501,6 +526,8 @@ final class DirectCameraSourceHub
                 Target target = new Target(
                         this, value, targetIndex, eglSurface, requestId, producerEpoch);
                 target.mapping = mapping;
+                target.recording = recording;
+                if (recording != null) recording.retain();
                 target.active = initialActive;
                 // Preserve the timestamps previously enabled by the post-attach activation call.
                 target.timestampFrames = activitySpecified && initialActive
@@ -539,6 +566,11 @@ final class DirectCameraSourceHub
 
         private void destroyTarget(Target target) {
             target.retiring = true;
+            if (target.recording != null) {
+                target.recording.detach(target.index);
+                target.recording = null;
+                return;
+            }
             makeCurrent(idleSurface);
             // Detach is the teardown barrier; do not drain GPU work on the frame path.
             GLES20.glFinish();
@@ -601,14 +633,9 @@ final class DirectCameraSourceHub
         }
 
         private void initialize() {
-            context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
+            glVersion = sharedGlVersion;
+            context = EGL14.eglCreateContext(display, config, sharedContext,
                     new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, glVersion, EGL14.EGL_NONE}, 0);
-            if (context == EGL14.EGL_NO_CONTEXT) {
-                EGL14.eglGetError();
-                glVersion = 2;
-                context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
-                        new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, glVersion, EGL14.EGL_NONE}, 0);
-            }
             require(context != EGL14.EGL_NO_CONTEXT, "EGL context failed");
             idleSurface = EGL14.eglCreatePbufferSurface(display, config,
                     new int[]{EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE}, 0);
@@ -664,6 +691,12 @@ final class DirectCameraSourceHub
         }
 
         private void updateTargetSize(Target target) {
+            if (target.recording != null) {
+                MotionCompositionLayout.Rect cell = MotionCompositionLayout.cameraRectForCell(
+                        0, target.recording.width, target.recording.height);
+                target.width = cell.width(); target.height = cell.height();
+                return;
+            }
             if (target.mapping != null) {
                 // Managed buffers keep their quality size across view resize; a new input rebinds it.
                 target.width = target.mapping.width;
@@ -733,12 +766,21 @@ final class DirectCameraSourceHub
             if (closed || released || sourceFailureReported.get() || pump == null) return;
             int slot = pump.mailbox.acquire();
             if (slot < 0) return;
+            boolean transferred = false;
             try {
                 renderSnapshot(slot, callbackStartedNs, frameSignals, queueDelayNs);
+                if (!sourceFailureReported.get()) for (Target target : targets) {
+                    if (target.recording == null || !target.active || target.retiring) continue;
+                    makeCurrent(idleSurface);
+                    pump.transferRead(slot);
+                    transferred = target.recording.offer(index, pump, slot);
+                    if (!transferred) pump.awaitRead(slot);
+                    break;
+                }
             } catch (Throwable error) {
                 reportSourceFailure(error);
             } finally {
-                try { pump.releaseRead(slot); }
+                try { if (!transferred) pump.releaseRead(slot); }
                 catch (Throwable error) { reportSourceFailure(error); }
             }
         }
@@ -775,6 +817,7 @@ final class DirectCameraSourceHub
             int targetDimensionCount = 0;
             for (int i = targets.size() - 1; i >= 0; i--) {
                 Target target = targets.get(i);
+                if (target.recording != null) continue;
                 if (!shouldRenderTarget(index, target.index, target.active)) continue;
                 try {
                     DrawTiming timing = draw(target, acquiredFrameTimestampNanos);
@@ -955,6 +998,7 @@ final class DirectCameraSourceHub
                         target.mesh.vertices.capacity() / 4, target.mesh.generationNs);
                 target.acknowledgedToken = rendered.token;
             }
+            if (target.mapping != null) target.mapping.frame(acquiredFrameTimestampNanos);
             if (swapWaitNs >= TimeUnit.MILLISECONDS.toNanos(100)
                     && swapStartedNs - target.lastStallReportNs >= STALL_REPORT_INTERVAL_NS) {
                 target.lastStallReportNs = swapStartedNs;
@@ -1503,6 +1547,7 @@ final class DirectCameraSourceHub
         boolean timestampFrames;
         boolean retiring;
         CameraGpuOutput.Binding mapping;
+        MotionRecordingOutput recording;
         final MappingMesh mesh = new MappingMesh();
         final DrawTiming timing = new DrawTiming();
         long acknowledgedToken = -1;

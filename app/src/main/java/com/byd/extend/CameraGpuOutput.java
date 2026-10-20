@@ -20,6 +20,7 @@ final class CameraGpuOutput extends Binder {
     private static final int UPDATE = BIND + 3;
     private static final int RELEASE = BIND + 4;
     private static final int STOCK_CANVAS = BIND + 5;
+    private static final int FRAME = BIND + 6;
     private static final Map<Surface, Endpoint> OUTPUTS = new WeakHashMap<>();
     private static final class Endpoint {
         final IBinder binder;
@@ -36,6 +37,7 @@ final class CameraGpuOutput extends Binder {
     private Runnable stopped;
     private boolean released;
     private java.util.function.BiConsumer<Integer, Integer> stockCanvas;
+    private java.util.function.LongConsumer frameListener;
     private final DeathRecipient death = this::disconnected;
 
     CameraGpuOutput(int width, int height, CameraDewarpConfig config, long token,
@@ -95,6 +97,8 @@ final class CameraGpuOutput extends Binder {
     void setStockCanvasHandler(java.util.function.BiConsumer<Integer, Integer> handler) {
         stockCanvas = handler;
     }
+
+    void setFrameListener(java.util.function.LongConsumer listener) { frameListener = listener; }
 
     static void configureStockCanvas(Surface surface, int width, int height) throws RemoteException {
         Endpoint endpoint;
@@ -179,6 +183,7 @@ final class CameraGpuOutput extends Binder {
             reply.writeInt(width);
             reply.writeInt(height);
             reply.writeInt(lifecycleOnly ? 1 : 0);
+            reply.writeInt(frameListener != null ? 1 : 0);
             writeMapping(reply, request);
             return true;
         }
@@ -190,6 +195,11 @@ final class CameraGpuOutput extends Binder {
         if (code == DETACHED) {
             disconnected();
             if (reply != null) reply.writeNoException();
+            return true;
+        }
+        if (code == FRAME) {
+            long timestamp = data.readLong();
+            if (!released && frameListener != null && timestamp > 0) frameListener.accept(timestamp);
             return true;
         }
         if (code == APPLIED) {
@@ -230,6 +240,7 @@ final class CameraGpuOutput extends Binder {
         final int width;
         final int height;
         final boolean lifecycleOnly;
+        final boolean frameEvents;
         volatile CameraDewarpRenderer.MappingRequest request;
         private boolean closed;
         private final DeathRecipient ownerDeath;
@@ -251,6 +262,7 @@ final class CameraGpuOutput extends Binder {
                 width = reply.readInt();
                 height = reply.readInt();
                 lifecycleOnly = reply.readInt() != 0;
+                frameEvents = reply.readInt() != 0;
                 if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
                     throw new IllegalArgumentException("invalid GPU output dimensions");
                 }
@@ -285,6 +297,18 @@ final class CameraGpuOutput extends Binder {
                 if (!endpoint.transact(APPLIED, data, null, FLAG_ONEWAY)) {
                     throw new IllegalStateException("GPU output acknowledgement rejected");
                 }
+            } finally { data.recycle(); }
+        }
+
+        void frame(long timestamp) throws RemoteException {
+            if (!frameEvents) return;
+            Parcel data = Parcel.obtain();
+            try {
+                data.writeInterfaceToken(DESCRIPTOR);
+                data.writeStrongBinder(this);
+                data.writeLong(timestamp);
+                if (!endpoint.transact(FRAME, data, null, FLAG_ONEWAY))
+                    throw new IllegalStateException("GPU frame acknowledgement rejected");
             } finally { data.recycle(); }
         }
 

@@ -211,6 +211,10 @@ final class CameraFramePump {
         mailbox.release(slot);
     }
 
+    void transferRead(int slot) {
+        frames[slot].fence = finishUse();
+    }
+
     private long finishUse() {
         if (glVersion >= 3) {
             long fence = GLES30.glFenceSync(GLES30.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);

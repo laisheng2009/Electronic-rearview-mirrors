@@ -1,11 +1,46 @@
 package com.byd.extend;
 
 import org.junit.Test;
+import org.junit.BeforeClass;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import static org.junit.Assert.*;
 
 public class MotionYuvPackerTest {
+    @BeforeClass public static void loadRequestedNativeLibrary() {
+        String library = System.getProperty("byd.motion.native");
+        if (library != null) MotionYuvPacker.loadNative(library);
+    }
+
+    @Test public void packsNativeSizedIndependentPlanesWithExactFinalLimits() {
+        for (int chromaStride : new int[]{1, 2, 3}) {
+            int width = 3840, height = 2600, yRow = width + 8;
+            int uvRow = (width / 2 - 1) * chromaStride + 5;
+            ByteBuffer y = ByteBuffer.allocateDirect((height - 1) * yRow + width + 2);
+            ByteBuffer u = ByteBuffer.allocateDirect((height / 2 - 1) * uvRow
+                    + (width / 2 - 1) * chromaStride + 3);
+            ByteBuffer v = ByteBuffer.allocateDirect(u.capacity());
+            y.position(2); u.position(2); v.position(2);
+            for (int row = 0; row < height; row++)
+                for (int col = 0; col < width; col++) y.put(2 + row * yRow + col, (byte) (row + col));
+            for (int row = 0; row < height / 2; row++) for (int col = 0; col < width / 2; col++) {
+                u.put(2 + row * uvRow + col * chromaStride, (byte) (row + col * 3));
+                v.put(2 + row * uvRow + col * chromaStride, (byte) (row * 7 - col));
+            }
+            byte[] packed = new byte[MotionYuvPacker.outputSize(width, height)];
+            MotionYuvPacker.pack(new MotionYuvPacker.Plane(y.asReadOnlyBuffer(), yRow, 1),
+                    new MotionYuvPacker.Plane(u.asReadOnlyBuffer(), uvRow, chromaStride),
+                    new MotionYuvPacker.Plane(v.asReadOnlyBuffer(), uvRow, chromaStride),
+                    width, height, packed);
+            for (int row = 0; row < height; row++) for (int col = 0; col < width; col++)
+                assertEquals((byte) (row + col), packed[row * width + col]);
+            for (int row = 0; row < height / 2; row++) for (int col = 0; col < width / 2; col++) {
+                assertEquals((byte) (row + col * 3), packed[width * height + row * width + col * 2]);
+                assertEquals((byte) (row * 7 - col), packed[width * height + row * width + col * 2 + 1]);
+            }
+        }
+    }
+
     @Test public void packsPaddedPlanesAndInterleavesUvNotVu() {
         // 4x2 luma uses row padding; chroma uses two-byte pixel spacing and its own row padding.
         ByteBuffer y = ByteBuffer.wrap(new byte[]{1, 2, 3, 4, 99, 5, 6, 7, 8});

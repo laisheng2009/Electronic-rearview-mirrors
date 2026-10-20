@@ -5,6 +5,20 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class MotionFramePerformanceTest {
+    @Test public void capsFrameStartsWithoutCatchupAndResetsForANewReader() {
+        MotionDetectorShellMain.FrameCadence cadence = new MotionDetectorShellMain.FrameCadence();
+        assertTrue(cadence.take(0L));
+        assertFalse(cadence.take(399_999_999L));
+        assertTrue(cadence.take(400_000_000L));
+        assertFalse(cadence.take(401_000_000L));
+        assertTrue(cadence.take(1_800_000_000L));
+        assertFalse(cadence.take(1_800_000_001L));
+        assertFalse(cadence.take(2_199_999_999L));
+        assertTrue(cadence.take(2_200_000_000L));
+        cadence.reset();
+        assertTrue(cadence.take(2_200_000_001L));
+    }
+
     @Test public void separatesPackingDetectionAndWaitingTimeAtThirtySecondBoundary() {
         MotionDetectorShellMain.FramePerformance stats = new MotionDetectorShellMain.FramePerformance();
         stats.record(1_000_000_000L, 1_010_000_000L, 1_015_000_000L, 1_035_000_000L);

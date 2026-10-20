@@ -9,10 +9,11 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.Surface;
 import android.view.TextureView;
+import android.widget.FrameLayout;
 
 import java.util.function.Consumer;
 
-final class BlindSpotCameraView extends TextureView
+final class BlindSpotCameraView extends FrameLayout
         implements TextureView.SurfaceTextureListener {
     private static final String TAG = "BlindSpotCameraView";
     static final int BUFFER_WIDTH = 1920;
@@ -44,6 +45,10 @@ final class BlindSpotCameraView extends TextureView
     }
 
     private Callback callback;
+    private TextureView textureView;
+    private DirectCameraSurface directView;
+    private CameraGpuOutput directOutput;
+    private long directFrameTimestamp;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Surface cameraSurface;
     private StockAvmOutput stockOutput;
@@ -83,8 +88,22 @@ final class BlindSpotCameraView extends TextureView
 
     BlindSpotCameraView(Context context) {
         super(context);
-        setOpaque(true);
-        setSurfaceTextureListener(this);
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            directView = new DirectCameraSurface(context, new DirectCameraSurface.Listener() {
+                @Override public void available() { startDirectInput(); }
+                @Override public void resized() {
+                    applyCurrentCrop();
+                    if (callback != null && cameraSurface != null)
+                        callback.onCameraSurfaceSizeChanged(BlindSpotCameraView.this,
+                                cameraSurface, getWidth(), getHeight());
+                }
+                @Override public void destroyed() {
+                    if (callback != null) callback.onCameraSurfaceDestroyed(BlindSpotCameraView.this);
+                    retireCameraInput();
+                }
+            });
+            addView(directView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        } else installTextureView();
         addOnLayoutChangeListener((view, left, top, right, bottom,
                 oldLeft, oldTop, oldRight, oldBottom) -> {
             applyCurrentCrop();
@@ -94,6 +113,26 @@ final class BlindSpotCameraView extends TextureView
                         getWidth(), getHeight());
             }
         });
+    }
+
+    private void installTextureView() {
+        textureView = new TextureView(getContext());
+        textureView.setOpaque(true);
+        textureView.setSurfaceTextureListener(this);
+        addView(textureView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+    }
+
+    TextureView textureView() { return textureView; }
+    SurfaceTexture getSurfaceTexture() {
+        return textureView == null ? null : textureView.getSurfaceTexture();
+    }
+    boolean isAvailable() {
+        return directView != null ? directView.available() : textureView != null && textureView.isAvailable();
+    }
+    void setOpaque(boolean opaque) { if (textureView != null) textureView.setOpaque(opaque); }
+    void setTransform(Matrix value) {
+        if (directView != null) directView.transform(value);
+        else if (textureView != null) textureView.setTransform(value);
     }
 
     void setCallback(Callback value) {
@@ -114,6 +153,7 @@ final class BlindSpotCameraView extends TextureView
     }
 
     long cameraFrameTimestampNanos() {
+        if (directView != null) return isCameraSurfaceReady() ? directFrameTimestamp : 0L;
         SurfaceTexture texture = getSurfaceTexture();
         if (texture == null || !isCameraSurfaceReady()) return 0L;
         try {
@@ -186,6 +226,10 @@ final class BlindSpotCameraView extends TextureView
     int ensureCameraInput() {
         if (isCameraSurfaceReady()) return inputGeneration.current();
         if (dewarpRenderer != null) return inputGeneration.current();
+        if (directView != null) {
+            if (directView.available()) startDirectInput();
+            return inputGeneration.current();
+        }
         SurfaceTexture texture = getSurfaceTexture();
         if (texture == null) return 0;
         requestCameraInput(texture, getWidth(), getHeight());
@@ -204,6 +248,11 @@ final class BlindSpotCameraView extends TextureView
             throw new IllegalStateException("GPU output path must be selected before attach");
         }
         fusedOutput = value;
+        if (!value && directView != null) {
+            removeView(directView);
+            directView = null;
+            installTextureView();
+        }
     }
 
     void applyDewarpConfig(CameraDewarpConfig value) {
@@ -231,6 +280,10 @@ final class BlindSpotCameraView extends TextureView
         boolean mappingChanged = nextToken != dewarpRequestToken;
         dewarpConfig = value;
         dewarpRequestToken = nextToken;
+        if (directOutput != null) {
+            if (mappingChanged) { setAlpha(0f); directOutput.update(value, nextToken); }
+            return;
+        }
         if (dewarpRenderer != null) {
             if (!mappingChanged) return;
             setAlpha(0.0f);
@@ -519,6 +572,16 @@ final class BlindSpotCameraView extends TextureView
 
     private void retireActiveInput() {
         dewarpGeneration++;
+        if (directOutput != null) {
+            CameraGpuOutput output = directOutput;
+            DirectCameraSurface.Output layer = directView.retireOutput();
+            directOutput = null;
+            directFrameTimestamp = 0;
+            cameraSurface = null;
+            CameraGpuOutput.unregister(layer.surface);
+            output.release(layer::release);
+            return;
+        }
         CameraDewarpRenderer renderer = dewarpRenderer;
         if (renderer != null) {
             dewarpRenderer = null;
@@ -538,7 +601,36 @@ final class BlindSpotCameraView extends TextureView
     }
 
     private boolean hasCameraInputLifecycle() {
-        return cameraSurface != null || dewarpRenderer != null;
+        return cameraSurface != null || dewarpRenderer != null || directOutput != null;
+    }
+
+    private void startDirectInput() {
+        if (directOutput != null || directView == null || !directView.available()) return;
+        int[] size = cameraBufferSizeForInput(bufferWidth, bufferHeight,
+                getWidth(), getHeight(), automaticBufferQuality);
+        bufferWidth = size[0]; bufferHeight = size[1];
+        int generation = inputGeneration.next();
+        DirectCameraSurface.Output layer = directView.createOutput(bufferWidth, bufferHeight);
+        directOutput = new CameraGpuOutput(bufferWidth, bufferHeight, dewarpConfig,
+                dewarpRequestToken, event -> mainHandler.post(() -> {
+                    if (inputGeneration.current() != generation || cameraSurface != layer.surface
+                            || event.requestToken != dewarpRequestToken) return;
+                    setRawFallbackActive("dewarp_fallback_raw".equals(event.kind));
+                    applyCurrentCrop();
+                    setAlpha(1f);
+                    if (dewarpEventSink != null) dewarpEventSink.accept(event);
+                }));
+        directOutput.setFrameListener(timestamp -> mainHandler.post(() -> {
+            if (inputGeneration.current() != generation || cameraSurface != layer.surface) return;
+            directFrameTimestamp = timestamp;
+            if (callback != null) callback.onCameraFrameUpdated(this, generation);
+        }));
+        CameraGpuOutput.register(layer.surface, directOutput);
+        cameraSurface = layer.surface;
+        directFrameTimestamp = 0;
+        setAlpha(dewarpConfig.enabled ? 0f : 1f);
+        applyCurrentCrop();
+        notifyCameraSurfaceAvailable(getWidth(), getHeight(), generation);
     }
 
     static boolean isCurrentRendererCallback(

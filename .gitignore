@@ -2,6 +2,7 @@
 .kotlin/
 build/
 **/build/
+app/.cxx/
 local.properties
 *.apk
 *.aab
