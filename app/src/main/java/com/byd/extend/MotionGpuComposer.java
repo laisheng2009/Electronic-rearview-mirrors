@@ -131,6 +131,35 @@ final class MotionGpuComposer implements AutoCloseable {
         }
     }
 
+    boolean offerComposition(CameraFramePump pump, int slot) {
+        synchronized (lifecycleLock) {
+            if (closed) return false;
+            incoming[0][slot] = pump;
+            boolean posted = handler.post(() -> {
+                try {
+                    receive(0, pump, slot);
+                    if (closed) return;
+                    for (int direction = 0; direction < 4; direction++) {
+                        names[direction] = pump.frames[slot].texture;
+                        android.opengl.Matrix.setIdentityM(transforms[direction], 0);
+                        transforms[direction][0] = .5f;
+                        transforms[direction][5] = .5f;
+                        transforms[direction][12] = (direction % 2) * .5f;
+                        transforms[direction][13] = direction < 2 ? .5f : 0f;
+                        seen[direction] = true;
+                        frame(direction);
+                    }
+                } catch (RuntimeException failure) {
+                    closed = true;
+                    logDiagnostic("shared_snapshot_failed", failure.toString());
+                    errors.accept(failure.toString());
+                }
+            });
+            if (!posted) incoming[0][slot] = null;
+            return posted;
+        }
+    }
+
     private void receive(int direction, CameraFramePump pump, int slot) {
         require(EGL14.eglMakeCurrent(display, window, window, context), "snapshot receive current");
         pump.awaitRead(slot);

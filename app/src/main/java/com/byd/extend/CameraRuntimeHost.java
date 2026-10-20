@@ -404,12 +404,20 @@ final class CameraRuntimeHost {
         catch (org.json.JSONException error) { event("motion_telemetry_error", "error", error.toString()); }
     }
 
+    void loggingChanged() {
+        handler.post(() -> {
+            try { sendMotion(new JSONObject().put("kind", "motion_logging")); }
+            catch (org.json.JSONException error) { event("motion_telemetry_error", "error", error.toString()); }
+        });
+    }
+
     private void sendMotion(JSONObject value) {
         IBinder target = motionWorker;
         if (target == null || value == null) return;
         Parcel data = Parcel.obtain();
         try {
             JSONObject snapshot = new JSONObject(value.toString()).put("source_epoch", motionSourceEpoch)
+                    .put("extended_logs", DiagnosticLogPolicy.extended())
                     .put("elapsed_ms", android.os.SystemClock.elapsedRealtime());
             data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
             data.writeString(motionSession);

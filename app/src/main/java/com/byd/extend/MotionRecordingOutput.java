@@ -10,7 +10,7 @@ import android.view.Surface;
 import java.util.IdentityHashMap;
 import java.util.function.Consumer;
 
-/** Encoder ownership crosses Binder once; camera frames stay in the helper's GL share group. */
+/** Encoder ownership for local shared-YUV recording and legacy helper consumers. */
 final class MotionRecordingOutput {
     private static final String DESCRIPTOR = "com.byd.extend.MotionRecordingOutput";
     private static final IdentityHashMap<Surface, MotionRecordingOutput> OUTPUTS = new IdentityHashMap<>();
@@ -22,6 +22,7 @@ final class MotionRecordingOutput {
     private Surface[] surfaces;
     private MotionGpuComposer composer;
     private int attached;
+    private MotionSharedSource localSource;
 
     MotionRecordingOutput(int width, int height, int[] order, String session,
             MotionFrameTimestamp clock, Consumer<String> errors) {
@@ -115,7 +116,17 @@ final class MotionRecordingOutput {
         if (attached == 0 && composer != null) { composer.close(); composer = null; }
     }
 
-    void close(Runnable onClosed) { if (onClosed != null) onClosed.run(); }
+    void startLocal(Context context, MotionSharedSource source) throws Exception {
+        localSource = source;
+        source.startRecording(context, surfaces[0], width, height, order, session, clock, this::failed);
+    }
+
+    void close(Runnable onClosed) {
+        if (localSource != null) {
+            localSource.stopRecording(onClosed);
+            localSource = null;
+        } else if (onClosed != null) onClosed.run();
+    }
 
     private void failed(String detail) {
         Parcel data = Parcel.obtain();

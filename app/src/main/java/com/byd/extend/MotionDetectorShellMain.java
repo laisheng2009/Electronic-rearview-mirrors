@@ -64,6 +64,7 @@ public final class MotionDetectorShellMain {
                 Context system = (Context) activityThreadClass.getMethod("getSystemContext")
                         .invoke(activityThread);
                 if (system == null) throw new IllegalStateException("system context unavailable");
+                OemLogPolicy.initialize(system);
                 CameraShellMain.initializeSystemFontsForShell();
                 MotionDetectorShellMain daemon = new MotionDetectorShellMain(appUid, identity, system);
                 System.out.println("motion_native_environment LD_LIBRARY_PATH=" + System.getenv("LD_LIBRARY_PATH")
@@ -86,7 +87,6 @@ public final class MotionDetectorShellMain {
     private final ExecutorService hostOperations = Executors.newSingleThreadExecutor(r ->
             new Thread(r, "motion-camera-host-ops"));
     private final MotionEventPolicy policy = new MotionEventPolicy();
-    private final AtomicBoolean frameDrainQueued = new AtomicBoolean();
     private final ShellBinder binder = new ShellBinder();
     private final MotionScreenControl screen;
     private final MotionSessionConfigStore configStore;
@@ -166,7 +166,8 @@ public final class MotionDetectorShellMain {
     private AssetManager assets;
     private MotionNativeLibrary nativeApi;
     private byte[] nativeInput;
-    private ImageReader reader;
+    private volatile ImageReader reader;
+    private MotionSharedSource sharedSource;
     private Surface surface;
     private long frameNumber;
     private final FramePerformance framePerformance = new FramePerformance();
@@ -859,8 +860,6 @@ public final class MotionDetectorShellMain {
             eligible = false;
             control.removeCallbacks(firstInferenceTimeout);
             screen.setEligible(id, false);
-            boolean readerDetached = detachAndCloseReader(false);
-            if (!readerDetached) sendError(id, "camera_detach", "detector Surface remains owned until a confirmed drain");
             if (warning) finishWarning(id, false);
             if (recorder != null && recorder.isRecording()) {
                 long deadline = SystemClock.elapsedRealtime() + config.afterSeconds * 1000L;
@@ -870,6 +869,8 @@ public final class MotionDetectorShellMain {
                 state = "recording_tail";
             } else {
                 state = stopRecording("eligibility_ended", false) ? "prepared" : "recording_detach_pending";
+                if (composer == null && !detachAndCloseReader(false))
+                    sendError(id, "camera_detach", "shared Surface detach remains pending");
             }
             sendStatus(id, state, "fresh Motion telemetry no longer meets the configured activation mode");
             updateCameraDemand();
@@ -908,12 +909,17 @@ public final class MotionDetectorShellMain {
         framePerformance.reset();
         frameCadence.reset();
         java.util.Arrays.fill(loggedFrameLayout, 0);
+        sharedSource = new MotionSharedSource(error ->
+                control.post(() -> { if (sameSession(id)) fail(id, "shared_source", error); }));
         reader = ImageReader.newInstance(MotionDetectorProtocol.INPUT_WIDTH,
                 MotionDetectorProtocol.INPUT_HEIGHT, ImageFormat.YUV_420_888, 2);
         surface = reader.getSurface();
+        ImageReader ownerReader = reader;
+        MotionSharedSource ownerSource = sharedSource;
+        AtomicBoolean analysisBusy = new AtomicBoolean();
         reader.setOnImageAvailableListener(source -> {
-            if (frameDrainQueued.compareAndSet(false, true)) control.post(this::drainLatestFrame);
-        }, control);
+            drainLatestFrame(ownerReader, ownerSource, id, analysisBusy);
+        }, ownerSource.handler());
         boolean accepted;
         try { accepted = cameraOperation(MotionDetectorProtocol.CAMERA_ATTACH, id, surface); }
         catch (Throwable uncertain) {
@@ -927,32 +933,23 @@ public final class MotionDetectorShellMain {
         attached = true;
     }
 
-    private void drainLatestFrame() {
+    private void drainLatestFrame(ImageReader ownerReader, MotionSharedSource source,
+            String id, AtomicBoolean analysisBusy) {
         try {
-            ManualCheck check = manualCheck;
-            if (reader == null || !eligible && (check == null || !checkLive(check))) return;
-            Image frame = reader.acquireLatestImage();
+            if (reader != ownerReader) return;
+            Image frame = ownerReader.acquireLatestImage();
             if (frame == null) return;
-            processFrame(frame);
+            processFrame(frame, ownerReader, source, id, analysisBusy);
         } catch (Throwable error) {
-            String id = sessionId;
-            if (id != null) fail(id, "frame", error);
-        } finally {
-            frameDrainQueued.set(false);
+            control.post(() -> { if (sameSession(id) && reader == ownerReader) fail(id, "frame", error); });
         }
     }
 
-    private void processFrame(Image frame) throws Exception {
-        ManualCheck check;
-        long frameTimeNs;
-        long packStartNs, packEndNs;
-        int width, height;
-        MotionYuvPacker.Plane y, u, v;
+    private void processFrame(Image frame, ImageReader ownerReader, MotionSharedSource source,
+            String id, AtomicBoolean analysisBusy) throws Exception {
+        Runnable inference = null;
+        boolean reserved = false;
         try {
-            check = manualCheck;
-            if (check != null && check.finishing) return;
-            // Drain skipped Images without packing, inference, or holding up the producer.
-            if (!frameCadence.take(SystemClock.elapsedRealtimeNanos())) return;
             if (frame.getFormat() != ImageFormat.YUV_420_888
                     || frame.getWidth() != MotionDetectorProtocol.INPUT_WIDTH
                     || frame.getHeight() != MotionDetectorProtocol.INPUT_HEIGHT)
@@ -965,25 +962,47 @@ public final class MotionDetectorShellMain {
                     || crop.bottom != frame.getHeight())
                 throw new IllegalStateException("motion frame crop is not the full composition: crop="
                         + crop + " size=" + frame.getWidth() + "x" + frame.getHeight());
-            Image.Plane[] planes = frame.getPlanes();
-            if (planes == null || planes.length != 3)
-                throw new IllegalStateException("YUV_420_888 requires three planes: actual="
-                        + (planes == null ? "null" : planes.length));
-            width = frame.getWidth();
-            height = frame.getHeight();
-            y = plane(planes[0]);
-            u = plane(planes[1]);
-            v = plane(planes[2]);
-            packStartNs = SystemClock.elapsedRealtimeNanos();
-            MotionYuvPacker.pack(y, u, v, width, height, nativeInput);
-            packEndNs = SystemClock.elapsedRealtimeNanos();
-            frameTimeNs = frame.getTimestamp();
+            ManualCheck check = manualCheck;
+            boolean wantsAnalysis = eligible || check != null && checkLive(check) && !check.finishing;
+            if (wantsAnalysis && !analysisBusy.get()
+                    && frameCadence.take(SystemClock.elapsedRealtimeNanos())
+                    && analysisBusy.compareAndSet(false, true)) {
+                reserved = true;
+                Image.Plane[] planes = frame.getPlanes();
+                if (planes == null || planes.length != 3)
+                    throw new IllegalStateException("YUV_420_888 requires three planes");
+                int width = frame.getWidth(), height = frame.getHeight();
+                MotionYuvPacker.Plane y = plane(planes[0]), u = plane(planes[1]), v = plane(planes[2]);
+                byte[] input = nativeInput;
+                long packStartNs = SystemClock.elapsedRealtimeNanos();
+                MotionYuvPacker.pack(y, u, v, width, height, input);
+                long packEndNs = SystemClock.elapsedRealtimeNanos();
+                long frameTimeNs = frame.getTimestamp();
+                inference = () -> {
+                    try {
+                        if (reader == ownerReader && sameSession(id)
+                                && (eligible || check != null && checkLive(check) && !check.finishing))
+                            detectFrame(check, frameTimeNs, packStartNs, packEndNs, width, height, y, u, v, input);
+                    } catch (Throwable error) { if (sameSession(id)) fail(id, "frame", error); }
+                    finally { analysisBusy.set(false); }
+                };
+            }
+            source.snapshot(frame);
+        } catch (Throwable error) {
+            if (reserved) analysisBusy.set(false);
+            throw error;
         } finally {
             frame.close();
         }
+        if (inference != null && !control.post(inference)) analysisBusy.set(false);
+    }
+
+    private void detectFrame(ManualCheck check, long frameTimeNs, long packStartNs, long packEndNs,
+            int width, int height, MotionYuvPacker.Plane y, MotionYuvPacker.Plane u,
+            MotionYuvPacker.Plane v, byte[] input) throws Exception {
         long now = SystemClock.elapsedRealtime();
         long detectStartNs = SystemClock.elapsedRealtimeNanos();
-        int raw = nativeApi.detect(nativeInput, MotionDetectorProtocol.INPUT_WIDTH,
+        int raw = nativeApi.detect(input, MotionDetectorProtocol.INPUT_WIDTH,
                 MotionDetectorProtocol.INPUT_HEIGHT, sensitivity);
         long detectEndNs = SystemClock.elapsedRealtimeNanos();
         frameNumber++;
@@ -1065,7 +1084,7 @@ public final class MotionDetectorShellMain {
         framePerformance.reset();
     }
 
-    /** Start-to-start limit on the control thread; missed slots never create a catch-up burst. */
+    /** Start-to-start limit on acquisition; missed slots never create a catch-up burst. */
     static final class FrameCadence {
         private long nextStartNs;
 
@@ -1572,6 +1591,9 @@ public final class MotionDetectorShellMain {
         if (!sameSession(id) || line == null) return;
         try {
             org.json.JSONObject event = new org.json.JSONObject(line);
+            if (expectedSourceEpoch.equals(event.optString("source_epoch", ""))
+                    && event.has("extended_logs"))
+                DiagnosticLogPolicy.configure(event.getBoolean("extended_logs"));
             String kind = event.optString("kind", "");
             if ("motion_host_shutdown".equals(kind)) {
                 shutdownFromHost(id, event.optString("reason", "host_shutdown"),
@@ -1848,20 +1870,11 @@ public final class MotionDetectorShellMain {
                     }));
             // Retain cleanup ownership even when initialization times out on the GL thread.
             composer.initialize(encoderSurface);
+            if (sharedSource == null) throw new IllegalStateException("Motion shared source is not attached");
+            composer.startLocal(mediaContext.ownerResourcesContext(), sharedSource);
             recordingRequestId = recordingRequestId == Integer.MAX_VALUE ? 1 : recordingRequestId + 1;
             deliberatelyDetachedProducerReason = "";
-            boolean accepted;
-            try {
-                accepted = cameraOperation(MotionDetectorProtocol.CAMERA_RECORD_ATTACH, id, null,
-                        composer.inputs(), recordingRequestId);
-            } catch (Throwable uncertain) {
-                recordingAttached = true;
-                throw uncertain;
-            }
-            if (!accepted)
-                throw new IllegalStateException("camera owner refused Motion encoder surfaces");
-            recordingAttached = true;
-            sendStatus(id, "recording_buffering", "hardware encoder and four camera inputs are shell-owned");
+            sendStatus(id, "recording_buffering", "hardware encoder shares the original OEM 4123 input with detection");
         } catch (Throwable error) {
             if (check != null) {
                 completeCheck(check, MotionCheckupClient.ERROR, "check_failed", summary(error), true);
@@ -1912,6 +1925,7 @@ public final class MotionDetectorShellMain {
             if (teardownPending) continuePendingTeardown();
             else if (sameSession(id) && eligible && config != null && config.recordingEnabled)
                 startRecording(id);
+            else if (!eligible && manualCheck == null) detachAndCloseReader(false);
             updateCameraDemand();
             return;
         }
@@ -1937,6 +1951,7 @@ public final class MotionDetectorShellMain {
         }
         String id = sessionId;
         boolean stopped = stopRecording("postroll_finished", false);
+        if (stopped && !eligible) stopped = detachAndCloseReader(false);
         if (id == null || !sameSession(id)) return;
         if (stopped) {
             state = "prepared";
@@ -2174,6 +2189,7 @@ public final class MotionDetectorShellMain {
     }
 
     private boolean detachAndCloseReader(boolean surfacesDrained) {
+        if (composer != null) return false; // Recording tail still owns the same OEM source.
         flushFramePerformance();
         if (attached && !surfacesDrained) {
             deliberatelyDetachedProducerReason = "motion_detector_idle";
@@ -2191,6 +2207,14 @@ public final class MotionDetectorShellMain {
 
         ImageReader oldReader = reader;
         Surface oldSurface = surface;
+        if (oldReader != null) oldReader.setOnImageAvailableListener(null, null);
+        try {
+            if (sharedSource != null) sharedSource.close();
+            sharedSource = null;
+        } catch (Throwable error) {
+            if (sessionId != null) sendError(sessionId, "shared_source_close", summary(error));
+            return false;
+        }
         reader = null;
         surface = null;
         try { if (oldReader != null) oldReader.close(); }
@@ -2203,7 +2227,6 @@ public final class MotionDetectorShellMain {
             String id = sessionId;
             if (id != null) sendError(id, "camera_surface_release", summary(error));
         }
-        frameDrainQueued.set(false);
         return true;
     }
 

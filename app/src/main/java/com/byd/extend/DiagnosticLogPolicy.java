@@ -33,7 +33,10 @@ final class DiagnosticLogPolicy {
     private long firstAt, lastAt, repeats;
     private boolean suppressed;
 
-    static void configure(boolean enabled) { extended = enabled; }
+    static void configure(boolean enabled) {
+        extended = enabled;
+        OemLogPolicy.configure(enabled);
+    }
     static boolean extended() { return extended; }
     static void print(String line) {
         String kind = kind(line);

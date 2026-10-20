@@ -73,6 +73,7 @@ public final class TurnSignalShellMain {
         if (owner == null) return;
         Looper looper = prepareMainLooperForShell();
         Context context = systemContext();
+        OemLogPolicy.initialize(context);
         Handler handler = new Handler(looper);
         ShellBinder binder = new ShellBinder(context, handler, appUid, versionCode);
         binder.attachInterface(null, TurnSignalShellProtocol.DESCRIPTOR);
@@ -259,6 +260,8 @@ public final class TurnSignalShellMain {
                     int enabled = data.readInt();
                     if (enabled != 0 && enabled != 1) throw new IllegalArgumentException("invalid logging flag");
                     DiagnosticLogPolicy.configure(enabled == 1);
+                    CameraRuntimeHost cameras = cameraRuntime;
+                    if (cameras != null) cameras.loggingChanged();
                     reply.writeNoException();
                     return true;
                 }

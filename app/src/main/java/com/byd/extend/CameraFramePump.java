@@ -63,8 +63,8 @@ final class CameraFramePump {
         this.sharedContext = sharedContext;
         this.glVersion = glVersion;
         this.index = index;
-        sourceWidth = 1920;
-        sourceHeight = index == 0 ? 990 : 1300;
+        sourceWidth = index == 4123 ? 3840 : 1920;
+        sourceHeight = index == 4123 ? 2600 : index == 0 ? 990 : 1300;
         this.listener = listener;
         thread = new HandlerThread("camera-acquire-" + index);
     }
@@ -109,6 +109,7 @@ final class CameraFramePump {
         externalTexture = names[0];
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTexture);
         configureTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES);
+        if (index == 4123) return; // Motion supplies its original CPU-readable Image.
         input = new SurfaceTexture(externalTexture);
         input.setDefaultBufferSize(sourceWidth, sourceHeight);
         surface = new Surface(input);
@@ -120,6 +121,53 @@ final class CameraFramePump {
                 handler.post(capture);
             }
         }, handler);
+    }
+
+    Handler acquisitionHandler() { return handler; }
+
+    /** Runs on acquisitionHandler; completes all source reads before the caller closes its Image. */
+    boolean snapshotImage(android.media.Image image) {
+        if (closed || failed) return false;
+        long size = outputSize;
+        int width = (int) (size >>> 32), height = (int) size;
+        if (width <= 0 || height <= 0) return false;
+        int slot = mailbox.reserve(readyToWritePredicate);
+        if (slot < 0) return false;
+        long imported = 0;
+        try (android.hardware.HardwareBuffer buffer = image.getHardwareBuffer()) {
+            if (buffer == null) throw new IllegalStateException("Motion image has no hardware buffer");
+            imported = MotionHardwareBuffer.bind(buffer, externalTexture);
+            Frame frame = frames[slot];
+            allocate(frame, width, height);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, frame.framebuffer);
+            GLES20.glViewport(0, 0, width, height);
+            GLES20.glUseProgram(program);
+            GLES20.glEnableVertexAttribArray(positionLocation);
+            GLES20.glEnableVertexAttribArray(coordsLocation);
+            GLES20.glVertexAttribPointer(positionLocation, 2, GLES20.GL_FLOAT, false, 0, positions);
+            GLES20.glVertexAttribPointer(coordsLocation, 2, GLES20.GL_FLOAT, false, 0, coords);
+            android.opengl.Matrix.setIdentityM(matrix, 0);
+            matrix[5] = -1; matrix[13] = 1; // Image rows are top-down; owned GL textures are bottom-up.
+            GLES20.glUniformMatrix4fv(matrixLocation, 1, false, matrix, 0);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, externalTexture);
+            GLES20.glUniform1i(textureLocation, 0);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+            require(GLES20.glGetError() == GLES20.GL_NO_ERROR, "Motion shared snapshot failed");
+            // API32 Java Image has no release-fence setter. Do not return it before GPU reads finish.
+            GLES20.glFinish();
+            frame.producerNs = image.getTimestamp();
+            frame.acquiredNs = System.nanoTime();
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            mailbox.publish(slot);
+            listener.available();
+            return true;
+        } catch (RuntimeException error) {
+            failed = true;
+            throw error;
+        } finally {
+            if (imported != 0) MotionHardwareBuffer.release(imported);
+        }
     }
 
     private void capture() {
