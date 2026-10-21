@@ -8,6 +8,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -147,6 +149,15 @@ final class MotionMediaIndex {
     synchronized Record find(String uri) {
         int index = indexOf(uri);
         return index < 0 ? null : records.get(index).copy();
+    }
+
+    synchronized Record find(String volumeId, long mediaStoreId) {
+        if (volumeId == null || volumeId.isEmpty() || mediaStoreId <= 0) return null;
+        for (Record record : records) {
+            if (volumeId.equals(record.volumeId)
+                    && mediaStoreId(record.uri) == mediaStoreId) return record.copy();
+        }
+        return null;
     }
 
     synchronized void put(Record record) throws IOException {
@@ -301,6 +312,21 @@ final class MotionMediaIndex {
             if (records.get(i).uri.equals(uri)) return i;
         }
         return -1;
+    }
+
+    static long mediaStoreId(String value) {
+        if (value == null) return -1;
+        try {
+            URI uri = new URI(value);
+            if (!"content".equals(uri.getScheme()) || !"media".equals(uri.getAuthority())) return -1;
+            String[] segments = uri.getPath().split("/", -1);
+            if (segments.length != 5 || !segments[0].isEmpty() || segments[1].isEmpty()
+                    || !"video".equals(segments[2]) || !"media".equals(segments[3])) return -1;
+            long id = Long.parseLong(segments[4]);
+            return id > 0 ? id : -1;
+        } catch (URISyntaxException | NumberFormatException | NullPointerException invalid) {
+            return -1;
+        }
     }
 
     private void load() throws IOException {

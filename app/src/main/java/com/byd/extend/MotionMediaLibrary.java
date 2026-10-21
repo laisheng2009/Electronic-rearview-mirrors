@@ -23,8 +23,10 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 /** Persistent archive index and real MediaStore-backed archive/storage queries. */
@@ -116,18 +118,14 @@ public final class MotionMediaLibrary {
     ParcelFileDescriptor openPreparedThumbnail(String volumeId, long mediaStoreId, String expectedKey) {
         if (thumbnailStore == null || volumeId == null || volumeId.isEmpty() || mediaStoreId <= 0
                 || !MotionThumbnailKey.isValid(expectedKey)) return null;
-        for (MotionMediaIndex.Record current : index.records()) {
-            if (!volumeId.equals(current.volumeId)
-                    || indexedMediaStoreId(Uri.parse(current.uri)) != mediaStoreId) continue;
-            if (!(MotionMediaIndex.COMPLETE.equals(current.status)
-                    || MotionMediaIndex.INTERRUPTED.equals(current.status))
-                    || !expectedKey.equals(MotionThumbnailKey.forRecord(current, mediaStoreId))) return null;
-            MotionStorage.Volume volume = storage.findVolume(volumeId);
-            if (volume != null && volume.mounted
-                    && !storage.isOwnedMedia(volume, Uri.parse(current.uri))) return null;
-            return thumbnailStore.open(volumeId, mediaStoreId, expectedKey, current);
-        }
-        return null;
+        MotionMediaIndex.Record current = index.find(volumeId, mediaStoreId);
+        if (current == null || !(MotionMediaIndex.COMPLETE.equals(current.status)
+                || MotionMediaIndex.INTERRUPTED.equals(current.status))
+                || !expectedKey.equals(MotionThumbnailKey.forRecord(current, mediaStoreId))) return null;
+        MotionStorage.Volume volume = storage.findVolume(volumeId);
+        if (volume != null && volume.mounted
+                && !storage.isOwnedMedia(volume, Uri.parse(current.uri))) return null;
+        return thumbnailStore.open(volumeId, mediaStoreId, expectedKey, current);
     }
 
     public enum Sort { NEWEST_FIRST, OLDEST_FIRST }
@@ -378,12 +376,30 @@ public final class MotionMediaLibrary {
         if (access != null) return queryRemote(actual, MotionConfig.read(context)).entries;
         ArrayList<Entry> result = new ArrayList<>();
         Map<String, MotionStorage.Volume> volumes = volumeMap();
-        for (MotionMediaIndex.Record record : index.records()) {
+        List<MotionMediaIndex.Record> records = index.records();
+        Map<String, Set<String>> ownedByVolume = new HashMap<>();
+        for (MotionMediaIndex.Record record : records) {
+            if (!matches(actual, record) || ownedByVolume.containsKey(record.volumeId)) continue;
+            MotionStorage.Volume volume = volumes.get(record.volumeId);
+            if (volume == null || !volume.mounted) continue;
+            Set<String> owned = new HashSet<>();
+            try {
+                for (MotionStorage.OwnedMedia item : storage.ownedMedia(volume)) {
+                    if (!item.pending) owned.add(item.uri.toString());
+                }
+            } catch (IOException unavailable) {
+                throw new IllegalStateException("Cannot verify Motion archive availability for "
+                        + volume.id, unavailable);
+            }
+            ownedByVolume.put(record.volumeId, owned);
+        }
+        for (MotionMediaIndex.Record record : records) {
             if (!matches(actual, record)) continue;
             MotionStorage.Volume volume = volumes.get(record.volumeId);
             boolean mounted = volume != null && volume.mounted;
             Uri uri = Uri.parse(record.uri);
-            boolean available = mounted && storage.isOwnedMedia(volume, uri);
+            Set<String> owned = ownedByVolume.get(record.volumeId);
+            boolean available = mounted && owned != null && owned.contains(record.uri);
             long mediaStoreId = storage.mediaStoreId(volume, uri);
             if (mediaStoreId <= 0) mediaStoreId = indexedMediaStoreId(uri);
             Status status = status(record.status);
@@ -594,7 +610,6 @@ public final class MotionMediaLibrary {
             }
             return new DeleteResult(deleted, failed, skipped);
         }
-        Map<String, MotionStorage.Volume> volumes = volumeMap();
         for (Entry entry : selected) {
             if (entry == null || entry.contentUri == null || entry.protectedFile
                     || (entry.status != Status.COMPLETE && entry.status != Status.INTERRUPTED
@@ -612,19 +627,45 @@ public final class MotionMediaLibrary {
                 skipped++;
                 continue;
             }
-            MotionStorage.Volume volume = volumes.get(current.volumeId);
-            if (volume == null || !volume.mounted || volume.readOnly
-                    || !storage.isOwnedMedia(volume, entry.contentUri)) {
+            MotionStorage.Volume volume = storage.findVolume(current.volumeId);
+            if (volume == null || !volume.mounted || volume.readOnly) {
                 failed++;
                 continue;
             }
             try {
-                if (storage.deleteOwned(volume, entry.contentUri) == 1) {
-                    index.remove(current.uri);
-                    if (thumbnailStore != null)
-                        thumbnailStore.removeForRecord(current, storage.mediaStoreId(volume, entry.contentUri));
-                    deleted++;
-                } else failed++;
+                MotionStorage.MediaStoreOwnership ownership =
+                        storage.inspectMediaStoreOwnership(volume, entry.contentUri);
+                if (ownership == MotionStorage.MediaStoreOwnership.OTHER) {
+                    failed++;
+                    continue;
+                }
+                if (ownership == MotionStorage.MediaStoreOwnership.ABSENT) {
+                    MotionStorage.Volume confirmedVolume = storage.findVolume(current.volumeId);
+                    if (!storage.canConfirmAbsent(confirmedVolume, entry.contentUri)) {
+                        failed++;
+                        continue;
+                    }
+                    volume = confirmedVolume;
+                }
+                MotionMediaIndex.Record latest = index.find(current.uri);
+                if (latest == null || MotionMediaIndex.RECORDING.equals(latest.status)
+                        || latest.protectedFile || !latest.segmentId.equals(entry.segmentId)
+                        || MotionMediaLease.isHeld(leaseDirectory, latest.uri)) {
+                    skipped++;
+                    continue;
+                }
+                if (ownership == MotionStorage.MediaStoreOwnership.OWNED
+                        && storage.deleteOwned(volume, entry.contentUri) != 1) {
+                    failed++;
+                    continue;
+                }
+                if (!index.remove(latest.uri)) {
+                    failed++;
+                    continue;
+                }
+                if (thumbnailStore != null)
+                    thumbnailStore.removeForRecord(latest, storage.mediaStoreId(volume, entry.contentUri));
+                deleted++;
             } catch (IOException | RuntimeException e) {
                 failed++;
             }
@@ -787,14 +828,7 @@ public final class MotionMediaLibrary {
     }
 
     private static long indexedMediaStoreId(Uri uri) {
-        if (uri == null || !"content".equals(uri.getScheme()) || !"media".equals(uri.getAuthority())) return -1;
-        List<String> segments = uri.getPathSegments();
-        if (segments.size() != 4 || !"video".equals(segments.get(1))
-                || !"media".equals(segments.get(2))) return -1;
-        try {
-            long id = Long.parseLong(segments.get(3));
-            return id > 0 ? id : -1;
-        } catch (NumberFormatException invalid) { return -1; }
+        return MotionMediaIndex.mediaStoreId(uri == null ? null : uri.toString());
     }
 
     private static Status status(String value) {

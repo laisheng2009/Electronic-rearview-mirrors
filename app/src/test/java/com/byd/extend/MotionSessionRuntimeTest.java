@@ -39,6 +39,36 @@ public class MotionSessionRuntimeTest {
         assertTrue(MotionCameraPreparation.sourceReady(0, 1, 1));
     }
 
+    @Test public void streamAttemptCadenceHonorsReservationWindowAndExplicitSessionReset() {
+        MotionCameraPreparation.StreamCadence cadence = new MotionCameraPreparation.StreamCadence();
+        assertTrue(cadence.reserveAttempt(100));
+        assertFalse(cadence.reserveAttempt(600));
+        assertFalse(cadence.reserveAttempt(1_099));
+        assertTrue(cadence.reserveAttempt(1_100));
+
+        cadence.reset();
+        assertTrue(cadence.reserveAttempt(1_101));
+    }
+
+    @Test public void cpuHoldDecisionIncludesEveryLiveOwnerAndRecorderFinalization() {
+        assertTrue(MotionDetectorShellMain.requiresCpuHold(
+                false, true, true, false, false, false, false));
+        assertFalse(MotionDetectorShellMain.requiresCpuHold(
+                false, false, true, false, false, false, false));
+        assertTrue(MotionDetectorShellMain.requiresCpuHold(
+                false, false, false, true, false, false, false));
+        assertTrue(MotionDetectorShellMain.requiresCpuHold(
+                false, false, false, false, true, false, false));
+        assertTrue(MotionDetectorShellMain.requiresCpuHold(
+                false, false, false, false, false, true, false));
+        assertTrue(MotionDetectorShellMain.requiresCpuHold(
+                false, false, false, false, false, false, true));
+        assertTrue(MotionDetectorShellMain.requiresCpuHold(
+                true, false, false, false, false, false, false));
+        assertFalse(MotionDetectorShellMain.requiresCpuHold(
+                false, false, false, false, false, false, false));
+    }
+
     @Test public void telemetryCompletesArmingAtTheOriginalDeadlineWithoutWaitingForTheTimer() throws Exception {
         MotionSessionRuntime runtime = new MotionSessionRuntime();
         runtime.configure("0123456789abcdef0123456789abcdef",

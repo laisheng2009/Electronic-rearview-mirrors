@@ -76,6 +76,26 @@ public final class MotionRecorderTimelineTest {
                 followingOnlyStartMs, MotionRecorderTimeline.finishDeadline(eventMs, 5)));
     }
 
+    @Test public void recorderCanResumeEventAcceptanceWithoutResettingTheCurrentPostRoll() {
+        MotionVideoRecorder.FinishState finish = new MotionVideoRecorder.FinishState();
+        assertEquals(20_000L, finish.apply(20_000L));
+        assertFalse(finish.finishing());
+
+        finish.requestFinish(30_000L);
+        finish.requestFinish(40_000L);
+        assertEquals(40_000L, finish.apply(20_000L));
+        assertTrue(finish.finishing());
+
+        finish.requestResume();
+        assertEquals(40_000L, finish.apply(40_000L));
+        assertFalse(finish.finishing());
+
+        finish.requestFinish(50_000L);
+        finish.requestResume();
+        assertEquals(40_000L, finish.apply(40_000L));
+        assertFalse(finish.finishing());
+    }
+
     @Test public void joinedCoverageAppendsOnlyUnwrittenAudioAndVideoThroughNextFrameBoundary() {
         List<TestSample> samples = Arrays.asList(
                 new TestSample(0, 9_900L, "v-before"),

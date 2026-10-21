@@ -30,7 +30,7 @@ final class MotionCameraPreparation {
     private Method getInt, setInt, setBuffer;
     private int streamRequest, idcWake, onlineFid, streamFid;
     private boolean releaseNeeded;
-    private long nextStreamMs;
+    private final StreamCadence streamCadence = new StreamCadence();
 
     MotionCameraPreparation(Context context, Listener listener) {
         this.context = context;
@@ -63,6 +63,18 @@ final class MotionCameraPreparation {
         return power == 0 && online == 1 && stream == 1;
     }
 
+    static final class StreamCadence {
+        private long nextAttemptMs;
+
+        boolean reserveAttempt(long nowMs) {
+            if (nowMs < nextAttemptMs) return false;
+            nextAttemptMs = nowMs + STREAM_PERIOD_MS;
+            return true;
+        }
+
+        void reset() { nextAttemptMs = 0; }
+    }
+
     private void reconcile() {
         handler.removeCallbacks(reconcile);
         handler.removeCallbacks(tick);
@@ -73,7 +85,7 @@ final class MotionCameraPreparation {
                 return;
             }
             activeSession = requested;
-            nextStreamMs = 0;
+            streamCadence.reset();
         }
         if (!activeSession.isEmpty()) tick();
         else {
@@ -95,10 +107,9 @@ final class MotionCameraPreparation {
             initialize();
             power = read(AvasTelemetryController.POWER_DEVICE, AvasTelemetryController.POWER_FID);
             if (power == 0 && session.equals(requestedSession)) {
-                if (started >= nextStreamMs) {
+                if (streamCadence.reserveAttempt(started)) {
                     releaseNeeded = true; // An uncertain Binder result still requires stream0.
                     requireSuccess("stream1", setInt.invoke(manager, 1049, streamRequest, 1));
-                    nextStreamMs = started + STREAM_PERIOD_MS;
                 }
                 if (session.equals(requestedSession)) {
                     requireSuccess("idc", setBuffer.invoke(manager, 1049, idcWake, IDC_WAKE));
@@ -150,7 +161,6 @@ final class MotionCameraPreparation {
         try {
             requireSuccess("stream0", setInt.invoke(manager, 1049, streamRequest, 0));
             releaseNeeded = false;
-            nextStreamMs = 0;
         } catch (Exception failure) { error = describe(failure); }
         listener.onRelease(activeSession, error);
         return !releaseNeeded;

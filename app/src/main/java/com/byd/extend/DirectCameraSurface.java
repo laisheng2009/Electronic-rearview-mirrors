@@ -70,7 +70,7 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
                     .getMethod("getSurfaceControl").invoke(this);
             layer = new SurfaceControl.Builder().setName("byd-camera-direct")
                     .setParent(parent).setBufferSize(width, height)
-                    .setFormat(PixelFormat.RGBA_8888).setOpaque(true).setHidden(false).build();
+                    .setFormat(PixelFormat.RGBA_8888).setOpaque(true).build();
             surface = Surface.class.getConstructor().newInstance();
             Surface.class.getMethod("copyFrom", SurfaceControl.class).invoke(surface, layer);
             setMatrix = SurfaceControl.Transaction.class.getMethod("setMatrix",
@@ -119,7 +119,7 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
             float radius = viewportClip();
             setWindowCrop.invoke(transaction, viewport, clip);
             setCornerRadius.invoke(transaction, viewport, radius);
-            transaction.setPosition(output.layer, 0f, 0f)
+            transaction.setVisibility(output.layer, true)
                     .setLayer(output.layer, 1).setAlpha(output.layer, alpha).apply();
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("direct camera transform failed", failure);

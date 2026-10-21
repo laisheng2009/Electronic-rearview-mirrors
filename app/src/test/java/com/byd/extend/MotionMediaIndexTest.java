@@ -210,6 +210,36 @@ public final class MotionMediaIndexTest {
         }
     }
 
+    @Test public void volumeAndMediaIdLookupReturnsOnlyAnIndependentMatchingRecord() throws Exception {
+        File file = new File(Files.createTempDirectory("motion-index-media-id-").toFile(), "library.json");
+        MotionMediaIndex index = new MotionMediaIndex(file);
+        MotionMediaIndex.Record sameIdOtherVolume = new MotionMediaIndex.Record(
+                "content://media/external_primary/video/media/73", "primary", "primary.mp4",
+                "primary-73", 1_000L, 10L, 1920, 1080, MotionMediaIndex.COMPLETE);
+        MotionMediaIndex.Record target = new MotionMediaIndex.Record(
+                "content://media/ABCD-1234/video/media/73", "ABCD-1234", "sd.mp4",
+                "sd-73", 2_000L, 20L, 1280, 720, MotionMediaIndex.INTERRUPTED,
+                new int[] {2, 0, 3, 1});
+        target.markers.add(new MotionMediaIndex.Marker("event", 25L, 2_005L, 30L, 2_010L, 1));
+        index.put(sameIdOtherVolume);
+        index.put(target);
+
+        MotionMediaIndex reopened = new MotionMediaIndex(file);
+        MotionMediaIndex.Record found = reopened.find("ABCD-1234", 73L);
+        assertNotNull(found);
+        assertEquals(target.uri, found.uri);
+        assertEquals("sd-73", found.segmentId);
+        assertEquals(1, found.markers.size());
+        assertNull(reopened.find("primary", 99L));
+        assertNull(reopened.find("missing-volume", 73L));
+
+        found.cameraOrder[0] = 0;
+        found.markers.clear();
+        MotionMediaIndex.Record unchanged = reopened.find("ABCD-1234", 73L);
+        assertArrayEquals(new int[] {2, 0, 3, 1}, unchanged.cameraOrder);
+        assertEquals(1, unchanged.markers.size());
+    }
+
     @Test public void incompleteLegacyMergePersistsRowsWithoutClaimingMigrationComplete() throws Exception {
         File directory = Files.createTempDirectory("motion-index-partial-migration-").toFile();
         File indexFile = new File(directory, "shell-media-index.json");

@@ -154,12 +154,11 @@ public final class CallsRuntime {
         }
         if (selectingContact) refreshContactCard();
         if (callOperation != null && callOperation.stage == CallStage.WAITING_FOR_TARGET
-                && isCallTargetEvent(event.getEventType(), event.getPackageName()))
+                && isXCallTargetEvent(event.getEventType(), event.getPackageName()))
             tryFindCallTarget(callOperation);
-        if (event.getPackageName() != null
-                && XCALL_PACKAGE.contentEquals(event.getPackageName())) {
-            if (hintDismissRequest != null) tryDismissAssignedHint(hintDismissRequest);
-        }
+        if (hintDismissRequest != null
+                && isXCallTargetEvent(event.getEventType(), event.getPackageName()))
+            tryDismissAssignedHint(hintDismissRequest);
     }
 
     void onPreferencesChanged(SharedPreferences prefs, String key) {
@@ -702,14 +701,50 @@ public final class CallsRuntime {
         if (callOperation != null || isBlocked()) return;
         CallsSettings.Destination destination = CallsSettings.read(preferences, profile);
         if (!configured(destination)) return;
-        CallOperation operation = new CallOperation(++callGeneration, profile,
-                destination.number, rescueSession, lastRescueSequence,
-                SystemClock.elapsedRealtime());
-        callOperation = operation;
-        operation.stage = CallStage.WAITING_FOR_TARGET;
+        long startedAt = SystemClock.elapsedRealtime();
+        String session = rescueSession;
+        long sequence = lastRescueSequence;
         logStage("manual_hold_received", "profile=" + profile.name()
                 + " value=" + (source == CameraButtonBindings.Source.Sos ? 1 : 2)
-                + " sequence=" + operation.sequence);
+                + " sequence=" + sequence);
+
+        if (!AppPermissionProvisioner.hasBluetoothCallAccess(service)) {
+            logStage("call_replacement_declined", "reason=bluetooth_connect_permission_missing");
+            showLongToast(R.string.calls_picker_dial_failed);
+            return;
+        }
+
+        XCallScan initialScan = null;
+        try {
+            initialScan = scanXCallTargets();
+            if (initialScan.incomplete || initialScan.hasCallStageControl) {
+                logStage("call_replacement_declined", "reason="
+                        + (initialScan.incomplete
+                                ? "xcall_initial_scan_incomplete"
+                                : "xcall_call_stage_already_present"));
+                showLongToast(R.string.calls_picker_oem_cancel_failed);
+                return;
+            }
+        } catch (RuntimeException failure) {
+            logStage("call_replacement_declined", "reason=xcall_initial_scan_error_"
+                    + failure.getClass().getSimpleName());
+            showLongToast(R.string.calls_picker_oem_cancel_failed);
+            return;
+        } finally {
+            if (initialScan != null) initialScan.recycleTargets();
+        }
+
+        if (targetSearchExpired(startedAt, SystemClock.elapsedRealtime())) {
+            logStage("call_replacement_declined", "reason=xcall_initial_scan_deadline");
+            showLongToast(R.string.calls_picker_oem_cancel_failed);
+            return;
+        }
+
+        CallOperation operation = new CallOperation(++callGeneration, profile,
+                destination.number, session, sequence, startedAt);
+        operation.stage = CallStage.WAITING_FOR_TARGET;
+        callOperation = operation;
+        if (!mayContinue(operation)) return;
         handler.postDelayed(callTargetDeadline,
                 Math.max(0L, operation.startedAt + TARGET_WAIT_MS
                         - SystemClock.elapsedRealtime()));
@@ -753,22 +788,29 @@ public final class CallsRuntime {
                 return;
             }
             if (!mayContinue(operation)) return;
-            operation.stage = CallStage.CHECKING_DISMISSAL;
-            operation.clickedAt = SystemClock.elapsedRealtime();
-            operation.lastConfirmSample = 0;
-            operation.absentSamples = 0;
+            if (!AppPermissionProvisioner.hasBluetoothCallAccess(service)) {
+                failCall(operation, R.string.calls_picker_dial_failed,
+                        "bluetooth_connect_permission_missing");
+                return;
+            }
             if (targetSearchExpired(operation.startedAt, SystemClock.elapsedRealtime())) {
                 expireCallTargetSearch(operation);
                 return;
             }
             boolean clicked = target.node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            logStage("oem_cancel_action", "target=" + simpleId(target.id)
-                    + " accepted=" + clicked);
             if (!clicked) {
+                logStage("oem_cancel_action", "target=" + simpleId(target.id)
+                        + " accepted=false");
                 failCall(operation, R.string.calls_picker_oem_cancel_failed,
                         "xcall_action_rejected");
                 return;
             }
+            operation.stage = CallStage.CHECKING_DISMISSAL;
+            operation.clickedAt = SystemClock.elapsedRealtime();
+            operation.lastConfirmSample = 0;
+            operation.absentSamples = 0;
+            logStage("oem_cancel_action", "target=" + simpleId(target.id)
+                    + " accepted=true");
             handler.removeCallbacks(callTargetDeadline);
             handler.postDelayed(callConfirmPoll, 500L);
         } catch (RuntimeException failure) {
@@ -794,7 +836,8 @@ public final class CallsRuntime {
     private void expireCallTargetSearch(CallOperation operation) {
         failCall(operation, R.string.calls_picker_oem_cancel_failed,
                 operation.targetTreeIncomplete
-                        ? "xcall_target_tree_incomplete" : "xcall_target_not_found");
+                        ? "xcall_target_search_deadline_tree_incomplete"
+                        : "xcall_target_search_deadline_no_target");
     }
 
     private void confirmCallDismissal() {
@@ -945,7 +988,7 @@ public final class CallsRuntime {
     private void tryDismissAssignedHint(HintDismissRequest request) {
         if (request == null || request != hintDismissRequest || isBlocked()
                 || !rescueConnected || !request.session.equals(rescueSession)) return;
-        if (SystemClock.elapsedRealtime() > request.expiresAt) {
+        if (deadlineReached(SystemClock.elapsedRealtime(), request.expiresAt)) {
             cancelHintDismiss("hint_window_expired");
             return;
         }
@@ -955,14 +998,32 @@ public final class CallsRuntime {
         }
         XCallScan scan = scanXCallTargets();
         try {
+            if (deadlineReached(SystemClock.elapsedRealtime(), request.expiresAt)) {
+                cancelHintDismiss("hint_window_expired");
+                return;
+            }
             if (scan.incomplete || scan.hasCallStageControl) return;
             List<TargetNode> candidates = targetsForHint(scan);
             if (candidates.size() != 1) return;
             TargetNode target = candidates.get(0);
-            if (!target.node.refresh() || !target.node.isVisibleToUser()
-                    || !target.node.isEnabled()
-                    || !XCALL_PACKAGE.equals(packageName(target.node))
-                    || !isHintTarget(target.id)) return;
+            boolean validTarget = target.node.refresh() && target.node.isVisibleToUser()
+                    && target.node.isEnabled()
+                    && XCALL_PACKAGE.equals(packageName(target.node))
+                    && isHintTarget(target.id);
+            if (request != hintDismissRequest) return;
+            if (isBlocked() || !rescueConnected || !request.session.equals(rescueSession)) {
+                cancelHintDismiss("hint_context_changed");
+                return;
+            }
+            if (!hasSourceAssignment(currentRescueAssignments(preferences), request.source)) {
+                cancelHintDismiss("binding_removed");
+                return;
+            }
+            if (deadlineReached(SystemClock.elapsedRealtime(), request.expiresAt)) {
+                cancelHintDismiss("hint_window_expired");
+                return;
+            }
+            if (!validTarget) return;
             boolean clicked = target.node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
             logStage("assigned_hint_dismiss", "source=" + request.source.name()
                     + " target=" + simpleId(target.id) + " accepted=" + clicked);
@@ -1114,10 +1175,12 @@ public final class CallsRuntime {
     private void cancelPendingCall(String reason, boolean toast) {
         CallOperation operation = callOperation;
         if (operation == null) return;
+        boolean replacementIncomplete = operation.stage != CallStage.WAITING_FOR_TARGET;
         logStage("call_replacement_cancelled", "stage=" + operation.stage.name()
                 + " reason=" + reason + " dial_invoked=" + operation.dialInvoked);
         finishCall(operation);
-        if (toast && !isBlocked()) showLongToast(R.string.calls_picker_oem_cancel_failed);
+        if ((toast || replacementIncomplete) && !GuardRecovery.isUserShutdownActive(service))
+            showLongToast(R.string.calls_picker_oem_cancel_failed);
     }
 
     private void cancelHintDismiss(String reason) {
@@ -1276,13 +1339,17 @@ public final class CallsRuntime {
                 || XCALL_CANCEL.equals(id);
     }
 
-    static boolean isCallTargetEvent(int eventType, CharSequence packageName) {
+    static boolean isXCallTargetEvent(int eventType, CharSequence packageName) {
         return eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
                 || packageName != null && XCALL_PACKAGE.contentEquals(packageName);
     }
 
     static boolean targetSearchExpired(long startedAt, long now) {
-        return now >= startedAt + TARGET_WAIT_MS;
+        return deadlineReached(now, startedAt + TARGET_WAIT_MS);
+    }
+
+    static boolean deadlineReached(long now, long deadline) {
+        return now >= deadline;
     }
 
     private static String simpleId(String id) {

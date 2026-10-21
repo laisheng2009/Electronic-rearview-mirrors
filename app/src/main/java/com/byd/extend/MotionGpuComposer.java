@@ -249,11 +249,11 @@ final class MotionGpuComposer implements AutoCloseable {
                 new int[]{EGL14.EGL_NONE},0);
         require(context != EGL14.EGL_NO_CONTEXT && window != EGL14.EGL_NO_SURFACE, "encoder EGL surface");
         require(EGL14.eglMakeCurrent(display,window,window,context), "EGL current");
-        program = link("attribute vec2 p;attribute vec2 t;uniform mat4 m;varying vec2 uv;"
+        program = CameraDewarpRenderer.linkProgram("attribute vec2 p;attribute vec2 t;uniform mat4 m;varying vec2 uv;"
                 + "void main(){gl_Position=vec4(p,0.,1.);uv=(m*vec4(t,0.,1.)).xy;}",
                 "precision mediump float;"
                 + "uniform sampler2D s;varying vec2 uv;void main(){gl_FragColor=texture2D(s,uv);}");
-        iconProgram = link("attribute vec2 p;attribute vec2 t;varying vec2 uv;"
+        iconProgram = CameraDewarpRenderer.linkProgram("attribute vec2 p;attribute vec2 t;varying vec2 uv;"
                 + "void main(){gl_Position=vec4(p,0.,1.);uv=t;}",
                 "precision mediump float;uniform sampler2D s;varying vec2 uv;"
                 + "void main(){gl_FragColor=texture2D(s,uv);}");
@@ -596,19 +596,6 @@ final class MotionGpuComposer implements AutoCloseable {
     private static FloatBuffer floats(float... values) {
         FloatBuffer buffer=ByteBuffer.allocateDirect(values.length*4).order(ByteOrder.nativeOrder()).asFloatBuffer();
         buffer.put(values).position(0); return buffer;
-    }
-    private static int link(String vertex,String fragment) {
-        int v=shader(GLES20.GL_VERTEX_SHADER,vertex), f=shader(GLES20.GL_FRAGMENT_SHADER,fragment);
-        int p=GLES20.glCreateProgram();
-        GLES20.glAttachShader(p,v); GLES20.glAttachShader(p,f); GLES20.glLinkProgram(p);
-        GLES20.glDeleteShader(v); GLES20.glDeleteShader(f);
-        int[] status=new int[1]; GLES20.glGetProgramiv(p,GLES20.GL_LINK_STATUS,status,0);
-        require(status[0]!=0,GLES20.glGetProgramInfoLog(p)); return p;
-    }
-    private static int shader(int type,String source) {
-        int shader=GLES20.glCreateShader(type); GLES20.glShaderSource(shader,source); GLES20.glCompileShader(shader);
-        int[] status=new int[1]; GLES20.glGetShaderiv(shader,GLES20.GL_COMPILE_STATUS,status,0);
-        require(status[0]!=0,GLES20.glGetShaderInfoLog(shader)); return shader;
     }
     private static void require(boolean condition,String stage) {
         if(!condition) throw new IllegalStateException(stage+" EGL="+EGL14.eglGetError());

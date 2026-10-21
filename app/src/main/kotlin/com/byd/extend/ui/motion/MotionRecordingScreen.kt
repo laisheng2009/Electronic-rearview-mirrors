@@ -75,6 +75,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.byd.extend.MotionConfig
 import com.byd.extend.MotionDirectionIcon
 import com.byd.extend.MotionMediaLibrary
@@ -93,7 +94,9 @@ import com.byd.extend.ui.icons.DirectionsCar
 import com.byd.extend.ui.icons.Checklist
 import com.byd.extend.ui.icons.Videocam
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
@@ -243,7 +246,6 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings, archiv
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 val (read, write) = refreshStoragePermissions()
-                refreshKey++
                 val current = latestOptions
                 val recordingDenied = current.enabled && !motionStoragePermissionsGranted(
                     motionStoragePermissionNeeds(Build.VERSION.SDK_INT), read, write)
@@ -260,8 +262,16 @@ internal fun MotionRecordingScreen(colors: UiPalette, strings: UiStrings, archiv
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(refreshKey, archiveState, archiveState.archiveOpen) {
-        if (refreshKey > 0 || archiveState.archiveOpen) archiveState.refreshSnapshot()
+    val playerOpen = archiveState.playerEntry != null
+    LaunchedEffect(lifecycle, refreshKey, archiveState, archiveState.archiveOpen, playerOpen) {
+        if (playerOpen) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            archiveState.refreshSnapshot()
+            while (isActive) {
+                delay(5_000)
+                archiveState.refreshSnapshot(backgroundOnly = true)
+            }
+        }
     }
 
     Section(strings.motionText(R.string.motion_video_title), colors) {
@@ -909,7 +919,7 @@ private fun MotionArchiveDialog(
 
 private fun canDelete(entry: MotionMediaLibrary.Entry) =
     entry.status in setOf(MotionMediaLibrary.Status.COMPLETE, MotionMediaLibrary.Status.INTERRUPTED,
-        MotionMediaLibrary.Status.UNKNOWN) && entry.available && !entry.protectedFile
+        MotionMediaLibrary.Status.UNKNOWN) && !entry.protectedFile
 
 @Composable
 private fun CalendarPicker(

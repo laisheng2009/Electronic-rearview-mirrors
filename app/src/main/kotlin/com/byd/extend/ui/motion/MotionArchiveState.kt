@@ -60,7 +60,7 @@ internal class MotionArchiveState private constructor(context: Context) : Closea
         private set
     var removableVolumeIds by mutableStateOf(emptySet<String>())
         private set
-    val gridPositions = mutableStateMapOf<MotionArchiveGridKey, MotionArchiveGridPosition>()
+    val gridPositions = mutableMapOf<MotionArchiveGridKey, MotionArchiveGridPosition>()
 
     fun canRequestThumbnail(key: String): Boolean =
         pendingThumbnailRefreshes[key]?.let { thumbnailRefreshGeneration > it } ?: true

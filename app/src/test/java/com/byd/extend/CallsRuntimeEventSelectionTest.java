@@ -10,16 +10,16 @@ import static org.junit.Assert.assertTrue;
 public final class CallsRuntimeEventSelectionTest {
     @Test
     public void selectsXCallEventsAndWindowChangesForTargetRescans() {
-        assertTrue(CallsRuntime.isCallTargetEvent(
+        assertTrue(CallsRuntime.isXCallTargetEvent(
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, "com.byd.xcall"));
-        assertTrue(CallsRuntime.isCallTargetEvent(
+        assertTrue(CallsRuntime.isXCallTargetEvent(
                 AccessibilityEvent.TYPE_WINDOWS_CHANGED, null));
-        assertTrue(CallsRuntime.isCallTargetEvent(
+        assertTrue(CallsRuntime.isXCallTargetEvent(
                 AccessibilityEvent.TYPE_WINDOWS_CHANGED, "com.android.systemui"));
 
-        assertFalse(CallsRuntime.isCallTargetEvent(
+        assertFalse(CallsRuntime.isXCallTargetEvent(
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, "com.android.systemui"));
-        assertFalse(CallsRuntime.isCallTargetEvent(
+        assertFalse(CallsRuntime.isXCallTargetEvent(
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, null));
     }
 
@@ -28,5 +28,11 @@ public final class CallsRuntimeEventSelectionTest {
         assertFalse(CallsRuntime.targetSearchExpired(1_000L, 2_999L));
         assertTrue(CallsRuntime.targetSearchExpired(1_000L, 3_000L));
         assertTrue(CallsRuntime.targetSearchExpired(1_000L, 3_001L));
+    }
+
+    @Test
+    public void hintWindowExpiresAtItsDeadline() {
+        assertFalse(CallsRuntime.deadlineReached(1_799L, 1_800L));
+        assertTrue(CallsRuntime.deadlineReached(1_800L, 1_800L));
     }
 }

@@ -37,6 +37,7 @@ import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /** Surface-input H.264 recorder with bounded keyframe-aware pre-roll and event post-roll. */
@@ -123,7 +124,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private volatile boolean videoFailed;
     private volatile MediaCodec videoEncoder;
     private volatile Surface inputSurface;
-    private volatile long requestedFinishDeadlineMs = Long.MIN_VALUE;
+    private final FinishState finishState = new FinishState();
     private volatile String stopReason;
 
     private MotionConfig config;
@@ -143,7 +144,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
     private long chainLastAudioElapsedUs = Long.MIN_VALUE;
     private boolean bufferedTailUnavailable;
     private boolean mergeWaitAbandoned;
-    private volatile boolean finishRequested;
+    private boolean finishRequested;
     private long videoPtsOffsetUs = Long.MIN_VALUE;
     private long audioPtsOffsetUs = Long.MIN_VALUE;
     private volatile long lastVideoElapsedUs = Long.MIN_VALUE;
@@ -237,7 +238,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
             finishRequested = false;
             outputRestartUntilElapsedMs = Long.MIN_VALUE;
             outputRestartVolumeId = null;
-            requestedFinishDeadlineMs = Long.MIN_VALUE;
+            finishState.reset();
             videoPtsOffsetUs = Long.MIN_VALUE;
             audioPtsOffsetUs = Long.MIN_VALUE;
             lastVideoElapsedUs = Long.MIN_VALUE;
@@ -329,9 +330,14 @@ public final class MotionVideoRecorder implements AutoCloseable {
 
     /** Extends or sets the current absolute elapsedRealtime deadline; event post-roll is never shortened. */
     public void finishAfter(long deadlineMs) {
-        if (!buffering || deadlineMs < 0) return;
-        finishRequested = true;
-        requestedFinishDeadlineMs = Math.max(requestedFinishDeadlineMs, deadlineMs);
+        if (!buffering || stopRequested || deadlineMs < 0) return;
+        finishState.requestFinish(deadlineMs);
+    }
+
+    /** Reopens event acceptance on this recorder unless terminal stop has already begun. */
+    void resumeAfterFinish() {
+        if (!buffering || stopRequested) return;
+        finishState.requestResume();
     }
 
     /** Stops gracefully, finalizing and publishing any complete muxed segments. */
@@ -602,6 +608,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
         try {
             while (!stopRequested) {
                 long now = SystemClock.elapsedRealtime();
+                applyFinishState();
                 if (shellMediaContext != null && now >= nextPermissionCheckMs) {
                     nextPermissionCheckMs = now + 1_000L;
                     if (!storage.hasMotionStoragePermission()) {
@@ -613,9 +620,10 @@ public final class MotionVideoRecorder implements AutoCloseable {
                 }
                 collectTimelineItems();
                 processTimelineItems();
-                applyFinishRequest();
+                applyFinishState();
                 tryOpenPendingDetection();
                 trimRing();
+                applyFinishState();
                 if (activeClip != null) {
                     long finalizeNowMs = SystemClock.elapsedRealtime();
                     boolean postRollComplete = MotionRecorderTimeline.postRollRecorded(
@@ -811,6 +819,7 @@ public final class MotionVideoRecorder implements AutoCloseable {
         iteration.sort(Comparator.comparingLong(TimelineItem::elapsedUs)
                 .thenComparingInt(item -> item.detection == null ? 0 : 1));
         for (TimelineItem item : iteration) {
+            applyFinishState();
             if (item.detection != null) {
                 if (!stopRequested) processDetection(item.detection);
             }
@@ -1473,9 +1482,47 @@ public final class MotionVideoRecorder implements AutoCloseable {
         if (packet.elapsedUs > lastWrittenUs) bufferedTailUnavailable = true;
     }
 
-    private void applyFinishRequest() {
-        long requested = requestedFinishDeadlineMs;
-        if (requested != Long.MIN_VALUE) extendFinishDeadline(requested);
+    private void applyFinishState() {
+        long requestedDeadline = finishState.apply(finishDeadlineMs);
+        if (requestedDeadline > finishDeadlineMs) extendFinishDeadline(requestedDeadline);
+        finishRequested = finishState.finishing();
+    }
+
+    static final class FinishState {
+        private static final long NO_COMMAND = Long.MIN_VALUE;
+        private static final long RESUME_COMMAND = Long.MIN_VALUE + 1;
+
+        private final AtomicLong command = new AtomicLong(NO_COMMAND);
+        private boolean finishing;
+
+        void requestFinish(long deadlineMs) {
+            if (deadlineMs < 0) return;
+            while (true) {
+                long current = command.get();
+                long requested = current == RESUME_COMMAND
+                        ? deadlineMs : Math.max(current, deadlineMs);
+                if (command.compareAndSet(current, requested)) return;
+            }
+        }
+
+        void requestResume() { command.set(RESUME_COMMAND); }
+
+        long apply(long deadlineMs) {
+            long requested = command.getAndSet(NO_COMMAND);
+            if (requested == RESUME_COMMAND) finishing = false;
+            else if (requested >= 0) {
+                finishing = true;
+                deadlineMs = Math.max(deadlineMs, requested);
+            }
+            return deadlineMs;
+        }
+
+        boolean finishing() { return finishing; }
+
+        void reset() {
+            command.set(NO_COMMAND);
+            finishing = false;
+        }
     }
 
     private void extendFinishDeadline(long deadlineMs) {

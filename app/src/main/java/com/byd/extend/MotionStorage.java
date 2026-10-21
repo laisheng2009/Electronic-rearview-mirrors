@@ -18,6 +18,7 @@ import android.util.Log;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FilenameFilter;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -331,12 +332,13 @@ public final class MotionStorage {
             return rows;
         }
         if (!oemMediaPermissionGranted()) throw new IOException("Motion storage read permission is not granted");
-        File directory = motionDirectory(volume);
-        if (directory == null || !directory.isDirectory()) return Collections.emptyList();
-        File[] files = directory.listFiles((parent, name) -> name.toLowerCase(java.util.Locale.ROOT).endsWith(".mp4"));
-        if (files == null) throw new IOException("Motion media directory is unreadable");
+        File directory = queryMotionDirectory(volume.publicRoot, Environment.DIRECTORY_MOVIES);
+        if (directory == null) return Collections.emptyList();
+        String[] names = listChildren(directory,
+                (parent, name) -> name.toLowerCase(java.util.Locale.ROOT).endsWith(".mp4"));
         ArrayList<OwnedMedia> rows = new ArrayList<>();
-        for (File file : files) {
+        for (String name : names) {
+            File file = new File(directory, name);
             if (!file.isFile()) continue;
             rows.add(new OwnedMedia(Uri.fromFile(file), file.getName(), volume.id,
                     file.lastModified(), 0, file.length(), 0, 0, false));
@@ -397,8 +399,14 @@ public final class MotionStorage {
         if (volume == null || uri == null) return MediaStoreOwnership.OTHER;
         if (!volume.mounted) throw new IOException("Motion volume is not mounted");
         if (!oemMediaPermissionGranted()) throw new IOException("Motion storage read permission is not granted");
-        if (Build.VERSION.SDK_INT < 29) return isOwnedMedia(volume, uri)
-                ? MediaStoreOwnership.OWNED : MediaStoreOwnership.OTHER;
+        if (Build.VERSION.SDK_INT < 29) {
+            if (!isOwnedMedia(volume, uri)) return MediaStoreOwnership.OTHER;
+            File file = new File(uri.getPath());
+            File directory = queryMotionDirectory(volume.publicRoot, Environment.DIRECTORY_MOVIES);
+            if (directory == null) return MediaStoreOwnership.ABSENT;
+            String[] matches = listChildren(directory, (parent, name) -> name.equals(file.getName()));
+            return matches.length == 0 ? MediaStoreOwnership.ABSENT : MediaStoreOwnership.OWNED;
+        }
         if (!isVolumeMediaUri(volume, uri)) return MediaStoreOwnership.OTHER;
         String[] columns = {MediaStore.MediaColumns._ID, MediaStore.MediaColumns.OWNER_PACKAGE_NAME,
                 MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.IS_PENDING};
@@ -411,6 +419,15 @@ public final class MotionStorage {
         } catch (RuntimeException failure) {
             throw new IOException("Cannot validate Motion MediaStore record", failure);
         }
+    }
+
+    boolean canConfirmAbsent(Volume volume, Uri uri) throws IOException {
+        if (volume == null || !volume.mounted || volume.readOnly || uri == null
+                || !oemMediaPermissionGranted()) return false;
+        if (Build.VERSION.SDK_INT >= 29) return isVolumeMediaUri(volume, uri);
+        if (!isOwnedMedia(volume, uri)) return false;
+        queryMotionDirectory(volume.publicRoot, Environment.DIRECTORY_MOVIES);
+        return true;
     }
 
     ParcelFileDescriptor openMediaFileDescriptor(Uri uri, String mode) throws IOException {
@@ -1030,6 +1047,27 @@ public final class MotionStorage {
     private File motionDirectory(Volume volume) {
         return volume.publicRoot == null ? null
                 : new File(volume.publicRoot, Environment.DIRECTORY_MOVIES + "/BYD Extend/Motion");
+    }
+
+    static File queryMotionDirectory(File publicRoot, String moviesDirectoryName) throws IOException {
+        if (moviesDirectoryName == null || moviesDirectoryName.isEmpty())
+            throw new IOException("Motion media directory is unavailable");
+        File directory = publicRoot;
+        for (String child : new String[]{moviesDirectoryName, "BYD Extend", "Motion"}) {
+            String[] matches = listChildren(directory, (parent, name) -> name.equals(child));
+            if (matches.length == 0) return null;
+            directory = new File(directory, child);
+        }
+        if (!directory.isDirectory()) throw new IOException("Cannot query Motion media directory");
+        return directory;
+    }
+
+    private static String[] listChildren(File directory, FilenameFilter filter) throws IOException {
+        if (directory == null || !directory.isDirectory())
+            throw new IOException("Cannot query Motion media directory");
+        String[] children = directory.list(filter);
+        if (children == null) throw new IOException("Cannot query Motion media directory");
+        return children;
     }
 
     private boolean isOwnedDestination(Volume volume, File file) {

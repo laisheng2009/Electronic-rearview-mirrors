@@ -631,6 +631,7 @@ public final class MotionDetectorShellMain {
             }
         }
         synchronized (binder) { manualCheck = null; }
+        if (!teardownPending) holdCpu(false);
         checkResult(check, status, reason, detail, true);
     }
 
@@ -910,6 +911,10 @@ public final class MotionDetectorShellMain {
         eligible = true;
         policy.setEligible(true, SystemClock.elapsedRealtime() - MotionDetectorProtocol.WARMUP_MS);
         screen.setEligible(id, true);
+        if (recorder != null && recorder.isBuffering() && !recordingStopRequested) {
+            control.removeCallbacks(recordingTailFinished);
+            recorder.resumeAfterFinish();
+        }
         state = "waiting_for_frames";
         lastReportedDetectorState = "";
         firstInferenceReceived = false;
@@ -1468,6 +1473,7 @@ public final class MotionDetectorShellMain {
         sendStatus(id, cancelled ? "warning_user_dismissed" : closed ? "warning_window_closed" : "warning_window_unavailable",
                 "Activity closed=" + closed + "; cancelled=" + cancelled);
         if (teardownPending) continuePendingTeardown();
+        else holdCpu(false);
     }
 
     private void finishWarningAfterPolicy() {
@@ -1587,8 +1593,11 @@ public final class MotionDetectorShellMain {
     }
 
     private void holdCpu(boolean required) {
-        // Do not sleep between an OEM keepalive and its confirmed release.
-        required |= !cameraPreparation.stopped();
+        required = requiresCpuHold(required,
+                sessionId != null,
+                sessionRuntime.arming() || sessionRuntime.armed() || eligible,
+                warning, !cameraPreparation.stopped(), manualCheck != null,
+                recorder != null && recorder.isBuffering());
         try {
             if (required && wakeLock == null) {
                 Context attributedContext = TurnSignalShellMain.shellContext(systemContext);
@@ -1603,6 +1612,13 @@ public final class MotionDetectorShellMain {
         } catch (Exception error) {
             if (sessionId != null) sendError(sessionId, "wake_lock", summary(error));
         }
+    }
+
+    static boolean requiresCpuHold(boolean requested, boolean liveSession, boolean sessionActive,
+            boolean warningActive, boolean preparing, boolean manualCheckActive,
+            boolean recorderBuffering) {
+        return requested || liveSession && sessionActive || warningActive || preparing || manualCheckActive
+                || recorderBuffering;
     }
 
     private void acceptTelemetry(String id, String line) {
@@ -1948,6 +1964,7 @@ public final class MotionDetectorShellMain {
                 else detachAndCloseReader(false);
             }
             updateCameraDemand();
+            if (!teardownPending) holdCpu(false);
             return;
         }
         if (!sameSession(id) || generation != recordingGeneration) return;
@@ -2184,7 +2201,6 @@ public final class MotionDetectorShellMain {
         }
 
         deleteNative();
-        holdCpu(false);
         control.removeCallbacks(warningCloseTimeout);
         warningWindowGeneration++;
         warningWindowCommands = null;
@@ -2231,6 +2247,7 @@ public final class MotionDetectorShellMain {
                 System.err.flush();
             }
         }
+        holdCpu(false);
     }
 
     private boolean detachAndCloseReader(boolean surfacesDrained) {

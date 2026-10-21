@@ -1154,36 +1154,43 @@ final class CameraDewarpRenderer {
     }
 
     static int linkProgram(String vertexSource, String fragmentSource) {
-        int vertex = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
-        int fragment = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
-        int linked = GLES20.glCreateProgram();
-        GLES20.glAttachShader(linked, vertex);
-        GLES20.glAttachShader(linked, fragment);
-        GLES20.glLinkProgram(linked);
-        int[] status = new int[1];
-        GLES20.glGetProgramiv(linked, GLES20.GL_LINK_STATUS, status, 0);
-        GLES20.glDeleteShader(vertex);
-        GLES20.glDeleteShader(fragment);
-        if (status[0] == 0) {
-            String error = GLES20.glGetProgramInfoLog(linked);
-            GLES20.glDeleteProgram(linked);
-            throw new IllegalStateException("GL program link failed: " + error);
+        int vertex = 0, fragment = 0, linked = 0;
+        boolean complete = false;
+        try {
+            vertex = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
+            fragment = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
+            linked = GLES20.glCreateProgram();
+            GLES20.glAttachShader(linked, vertex);
+            GLES20.glAttachShader(linked, fragment);
+            GLES20.glLinkProgram(linked);
+            int[] status = new int[1];
+            GLES20.glGetProgramiv(linked, GLES20.GL_LINK_STATUS, status, 0);
+            if (status[0] == 0)
+                throw new IllegalStateException("GL program link failed: " + GLES20.glGetProgramInfoLog(linked));
+            complete = true;
+            return linked;
+        } finally {
+            if (vertex != 0) GLES20.glDeleteShader(vertex);
+            if (fragment != 0) GLES20.glDeleteShader(fragment);
+            if (!complete && linked != 0) GLES20.glDeleteProgram(linked);
         }
-        return linked;
     }
 
     private static int compileShader(int type, String source) {
         int shader = GLES20.glCreateShader(type);
-        GLES20.glShaderSource(shader, source);
-        GLES20.glCompileShader(shader);
-        int[] status = new int[1];
-        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0);
-        if (status[0] == 0) {
-            String error = GLES20.glGetShaderInfoLog(shader);
-            GLES20.glDeleteShader(shader);
-            throw new IllegalStateException("GL shader compile failed: " + error);
+        boolean complete = false;
+        try {
+            GLES20.glShaderSource(shader, source);
+            GLES20.glCompileShader(shader);
+            int[] status = new int[1];
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0);
+            if (status[0] == 0)
+                throw new IllegalStateException("GL shader compile failed: " + GLES20.glGetShaderInfoLog(shader));
+            complete = true;
+            return shader;
+        } finally {
+            if (!complete && shader != 0) GLES20.glDeleteShader(shader);
         }
-        return shader;
     }
 
     private static void require(boolean condition, String message) {

@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.IOException;
@@ -58,5 +59,32 @@ public final class MotionStorageOemPathTest {
         assertNotNull(row);
         assertEquals(databasePath, row.path);
         assertEquals(file.getCanonicalFile(), row.file);
+    }
+
+    @Test public void motionDirectoryQueryDistinguishesPresentAbsentAndNonDirectoryPaths() throws Exception {
+        File publicRoot = temporaryFolder.newFolder("motion-public-root");
+        assertNull(MotionStorage.queryMotionDirectory(publicRoot, "Movies"));
+
+        File movies = new File(publicRoot, "Movies");
+        assertTrue(movies.mkdir());
+        assertNull(MotionStorage.queryMotionDirectory(publicRoot, "Movies"));
+
+        File bydExtend = new File(movies, "BYD Extend");
+        assertTrue(bydExtend.mkdir());
+        assertNull(MotionStorage.queryMotionDirectory(publicRoot, "Movies"));
+
+        File motion = new File(bydExtend, "Motion");
+        assertTrue(motion.mkdir());
+        assertEquals(motion.getCanonicalFile(),
+                MotionStorage.queryMotionDirectory(publicRoot, "Movies").getCanonicalFile());
+
+        File nonDirectoryRoot = temporaryFolder.newFolder("motion-nondirectory-root");
+        assertTrue(new File(nonDirectoryRoot, "Movies").createNewFile());
+        try {
+            MotionStorage.queryMotionDirectory(nonDirectoryRoot, "Movies");
+            fail("Expected a non-directory path to be treated as an unqueryable volume");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("Cannot query Motion media directory"));
+        }
     }
 }
