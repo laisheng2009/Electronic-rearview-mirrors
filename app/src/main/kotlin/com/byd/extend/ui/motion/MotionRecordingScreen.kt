@@ -330,6 +330,7 @@ internal fun FormScope.MotionRecordingScreen(
             this
         }
 
+        row("motion-video-gap") { Spacer(Modifier.height(12.dp)) }
         FormSection(strings.motionText(R.string.motion_storage), colors, key = "motion-storage") {
             row("primary") {
                 Text(strings.motionText(R.string.motion_storage_primary), color = colors.text, fontSize = 16.sp,
@@ -371,6 +372,7 @@ internal fun FormScope.MotionRecordingScreen(
             this
         }
 
+        row("motion-storage-gap") { Spacer(Modifier.height(12.dp)) }
         row("motion-recording-battery-archive") {
             Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Column(Modifier.weight(1f).fillMaxHeight()) { battery() }

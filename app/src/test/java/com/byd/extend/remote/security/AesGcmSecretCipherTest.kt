@@ -2,6 +2,8 @@ package com.byd.extend.remote.security
 
 import javax.crypto.SecretKey
 import javax.crypto.KeyGenerator
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
@@ -9,6 +11,19 @@ import org.junit.Test
 
 class AesGcmSecretCipherTest {
     private val key: SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+
+    @Test
+    fun readsTheExistingEnvelopeAndRoundTripsASingleCharacterPassword() {
+        val name = "camera.vdo.password"
+        val nonce = ByteArray(12) { it.toByte() }
+        val oldWriter = Cipher.getInstance("AES/GCM/NoPadding")
+        oldWriter.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, nonce))
+        oldWriter.updateAAD(name.toByteArray(Charsets.UTF_8))
+        val record = byteArrayOf(1) + nonce + oldWriter.doFinal("1".toByteArray())
+        val cipher = AesGcmSecretCipher(key)
+        assertArrayEquals("1".toByteArray(), cipher.decrypt(name, record))
+        assertArrayEquals("1".toByteArray(), cipher.decrypt(name, cipher.encrypt(name, "1".toByteArray())))
+    }
 
     @Test
     fun encryptsAndAuthenticatesTheSecretAndItsName() {

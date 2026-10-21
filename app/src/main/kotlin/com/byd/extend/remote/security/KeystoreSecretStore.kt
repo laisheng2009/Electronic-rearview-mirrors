@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import java.security.KeyStore
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -64,11 +65,18 @@ class KeystoreSecretStore(context: Context) {
         check(editor.commit()) { "Could not remove encrypted secrets" }
     }
 
-    /** JNI entry points. Errors are thrown back through JNI and are never logged here. */
-    fun getNative(key: String): ByteArray? = get(key)
-    fun putNative(key: String, value: ByteArray) = put(key, value)
-    fun removeNative(key: String) = remove(key)
-    fun removePrefixNative(prefix: String) = removePrefix(prefix)
+    /** JNI clears exceptions: retain their class and operation, never secret names or values. */
+    fun getNative(key: String): ByteArray? = nativeOperation("read") { get(key) }
+    fun putNative(key: String, value: ByteArray) = nativeOperation("write") { put(key, value) }
+    fun removeNative(key: String) = nativeOperation("remove") { remove(key) }
+    fun removePrefixNative(prefix: String) = nativeOperation("remove_prefix") { removePrefix(prefix) }
+
+    private fun <T> nativeOperation(operation: String, action: () -> T): T = try { action() }
+    catch (failure: Exception) {
+        Log.w("CameraViewing", "secret_$operation type=${failure.javaClass.simpleName}" +
+            " cause=${failure.cause?.javaClass?.simpleName ?: "none"}")
+        throw failure
+    }
 
     private fun loadOrCreateKey(): SecretKey = synchronized(keyLock) {
         val store = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }

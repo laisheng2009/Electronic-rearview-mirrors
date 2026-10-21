@@ -2,7 +2,6 @@ package com.byd.extend.remote.security
 
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
-import java.security.SecureRandom
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
@@ -11,12 +10,13 @@ import javax.crypto.spec.GCMParameterSpec
 /** AES-GCM envelope for small app secrets. The record is version || nonce || ciphertext+tag. */
 internal class AesGcmSecretCipher(
     private val key: SecretKey,
-    private val random: SecureRandom = SecureRandom(),
 ) {
     fun encrypt(name: String, plaintext: ByteArray): ByteArray {
-        val nonce = ByteArray(NONCE_BYTES).also(random::nextBytes)
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(TAG_BITS, nonce))
+        // Android Keystore requires a provider-generated IV for randomized-encryption keys.
+        cipher.init(Cipher.ENCRYPT_MODE, key)
+        val nonce = cipher.iv
+        check(nonce.size == NONCE_BYTES)
         cipher.updateAAD(name.toByteArray(StandardCharsets.UTF_8))
         val ciphertext = cipher.doFinal(plaintext)
         return ByteBuffer.allocate(1 + nonce.size + ciphertext.size)

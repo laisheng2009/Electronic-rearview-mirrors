@@ -3,11 +3,12 @@ package com.byd.extend;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -140,6 +141,7 @@ public final class CameraChargeTelemetry {
         private final Runnable poll = this::poll;
         private FixedBydTelemetryManager manager;
         private FixedBydTelemetryManager.Subscription subscription;
+        private final Map<String, String> failures = new HashMap<>();
         private boolean active;
 
         Owner(Context context, Handler handler, StateSink sink) throws IOException {
@@ -158,7 +160,6 @@ public final class CameraChargeTelemetry {
             policy.setThresholds(config.chargeSocThresholdPercent, config.chargeVoltageThresholdTenths);
             active = true;
             policy.setMonitoring(true);
-            trySubscribe();
             readNow(); // Initial values are evaluated before any Motion camera/native preparation.
             handler.removeCallbacks(poll);
             handler.postDelayed(poll, POLL_INTERVAL_MS);
@@ -189,14 +190,26 @@ public final class CameraChargeTelemetry {
 
         private Integer readSoc(FixedBydTelemetryManager source) {
             if (source == null) return null;
-            try { return decodeSoc(source.readBuffer(SOC_DEVICE, SOC_FID)); }
-            catch (Throwable unavailable) { return null; }
+            try {
+                int value = source.readInt(SOC_DEVICE, SOC_FID);
+                reportFailure("soc_read", null);
+                return value;
+            } catch (Throwable unavailable) {
+                reportFailure("soc_read", unavailable);
+                return null;
+            }
         }
 
         private Float readVoltage(FixedBydTelemetryManager source) {
             if (source == null) return null;
-            try { return decodeVoltage(source.readBuffer(VOLTAGE_DEVICE, VOLTAGE_FID)); }
-            catch (Throwable unavailable) { return null; }
+            try {
+                float value = source.readFloat(VOLTAGE_DEVICE, VOLTAGE_FID);
+                reportFailure("voltage_read", null);
+                return value;
+            } catch (Throwable unavailable) {
+                reportFailure("voltage_read", unavailable);
+                return null;
+            }
         }
 
         private void trySubscribe() {
@@ -212,8 +225,10 @@ public final class CameraChargeTelemetry {
                         handler.post(() -> acceptError());
                     }
                 });
+                reportFailure("subscribe", null);
             } catch (Throwable unavailable) {
-                manager = null;
+                // A refused callback subscription must not disable independent typed GETs.
+                reportFailure("subscribe", unavailable);
             }
         }
 
@@ -223,15 +238,16 @@ public final class CameraChargeTelemetry {
             else if (device == VOLTAGE_DEVICE && fid == VOLTAGE_FID)
                 policy.updateVoltage(Float.intBitsToFloat(raw));
             else return;
+            reportFailure("callback", null);
             sink.onState(policy.snapshot());
         }
 
         private void acceptError() {
             if (!active) return;
             closeSubscription();
-            manager = null;
-            sink.onState(policy.markUnavailable(CameraChargePolicy.MISSING_SOC
-                    | CameraChargePolicy.MISSING_VOLTAGE));
+            if (failures.put("callback", "listener_error") == null)
+                Log.w("CameraCharge", "callback failed; typed polling remains active");
+            // Existing polling refreshes each signal independently, including callback recovery.
         }
 
         @Override public void close() {
@@ -252,17 +268,15 @@ public final class CameraChargeTelemetry {
             }
         }
 
-        static int decodeSoc(byte[] bytes) {
-            if (bytes == null || bytes.length != 4)
-                throw new IllegalArgumentException("SOC buffer must contain one 32-bit integer");
-            return ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder()).getInt();
-        }
-
-        static float decodeVoltage(byte[] bytes) {
-            if (bytes == null || bytes.length != 4)
-                throw new IllegalArgumentException("12V buffer must contain one 32-bit float");
-            int raw = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder()).getInt();
-            return Float.intBitsToFloat(raw);
+        private void reportFailure(String stage, Throwable failure) {
+            if (failure == null) {
+                if (failures.remove(stage) != null) Log.i("CameraCharge", stage + " recovered");
+                return;
+            }
+            Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+            String type = cause.getClass().getSimpleName();
+            if (!type.equals(failures.put(stage, type)))
+                Log.w("CameraCharge", stage + " failed type=" + type);
         }
     }
 }

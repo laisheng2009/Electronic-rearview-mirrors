@@ -161,20 +161,22 @@ internal fun FormScope.MotionIntegrationScreen(
             } finally { importing = false }
         }
     }
-    row("camera-checkup") { MotionCheckupSection(colors, strings) { checkupOpen = true } }
+    row("camera-checkup") {
+        MotionCheckupSection(colors, strings, parkedBatteryNotice = tab != 2) { checkupOpen = true }
+        Spacer(Modifier.height(12.dp))
+    }
     row("camera-tabs") {
         Segmented(listOf(R.string.cameras_tablet, R.string.cameras_recording, R.string.cameras_viewing)
             .map { strings.motionText(it) }, tab, colors, Modifier.fillMaxWidth()) {
             focus.clearFocus()
             tab = it
         }
-    }
-    if (tab != 2) row("camera-battery-notice") {
-        Text(strings.motionText(R.string.cameras_battery_notice), color = colors.yellow, fontSize = 13.sp)
+        Spacer(Modifier.height(12.dp))
     }
     if (tab == 0) {
         row("motion-notice") {
             Text(strings.motionText(R.string.motion_notice), color = colors.muted, fontSize = 13.sp)
+            Spacer(Modifier.height(12.dp))
         }
         row("motion-tablet-settings") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -217,6 +219,7 @@ internal fun FormScope.MotionIntegrationScreen(
                 }
             }
         }
+        row("motion-tablet-gap") { Spacer(Modifier.height(12.dp)) }
         row("motion-tablet-battery") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Column(Modifier.weight(1f)) { battery() }

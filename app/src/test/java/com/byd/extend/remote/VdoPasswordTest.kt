@@ -7,8 +7,8 @@ import org.junit.Test
 
 class VdoPasswordTest {
     @Test fun signalingRequiresTheConfiguredPasswordAndRejectsPlaintextDowngrade() {
-        val publisher = PasswordContext("camera-password", "vdo.ninja")
-        val viewer = PasswordContext("camera-password", "vdo.ninja")
+        val publisher = PasswordContext("1", "vdo.ninja")
+        val viewer = PasswordContext("1", "vdo.ninja")
         val description = JSONObject().put("type", "answer").put("sdp", "test-description")
         val envelope = JSONObject()
         viewer.encryptInto(envelope, "description", description)

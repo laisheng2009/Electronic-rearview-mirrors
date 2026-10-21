@@ -30,7 +30,8 @@ import com.byd.extend.ui.UiPalette
 import com.byd.extend.ui.UiStrings
 
 @Composable
-internal fun MotionCheckupSection(colors: UiPalette, strings: UiStrings, onRun: () -> Unit) {
+internal fun MotionCheckupSection(colors: UiPalette, strings: UiStrings,
+    parkedBatteryNotice: Boolean = false, onRun: () -> Unit) {
     Section(strings.resource(R.string.motion_check_title), colors) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -39,6 +40,8 @@ internal fun MotionCheckupSection(colors: UiPalette, strings: UiStrings, onRun: 
             ActionButton(strings.resource(R.string.motion_check_run), colors,
                 icon = Icons.Outlined.CheckCircle, onClick = onRun)
         }
+        if (parkedBatteryNotice) Text(strings.resource(R.string.cameras_battery_notice),
+            color = colors.yellow, fontSize = 13.sp)
     }
 }
 

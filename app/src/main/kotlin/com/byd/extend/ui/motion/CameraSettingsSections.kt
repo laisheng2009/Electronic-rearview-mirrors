@@ -46,6 +46,7 @@ import com.byd.extend.CameraChargeSettings
 import com.byd.extend.CameraChargeTelemetry
 import com.byd.extend.R
 import com.byd.extend.remote.CameraViewingController
+import com.byd.extend.remote.CameraViewingEdits
 import com.byd.extend.ui.ActionButton
 import com.byd.extend.ui.ChoiceField
 import com.byd.extend.ui.FormScope
@@ -141,6 +142,7 @@ internal fun FormScope.CameraViewingScreen(
     var revealPassword by remember { mutableStateOf(false) }
     var revealToken by remember { mutableStateOf(false) }
     var showQr by remember { mutableStateOf(false) }
+    var suppressFocusCommit by remember { mutableStateOf(false) }
     val transport = state.config.transport
     val isZrok = transport == "zrok"
 
@@ -155,35 +157,41 @@ internal fun FormScope.CameraViewingScreen(
         revealToken = false
     }
 
-    fun commitStreamIdEdit() {
-        if (streamIdDirty) {
-            controller.setStreamId(streamIdDraft)
-            streamIdDirty = false
-        }
-    }
-
-    fun commitPasswordEdit() {
-        if (passwordLoaded && passwordDirty) {
-            controller.setPassword(passwordDraft)
-            passwordDirty = false
-        }
-    }
-
-    fun commitTokenEdit() {
-        if (tokenLoaded && tokenDirty) {
-            controller.setToken(tokenDraft)
-            tokenDirty = false
+    fun submit(
+        enabled: Boolean? = null,
+        nextTransport: String? = null,
+        public: Boolean? = null,
+        authorize: Boolean = false,
+        regenerate: Boolean = false,
+    ) {
+        val edits = CameraViewingEdits(transport,
+            streamIdDraft.takeIf { streamIdDirty },
+            passwordDraft.takeIf { passwordLoaded && passwordDirty },
+            tokenDraft.takeIf { tokenLoaded && tokenDirty })
+        controller.update(edits, enabled, nextTransport, public, authorize, regenerate) {
+            if (controller.state.value.config.transport == edits.transport) {
+                if (edits.streamId != null && streamIdDraft == edits.streamId) {
+                    streamIdDirty = false
+                    streamIdDraft = controller.state.value.config.streamId
+                }
+                if (edits.password != null && passwordDraft == edits.password) passwordDirty = false
+                if (edits.token != null && tokenDraft == edits.token) tokenDirty = false
+            }
         }
     }
 
     fun commitEdits() {
-        commitStreamIdEdit()
-        commitPasswordEdit()
-        commitTokenEdit()
+        if (!suppressFocusCommit && (streamIdDirty || passwordDirty || tokenDirty)) submit()
+    }
+
+    fun clearFocusForAction() {
+        suppressFocusCommit = true
+        focus.clearFocus()
+        suppressFocusCommit = false
     }
 
     LaunchedEffect(transport, state.config.tailscalePublic) {
-        focus.clearFocus()
+        clearFocusForAction()
         streamIdDraft = state.config.streamId
         streamIdDirty = false
         clearLocalSecrets()
@@ -204,9 +212,17 @@ internal fun FormScope.CameraViewingScreen(
     LaunchedEffect(state.config.streamId) {
         if (!streamIdDirty) streamIdDraft = state.config.streamId
     }
+    LaunchedEffect(state.authorizationRequest) {
+        val request = state.authorizationRequest
+        if (request != 0L) state.authorizationUrl?.let { url ->
+            controller.authorizationOpened(request)
+            openAuthorization(context, url, strings)
+        }
+    }
+    val commitLatest by rememberUpdatedState(::commitEdits)
     DisposableEffect(controller) {
         onDispose {
-            commitEdits()
+            commitLatest()
             passwordDraft = ""
             tokenDraft = ""
             passwordDirty = false
@@ -223,14 +239,11 @@ internal fun FormScope.CameraViewingScreen(
     }
     val phase = state.phase
     val blocked = chargeState.isBlocked()
-    val hasViewerUrl = state.viewerUrl != null
-    val readyToStart = phase == "ready" && !hasViewerUrl
-    val active = phase == "preparing" || phase == "connected" || phase == "low_battery" ||
-        (phase == "ready" && hasViewerUrl)
     val passwordRequired = transport == "vdo" || transport == "zrok" ||
         (transport == "tailscale" && state.config.tailscalePublic)
-    val passwordAvailable = state.passwordConfigured || passwordDraft.isNotBlank()
-    val tokenAvailable = transport != "zrok" || state.tokenConfigured || tokenDraft.isNotBlank()
+    val passwordAvailable = if (passwordLoaded) passwordDraft.isNotBlank() else state.passwordConfigured
+    val tokenAvailable = transport != "zrok" || if (tokenLoaded) tokenDraft.isNotBlank() else state.tokenConfigured
+    val shareable = !streamIdDirty && !passwordDirty && !tokenDirty && !state.viewerUrl.isNullOrBlank()
     val phaseStatus = when {
         blocked || phase == "low_battery" -> strings.motionText(R.string.cameras_status_low_battery)
         phase == "authorizing" -> strings.motionText(R.string.cameras_status_authorizing)
@@ -252,19 +265,18 @@ internal fun FormScope.CameraViewingScreen(
         row("enabled") {
             SwitchLine(strings.motionText(R.string.cameras_allow_viewing),
                 strings.motionText(R.string.cameras_on_demand), state.config.enabled,
-                { enabled -> commitEdits(); focus.clearFocus(); controller.setEnabled(enabled) }, colors)
+                { enabled -> clearFocusForAction(); submit(enabled = enabled) }, colors)
         }
         row("method") {
             ChoiceField(strings.motionText(R.string.cameras_connection_method),
                 listOf("VDO.Ninja", "Tailscale", "Zrok"), providerIndex, { selected ->
-                    commitEdits()
-                    focus.clearFocus()
-                    clearLocalSecrets()
-                    controller.setTransport(listOf("vdo", "tailscale", "zrok")[selected])
+                    clearFocusForAction()
+                    submit(nextTransport = listOf("vdo", "tailscale", "zrok")[selected])
                 }, colors)
         }
         this
     }
+    row("cameras-provider-gap") { Spacer(Modifier.height(12.dp)) }
 
     val providerTitle = when (transport) {
         "tailscale" -> strings.motionText(R.string.cameras_tailscale_title)
@@ -278,10 +290,8 @@ internal fun FormScope.CameraViewingScreen(
                     Segmented(listOf(strings.motionText(R.string.cameras_private),
                         strings.motionText(R.string.cameras_public)),
                         if (state.config.tailscalePublic) 1 else 0, colors, Modifier.fillMaxWidth()) {
-                        commitEdits()
-                        focus.clearFocus()
-                        clearLocalSecrets()
-                        controller.setTailscalePublic(it == 1)
+                        clearFocusForAction()
+                        submit(public = it == 1)
                     }
                 }
                 row("security") {
@@ -294,7 +304,7 @@ internal fun FormScope.CameraViewingScreen(
                         colors, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
-                        }, onCommit = ::commitStreamIdEdit)
+                        }, onCommit = ::commitEdits)
                 }
                 if (state.config.tailscalePublic) row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
@@ -304,7 +314,7 @@ internal fun FormScope.CameraViewingScreen(
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
                             passwordDraft = it
                             passwordDirty = true
-                        }, onCommit = ::commitPasswordEdit)
+                        }, onCommit = ::commitEdits)
                 }
             }
             "zrok" -> {
@@ -319,14 +329,14 @@ internal fun FormScope.CameraViewingScreen(
                         onReveal = { revealToken = !revealToken }, onValueChange = {
                             tokenDraft = it
                             tokenDirty = true
-                        }, onCommit = ::commitTokenEdit)
+                        }, onCommit = ::commitEdits)
                 }
                 row("name") {
                     ConnectionField(strings.motionText(R.string.cameras_connection_name), streamIdDraft,
                         colors, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
-                        }, onCommit = ::commitStreamIdEdit)
+                        }, onCommit = ::commitEdits)
                 }
                 row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
@@ -336,7 +346,7 @@ internal fun FormScope.CameraViewingScreen(
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
                             passwordDraft = it
                             passwordDirty = true
-                        }, onCommit = ::commitPasswordEdit)
+                        }, onCommit = ::commitEdits)
                 }
             }
             else -> {
@@ -348,7 +358,7 @@ internal fun FormScope.CameraViewingScreen(
                         colors, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
-                        }, onCommit = ::commitStreamIdEdit)
+                        }, onCommit = ::commitEdits)
                 }
                 row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
@@ -358,67 +368,47 @@ internal fun FormScope.CameraViewingScreen(
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
                             passwordDraft = it
                             passwordDirty = true
-                        }, onCommit = ::commitPasswordEdit)
+                        }, onCommit = ::commitEdits)
                 }
             }
         }
         row("provider-actions") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ActionButton(strings.motionText(if (transport == "vdo") R.string.cameras_regenerate
-                    else R.string.cameras_authorize), colors, Modifier.weight(1f),
-                    enabled = state.config.enabled && !active && phase != "authorizing" &&
-                        (!passwordRequired || passwordAvailable) && tokenAvailable) {
-                    commitEdits()
-                    focus.clearFocus()
-                    controller.authorize()
-                }
-                if (readyToStart) ActionButton(strings.motionText(R.string.cameras_start), colors,
-                    Modifier.weight(1f), primary = true, enabled = state.config.enabled && !blocked &&
-                        (!passwordRequired || passwordAvailable) && tokenAvailable) {
-                    commitEdits()
-                    focus.clearFocus()
-                    controller.start()
-                }
-                if (active) ActionButton(strings.motionText(R.string.cameras_stop), colors,
-                    Modifier.weight(1f), destructive = true) {
-                    commitEdits()
-                    focus.clearFocus()
-                    controller.stop()
-                }
+            ActionButton(strings.motionText(if (transport == "vdo") R.string.cameras_regenerate
+                else R.string.cameras_authorize), colors, Modifier.fillMaxWidth(),
+                enabled = state.config.enabled &&
+                    (transport == "vdo" || ((!passwordRequired || passwordAvailable) && tokenAvailable))) {
+                clearFocusForAction()
+                submit(authorize = transport != "vdo", regenerate = transport == "vdo")
             }
         }
         this
     }
+    row("cameras-access-gap") { Spacer(Modifier.height(12.dp)) }
 
     FormSection(strings.motionText(R.string.cameras_access), colors, key = "cameras-access") {
         row("status") {
             StatusPill(StatusUiState(phaseStatus, phaseTone, true), phaseStatus, colors)
             state.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = colors.red, fontSize = 13.sp) }
         }
-        state.authorizationUrl?.let { authorizationUrl -> row("authorization") {
-            ActionButton(strings.motionText(R.string.cameras_open_authorization), colors,
-                Modifier.fillMaxWidth(), enabled = state.config.enabled) {
-                openAuthorization(context, authorizationUrl, strings)
-            }
-        } }
         state.viewerUrl?.let { viewerUrl -> row("viewer-url") {
             Text(viewerUrl, color = colors.muted, fontSize = 12.sp)
         } }
+        if (state.viewerUrl.isNullOrBlank()) row("link-pending") {
+            Text(strings.motionText(R.string.cameras_link_pending), color = colors.muted, fontSize = 13.sp)
+        }
         row("link-actions") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 ActionButton(strings.motionText(R.string.cameras_copy_link), colors,
-                    Modifier.weight(1f), enabled = !state.viewerUrl.isNullOrBlank()) {
-                    commitEdits()
+                    Modifier.weight(1f), enabled = shareable) {
                     state.viewerUrl?.let { copyViewerUrl(context, it, strings) }
                 }
-                ActionButton(strings.motionText(R.string.cameras_qr), colors, Modifier.weight(.6f),
-                    enabled = !state.viewerUrl.isNullOrBlank()) { commitEdits(); showQr = true }
+                ActionButton(strings.motionText(R.string.cameras_qr), colors, Modifier.weight(1f),
+                    enabled = shareable) { showQr = true }
                 ActionButton(strings.motionText(R.string.cameras_revoke), colors,
-                    Modifier.weight(1f), destructive = true,
+                    Modifier.weight(1f),
                     enabled = state.config.enabled || state.viewerUrl != null || state.phase != "idle" ||
                         state.passwordConfigured || state.tokenConfigured) {
-                    commitEdits()
-                    focus.clearFocus()
+                    clearFocusForAction()
                     controller.revoke()
                     streamIdDraft = ""
                     streamIdDirty = false
@@ -433,9 +423,6 @@ internal fun FormScope.CameraViewingScreen(
                     tokenLoaded = true
                 }
             }
-        }
-        if (state.viewerUrl.isNullOrBlank()) row("link-pending") {
-            Text(strings.motionText(R.string.cameras_link_pending), color = colors.muted, fontSize = 13.sp)
         }
         if (blocked) row("charge-blocked") {
             Text(strings.motionText(R.string.cameras_charge_paused), color = colors.yellow, fontSize = 13.sp)
@@ -476,7 +463,7 @@ private fun ConnectionField(
     val focus = LocalFocusManager.current
     var focused by remember { mutableStateOf(false) }
     ImeDismissalEffect(focused) { focus.clearFocus() }
-    Text(title, color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    Text(title, color = colors.text, fontSize = 16.sp)
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp))
         .background(colors.field).border(1.dp, colors.borderStrong, RoundedCornerShape(7.dp))
         .padding(start = 12.dp, end = if (secret) 4.dp else 12.dp),
@@ -491,7 +478,7 @@ private fun ConnectionField(
                 keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text,
                 imeAction = ImeAction.Done,
             ),
-            keyboardActions = KeyboardActions(onDone = { onCommit(); focus.clearFocus() }),
+            keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }),
             textStyle = TextStyle(color = if (enabled) colors.text else colors.muted,
                 fontSize = 16.sp, fontWeight = FontWeight.Normal),
             cursorBrush = SolidColor(colors.accent),

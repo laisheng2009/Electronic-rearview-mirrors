@@ -1,6 +1,7 @@
 package com.byd.extend.remote
 
 import android.content.Context
+import android.util.Log
 import android.net.Uri
 import android.view.Surface
 import java.util.concurrent.Executors
@@ -284,9 +285,12 @@ internal class VdoCameraPublisher(
                 }
             }
             completed = true
-        } catch (_: HardwareEncoderUnavailable) {
+        } catch (failure: HardwareEncoderUnavailable) {
+            Log.w("CameraViewing", "vdo_open type=${failure.javaClass.simpleName}")
             notifyErrorUnlessClosed(encoderUnavailable = true)
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            Log.w("CameraViewing", "vdo_open type=${failure.javaClass.simpleName}" +
+                " cause=${failure.cause?.javaClass?.simpleName ?: "none"}")
             notifyErrorUnlessClosed(encoderUnavailable = false)
         } finally {
             val disposeSdk: VdoNinja?

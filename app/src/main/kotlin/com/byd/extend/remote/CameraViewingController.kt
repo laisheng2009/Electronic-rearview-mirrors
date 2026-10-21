@@ -2,6 +2,9 @@ package com.byd.extend.remote
 
 import android.content.Context
 import android.os.SystemClock
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import com.byd.extend.CameraChargePolicy
 import com.byd.extend.CameraChargeSettings
 import com.byd.extend.CameraChargeTelemetry
@@ -35,6 +38,7 @@ data class CameraViewingState(
     val error: String? = null,
     val passwordConfigured: Boolean = false,
     val tokenConfigured: Boolean = false,
+    val authorizationRequest: Long = 0,
 )
 
 /** Owns only the viewer; no network caller can reach an ADB or arbitrary OEM command. */
@@ -44,10 +48,10 @@ class CameraViewingController private constructor(private val context: Context) 
         Thread(task, "camera-view-owner")
     }
     private val secrets by lazy { KeystoreSecretStore(context) }
+    private val main = Handler(Looper.getMainLooper())
     private val mutable = MutableStateFlow(CameraViewingState(readConfig()))
     val state: StateFlow<CameraViewingState> = mutable.asStateFlow()
     private var generation = 0L
-    private var runtimeAvailable = false
     private var provider: CameraTunnelProvider? = null
     private var publisher: VdoCameraPublisher? = null
     private var server: CameraViewerServer? = null
@@ -58,6 +62,8 @@ class CameraViewingController private constructor(private val context: Context) 
     private var preparationPending = false
     private var videoActive = false
     private var observation: CameraChargeTelemetry.Observation? = null
+    private var interactiveAuthorization = false
+    private var authorizationRequest = 0L
 
     init { execute { refreshConfiguration() } }
 
@@ -84,71 +90,71 @@ class CameraViewingController private constructor(private val context: Context) 
         return try { bytes.toString(Charsets.UTF_8) } finally { bytes.fill(0) }
     }
 
-    fun setPassword(value: String) = setSecret("password", value)
-    fun setToken(value: String) = setSecret("token", value)
-
-    private fun setSecret(field: String, value: String) {
-        val transport = state.value.config.transport
-        execute {
-            require(value.length <= if (field == "password") 1024 else 4096)
-            if (readSecret(transport, field) == value) return@execute
+    /** Save and act as one owner operation; failed validation/storage never falls through to login. */
+    fun update(
+        edits: CameraViewingEdits,
+        enabled: Boolean? = null,
+        transport: String? = null,
+        tailscalePublic: Boolean? = null,
+        authorize: Boolean = false,
+        regenerate: Boolean = false,
+        onSaved: () -> Unit = {},
+    ) = execute("save_configuration") {
+        // A departing field may deliver a focus-loss save after its provider has switched.
+        if (edits.transport != state.value.config.transport) return@execute
+        if (enabled == false) {
+            // Turning access off must still work when an unfinished field is invalid.
+            MotionRuntime.setRemoteViewingEnabled(context, false)
+            mutable.value = state.value.copy(config = readConfig())
             stopListening()
-            val key = "camera.$transport.$field"
-            if (value.isEmpty()) secrets.remove(key)
-            else value.toByteArray(Charsets.UTF_8).let { bytes ->
-                try { secrets.put(key, bytes) } finally { bytes.fill(0) }
+        }
+        val name = try { edits.validatedName() }
+            catch (failure: IllegalArgumentException) { throw ViewingFailure(R.string.cameras_error_name) }
+        edits.validateSecrets()
+        require(transport == null || transport in setOf("vdo", "tailscale", "zrok"))
+        val config = state.value.config
+        val changedSecrets = listOf("password" to edits.password, "token" to edits.token)
+            .filter { (field, value) -> value != null && value != readSecret(edits.transport, field) }
+        val changed = changedSecrets.isNotEmpty() || (name != null && name != config.streamId) ||
+            (enabled != null && enabled != config.enabled) ||
+            (transport != null && transport != config.transport) ||
+            (tailscalePublic != null && tailscalePublic != config.tailscalePublic) || regenerate
+        if (changed) {
+            stopListening()
+            for ((field, value) in changedSecrets) {
+                val key = "camera.${edits.transport}.$field"
+                if (value!!.isEmpty()) secrets.remove(key)
+                else value.toByteArray(Charsets.UTF_8).let { bytes ->
+                    try { secrets.put(key, bytes) } finally { bytes.fill(0) }
+                }
             }
+            val editor = preferences.edit()
+            if (name != null) editor.putString("${edits.transport}_name", name)
+            if (regenerate) {
+                check(edits.transport == "vdo")
+                editor.putString("vdo_name", newName())
+            }
+            if (transport != null) editor.putString("transport", transport)
+            if (tailscalePublic != null) editor.putBoolean("tailscale_public", tailscalePublic)
+            check(editor.commit())
+            if (enabled != null) MotionRuntime.setRemoteViewingEnabled(context, enabled)
             refreshConfiguration()
         }
-    }
-
-    fun setEnabled(enabled: Boolean) = execute {
-        if (state.value.config.enabled == enabled) return@execute
-        MotionRuntime.setRemoteViewingEnabled(context, enabled)
-        refreshConfiguration()
-        if (!enabled) stopListening()
-        if (enabled && runtimeAvailable && canStart()) startOnOwner()
-    }
-
-    fun setTransport(value: String) = execute {
-        require(value in setOf("vdo", "tailscale", "zrok"))
-        if (value == state.value.config.transport) return@execute
-        stopListening()
-        check(preferences.edit().putString("transport", value).commit())
-        refreshConfiguration()
-    }
-
-    fun setTailscalePublic(value: Boolean) = execute {
-        if (value == state.value.config.tailscalePublic) return@execute
-        stopListening()
-        check(preferences.edit().putBoolean("tailscale_public", value).commit())
-        refreshConfiguration()
-    }
-
-    fun setStreamId(value: String) = execute {
-        val name = value.trim()
-        val pattern = if (state.value.config.transport == "vdo") "[A-Za-z0-9_-]{1,64}"
-            else "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-        if (name.isNotEmpty() && !name.matches(Regex(pattern)))
-            throw ViewingFailure(R.string.cameras_error_name)
-        if (name == state.value.config.streamId) return@execute
-        stopListening()
-        check(preferences.edit().putString("${state.value.config.transport}_name", name).commit())
-        refreshConfiguration()
+        main.post(onSaved)
+        if (authorize) connectOnOwner(interactive = true)
+        else if (changed && state.value.config.enabled && canStart()) connectOnOwner()
     }
 
     /** Called by the existing foreground runtime, never by a socket or a web command. */
     fun runtimeStarted() = execute {
-        runtimeAvailable = true
         if (observation == null) observation = CameraChargeTelemetry.get(context).observe { charge ->
             execute { chargeChanged(charge) }
         }
         refreshConfiguration()
-        if (state.value.config.enabled && provider == null && server == null && publisher == null && canStart()) startOnOwner()
+        if (state.value.config.enabled && provider == null && server == null && publisher == null && canStart()) connectOnOwner()
     }
 
     fun runtimeStopped() = execute {
-        runtimeAvailable = false
         observation?.close(); observation = null
         stopListening()
     }
@@ -164,58 +170,61 @@ class CameraViewingController private constructor(private val context: Context) 
         it.transport != "tailscale" || it.tailscalePublic
     }
 
-    private fun canStart(): Boolean = !publicAccess() || getPassword().isNotBlank()
+    private fun canStart(): Boolean = (!publicAccess() || getPassword().isNotBlank()) &&
+        (state.value.config.transport != "zrok" || getToken().isNotBlank())
 
     private fun requirePassword() {
-        if (!canStart()) throw ViewingFailure(R.string.cameras_error_password_required)
+        if (publicAccess() && getPassword().isBlank())
+            throw ViewingFailure(R.string.cameras_error_password_required)
     }
 
     private fun ensureName(): String {
         if (state.value.config.streamId.isNotEmpty()) return state.value.config.streamId
-        val name = "byd-" + UUID.randomUUID().toString().replace("-", "").take(16)
+        val name = newName()
         check(preferences.edit().putString("${state.value.config.transport}_name", name).commit())
         refreshConfiguration()
         return name
     }
 
-    fun authorize() = execute {
+    private fun connectOnOwner(interactive: Boolean = false) {
+        if (!state.value.config.enabled) return
         requirePassword()
         stopListening()
+        interactiveAuthorization = interactive
         val config = state.value.config
         if (config.transport == "vdo") {
-            ensureName()
-            mutable.value = state.value.copy(phase = "ready", error = null)
-            return@execute
+            startOnOwner()
+            return
         }
         val token = getToken().ifBlank { null }
         val active = CameraTunnelProvider(context, config.transport, ensureName())
         provider = active
         val epoch = generation
         mutable.value = state.value.copy(phase = "authorizing", error = null)
-        active.authorize(token) { result -> execute {
+        active.authorize(token) { result -> execute("authorize_result") {
             if (epoch != generation || provider !== active) return@execute
             acceptProviderResult(result)
             if (result.state == "login_required") awaitAuthorization(active, epoch)
+            else if (result.state == "authorized") startOnOwner(reuseAuthorization = true)
         } }
     }
 
     private fun awaitAuthorization(active: CameraTunnelProvider, epoch: Long) {
         executor.schedule({ execute {
             if (epoch != generation || provider !== active || state.value.phase != "authorizing") return@execute
-            active.status { result -> execute {
+            active.status { result -> execute("authorization_status") {
                 if (epoch != generation || provider !== active) return@execute
                 acceptProviderResult(result)
                 if (result.state == "login_required") awaitAuthorization(active, epoch)
+                else if (result.state == "authorized") startOnOwner(reuseAuthorization = true)
             } }
         } }, 2, TimeUnit.SECONDS)
     }
 
-    fun start() = execute { startOnOwner() }
-
-    private fun startOnOwner() {
+    private fun startOnOwner(reuseAuthorization: Boolean = false) {
         if (!state.value.config.enabled) return
         requirePassword()
-        stopListening()
+        if (!reuseAuthorization) stopListening()
         val config = state.value.config
         val name = ensureName()
         val password = getPassword()
@@ -238,6 +247,7 @@ class CameraViewingController private constructor(private val context: Context) 
             return
         }
         val privateProof = if (publicAccess()) null else randomProof()
+        server?.close()
         val http = CameraViewerServer(password, privateProof, object : CameraViewerServer.Stream {
             override fun connected() = execute { if (epoch == generation) viewerConnected(epoch) }
             override fun disconnected() = execute { if (epoch == generation) viewerDisconnected() }
@@ -250,19 +260,27 @@ class CameraViewingController private constructor(private val context: Context) 
         })
         server = http
         val active = provider ?: CameraTunnelProvider(context, config.transport, name).also { provider = it }
-        active.start(http.port(), config.tailscalePublic || config.transport == "zrok", privateProof) { result -> execute {
+        active.start(http.port(), config.tailscalePublic || config.transport == "zrok", privateProof) { result -> execute("start_result") {
             if (epoch != generation || provider !== active) return@execute
             acceptProviderResult(result)
+            if (result.state == "login_required") awaitAuthorization(active, epoch)
         } }
     }
 
     private fun acceptProviderResult(result: CameraTunnelResult) {
-        if (result.errorCode != null) throw ViewingFailure(R.string.cameras_error_connection)
+        if (result.errorCode != null) {
+            // Native codes are bounded identifiers; never journal provider details, URLs or secrets.
+            val code = result.errorCode.takeIf { it.matches(Regex("[a-z_]{1,64}")) } ?: "unknown"
+            Log.w("CameraViewing", "provider=${state.value.config.transport} error=$code")
+            throw ViewingFailure(R.string.cameras_error_connection)
+        }
         for (address in listOfNotNull(result.address, result.loginUrl)) {
             val uri = URI(address)
             if (uri.scheme != "https" || uri.host.isNullOrBlank() || uri.userInfo != null)
                 throw ViewingFailure(R.string.cameras_error_connection)
         }
+        val openLogin = interactiveAuthorization && !result.loginUrl.isNullOrBlank()
+        if (openLogin) interactiveAuthorization = false
         mutable.value = state.value.copy(
             phase = when (result.state) {
                 "serving", "authorized" -> "ready"
@@ -270,7 +288,14 @@ class CameraViewingController private constructor(private val context: Context) 
                 else -> "idle"
             },
             viewerUrl = result.address.takeIf { result.state == "serving" },
-            authorizationUrl = result.loginUrl, error = null)
+            authorizationUrl = result.loginUrl,
+            authorizationRequest = if (openLogin) ++authorizationRequest else state.value.authorizationRequest,
+            error = null)
+    }
+
+    fun authorizationOpened(request: Long) = execute {
+        if (request == state.value.authorizationRequest)
+            mutable.value = state.value.copy(authorizationRequest = 0)
     }
 
     private fun viewerConnected(epoch: Long) {
@@ -351,10 +376,9 @@ class CameraViewingController private constructor(private val context: Context) 
         }
     }
 
-    fun stop() = execute { stopListening() }
-
     private fun stopListening(reportTunnelFailure: Boolean = true) {
         generation++
+        interactiveAuthorization = false
         val epoch = generation
         viewerPresent = false
         server?.close(); server = null
@@ -371,7 +395,8 @@ class CameraViewingController private constructor(private val context: Context) 
             if (source == null || source?.isVideoDetached == true) {
                 publisher?.close(); publisher = null
             }
-            mutable.value = state.value.copy(phase = "idle", viewerUrl = null, authorizationUrl = null, error = null)
+            mutable.value = state.value.copy(phase = "idle", viewerUrl = null, authorizationUrl = null,
+                authorizationRequest = 0, error = null)
         }
     }
 
@@ -397,10 +422,12 @@ class CameraViewingController private constructor(private val context: Context) 
         if (old == null && cleanupFailure != null) throw cleanupFailure
     }
 
-    private fun execute(action: () -> Unit) {
+    private fun execute(stage: String = "runtime", action: () -> Unit) {
         executor.execute {
             try { action() }
             catch (failure: Exception) {
+                Log.w("CameraViewing", "$stage failed provider=${state.value.config.transport}" +
+                    " type=${failure.javaClass.simpleName} cause=${failure.cause?.javaClass?.simpleName ?: "none"}")
                 runCatching { stopListening() }
                 val message = (failure as? ViewingFailure)?.messageResource
                     ?: if (failure is SecurityException) R.string.cameras_error_secret
@@ -419,5 +446,6 @@ class CameraViewingController private constructor(private val context: Context) 
         }
         private fun randomProof(): String = ByteArray(32).also(SecureRandom()::nextBytes)
             .joinToString("") { "%02x".format(it.toInt() and 255) }
+        private fun newName(): String = "byd-" + UUID.randomUUID().toString().replace("-", "").take(16)
     }
 }

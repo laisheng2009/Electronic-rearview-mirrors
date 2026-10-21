@@ -1,6 +1,7 @@
 package com.byd.extend.remote.tunnel
 
 import android.content.Context
+import android.util.Log
 import com.byd.extend.remote.security.KeystoreSecretStore
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -81,9 +82,11 @@ class CameraTunnelProvider(
                                 request.put("privateProxyCredential", privateProxyCredential)
                             }
                             parseResult(NativeTunnelBridge.nativeCall(operation, request.toString()))
-                        } catch (_: UnsatisfiedLinkError) {
+                        } catch (failure: UnsatisfiedLinkError) {
+                            logFailure(operation, failure)
                             unavailableResult()
-                        } catch (_: Exception) {
+                        } catch (failure: Exception) {
+                            logFailure(operation, failure)
                             unavailableResult()
                         }
                         runCatching { callback(result) }
@@ -127,9 +130,11 @@ class CameraTunnelProvider(
                                     .put("name", name)
                                     .toString(),
                             ))
-                        } catch (_: UnsatisfiedLinkError) {
+                        } catch (failure: UnsatisfiedLinkError) {
+                            logFailure("close", failure)
                             unavailableResult()
-                        } catch (_: Exception) {
+                        } catch (failure: Exception) {
+                            logFailure("close", failure)
                             unavailableResult()
                         }
                         runCatching { callback(result) }
@@ -144,6 +149,11 @@ class CameraTunnelProvider(
             }
         }
         if (releaseNow) runCatching { callback(unavailableResult()) }
+    }
+
+    private fun logFailure(operation: String, failure: Throwable) {
+        Log.w("CameraViewing", "tunnel_$operation provider=$kind type=${failure.javaClass.simpleName}" +
+            " cause=${failure.cause?.javaClass?.simpleName ?: "none"}")
     }
 
     private companion object {

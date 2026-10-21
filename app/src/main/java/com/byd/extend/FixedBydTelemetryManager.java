@@ -55,6 +55,8 @@ final class FixedBydTelemetryManager {
     private final Method enable;
     private final Method disable;
     private final Method getBuffer;
+    private final Method getInt;
+    private final Method getDouble;
     private final Object managerListener;
     private final Map<Long, Client> clients = new LinkedHashMap<>();
     private final Map<Integer, Set<Integer>> enabled = new LinkedHashMap<>();
@@ -82,7 +84,25 @@ final class FixedBydTelemetryManager {
             bufferReader = null;
         }
         getBuffer = bufferReader;
+        getInt = optionalReader(managerType, "getInt");
+        getDouble = optionalReader(managerType, "getDouble");
         managerListener = createListenerProxy();
+    }
+
+    private static Method optionalReader(Class<?> type, String name) {
+        try { return type.getMethod(name, int.class, int.class); }
+        catch (NoSuchMethodException unavailable) { return null; }
+    }
+
+    int readInt(int device, int fid) throws Exception {
+        if (getInt == null) throw new IllegalStateException("BYDAutoManager getInt unavailable");
+        return (Integer) getInt.invoke(manager, device, fid);
+    }
+
+    float readFloat(int device, int fid) throws Exception {
+        if (getDouble == null) throw new IllegalStateException("BYDAutoManager getDouble unavailable");
+        // Despite its name, the OEM getDouble method returns a 32-bit float.
+        return (Float) getDouble.invoke(manager, device, fid);
     }
 
     byte[] readBuffer(int device, int fid) throws Exception {

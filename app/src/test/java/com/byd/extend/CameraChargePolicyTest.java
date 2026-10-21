@@ -3,8 +3,6 @@ package com.byd.extend;
 import org.junit.Test;
 
 import java.io.File;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.file.Files;
 
 import static org.junit.Assert.*;
@@ -71,12 +69,17 @@ public class CameraChargePolicyTest {
         assertEquals(0, policy.updateVoltage(12.8f).lowCauses());
     }
 
-    @Test public void fixedBuffersDecodeIntegerSocAndFloatBitsWithoutIntegerCoercion() {
-        byte[] soc = ByteBuffer.allocate(4).order(ByteOrder.nativeOrder()).putInt(57).array();
-        byte[] volts = ByteBuffer.allocate(4).order(ByteOrder.nativeOrder())
-                .putInt(Float.floatToRawIntBits(12.7f)).array();
-        assertEquals(57, CameraChargeTelemetry.Owner.decodeSoc(soc));
-        assertEquals(12.7f, CameraChargeTelemetry.Owner.decodeVoltage(volts), 0.0001f);
+    @Test public void independentTypedSamplesPreserveTheOtherSignalOnReadFailure() throws Exception {
+        CameraChargePolicy policy = newPolicy();
+        policy.setMonitoring(true);
+        policy.updateSoc(57);
+        policy.updateVoltage(12.7f);
+        assertEquals(Integer.valueOf(57), policy.snapshot().socPercent());
+        assertEquals(12.7f, policy.snapshot().voltageVolts(), 0.0001f);
+        policy.updateSoc(null);
+        assertTrue(policy.snapshot().isSocUnavailable());
+        assertFalse(policy.snapshot().isVoltageUnavailable());
+        assertEquals(12.7f, policy.snapshot().voltageVolts(), 0.0001f);
         assertEquals(124, CameraChargeSettings.voltageTenths(12.4f));
         assertTrue(CameraChargeSettings.isValidSocThreshold(20));
         assertFalse(CameraChargeSettings.isValidSocThreshold(9));

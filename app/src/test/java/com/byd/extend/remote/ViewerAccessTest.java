@@ -16,10 +16,10 @@ public class ViewerAccessTest {
     }
 
     @Test public void passwordAuthenticationAcceptsOnlyTheConfiguredPassword() {
-        ViewerAccess access = new ViewerAccess("correct horse", null);
+        ViewerAccess access = new ViewerAccess("1", null);
 
         assertFalse(access.authenticate("incorrect", null));
-        assertTrue(access.authenticate("correct horse", null));
+        assertTrue(access.authenticate("1", null));
         assertFalse(access.occupied());
     }
 
