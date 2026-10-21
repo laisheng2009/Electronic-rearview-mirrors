@@ -101,6 +101,19 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
     }
 
     private void updateLayer() {
+        syncLayers(this, null);
+    }
+
+    static void syncLayers(DirectCameraSurface first, DirectCameraSurface second) {
+        if (first == null && second == null) return;
+        try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
+            if (first != null) first.updateLayer(transaction);
+            if (second != null) second.updateLayer(transaction);
+            transaction.apply();
+        }
+    }
+
+    private void updateLayer(SurfaceControl.Transaction transaction) {
         Output output = current;
         if (output == null || !output.layer.isValid() || viewport == null || !viewport.isValid()
                 || getWidth() == 0 || getHeight() == 0) return;
@@ -111,7 +124,7 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
             ViewParent parent = view.getParent();
             view = parent instanceof View ? (View) parent : null;
         }
-        try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
+        try {
             // Arbitrary rotation belongs in GLES: app-UID SurfaceFlinger rejects it, and
             // shell-UID rotated child layers cannot be clipped to a rectangular ancestor.
             setMatrix.invoke(transaction, output.layer, (float) getWidth() / output.width,
@@ -120,7 +133,7 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
             setWindowCrop.invoke(transaction, viewport, clip);
             setCornerRadius.invoke(transaction, viewport, radius);
             transaction.setVisibility(output.layer, true)
-                    .setLayer(output.layer, 1).setAlpha(output.layer, alpha).apply();
+                    .setLayer(output.layer, 1).setAlpha(output.layer, alpha);
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("direct camera transform failed", failure);
         }

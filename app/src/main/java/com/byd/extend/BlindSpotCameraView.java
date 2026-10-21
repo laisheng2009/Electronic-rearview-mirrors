@@ -286,7 +286,8 @@ final class BlindSpotCameraView extends FrameLayout
         dewarpConfig = value;
         dewarpRequestToken = nextToken;
         if (directOutput != null) {
-            if (mappingChanged) { setAlpha(0f); directOutput.update(value, nextToken); }
+            // The existing buffer remains visible until EGL swaps in the new mapping.
+            if (mappingChanged) directOutput.update(value, nextToken);
             return;
         }
         if (dewarpRenderer != null) {
@@ -295,6 +296,10 @@ final class BlindSpotCameraView extends FrameLayout
             dewarpRenderer.update(value, dewarpRequestToken);
         }
         else if (cameraSurface != null) setRawFallbackActive(value.enabled);
+    }
+
+    static void syncDirectVisibility(BlindSpotCameraView first, BlindSpotCameraView second) {
+        DirectCameraSurface.syncLayers(first.directView, second == null ? null : second.directView);
     }
 
     boolean usesDewarpPipeline() {

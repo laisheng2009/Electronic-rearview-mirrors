@@ -81,6 +81,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     private boolean centralFrontFrameReady;
     private boolean centralFrontDiscardNextFrame;
     private boolean centralFrontSurfaceRecoveryPending;
+    private boolean centralFrontDisplayed;
     private float steeringAngleDegrees = Float.NaN;
     private float steeringMinimumDegrees = Float.NaN;
     private float steeringMaximumDegrees = Float.NaN;
@@ -105,7 +106,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
         super(context);
         setBackgroundColor(Color.TRANSPARENT);
         setClipChildren(true);
-        backgroundPane = new View(context);
+        backgroundPane = new DirectCameraBackdrop(context);
         backgroundPane.setBackgroundColor(Color.BLACK);
         addView(backgroundPane, new FrameLayout.LayoutParams(1, 1));
         panes[0] = addPane(ReverseCameraLayout.REAR_CAMERA_INDEX);
@@ -483,10 +484,8 @@ final class ReverseCameraCompositionView extends FrameLayout {
                 && mode != ReverseSideSelectorView.MODE_FRONT) {
             throw new IllegalArgumentException("invalid reverse side mode");
         }
-        boolean modeChanged = sideMode != mode;
         sideMode = mode;
         if (sideSelector.mode() != mode) sideSelector.setMode(mode);
-        if (modeChanged && centralFrontSourceEnabled) resetCentralFrontFreshness();
         applyActiveDewarpConfigs();
         applyModel();
     }
@@ -1011,6 +1010,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
             @Override
             public void onCameraFrameUpdated(
                     BlindSpotCameraView view, int inputGeneration) {
+                if (!pane.targetActive) return;
                 boolean generationMatches = inputGeneration == pane.generation;
                 boolean fresh = generationMatches && !pane.discardNextFrame;
                 if (generationMatches) pane.discardNextFrame = false;
@@ -1760,12 +1760,15 @@ final class ReverseCameraCompositionView extends FrameLayout {
         backgroundPane.setAlpha(backgroundVisible ? 1.0f : 0.0f);
         boolean centerVisible = isPaneEligibleOnDisplay(
                 model, ReverseCameraLayout.REAR_CAMERA_INDEX, displayTarget, visibilityMask);
-        boolean centralFrontEligible = centerVisible
-                && sideMode == ReverseSideSelectorView.MODE_FRONT
+        boolean centralFrontAvailable = centerVisible
                 && centralFrontIntegrated && centralFrontSourceEnabled
                 && centralFrontPane != null;
-        boolean centralFrontVisible = centralFrontEligible
-                && centralFrontFrameReady && centralFrontPane.frameFresh;
+        boolean centralFrontRequested = centralFrontAvailable
+                && sideMode == ReverseSideSelectorView.MODE_FRONT;
+        boolean centralFrontVisible = centralFrontAvailable && selectCentralFront(
+                centralFrontRequested, centralFrontDisplayed,
+                centralFrontFrameReady && centralFrontPane.frameFresh, panes[0].frameFresh);
+        centralFrontDisplayed = centralFrontVisible;
         boolean front = sideMode == ReverseSideSelectorView.MODE_FRONT;
         boolean leftEligible = isPaneEligibleOnDisplay(
                 model, ReverseCameraLayout.REAR_LEFT_CAMERA_INDEX, displayTarget, visibilityMask);
@@ -1774,7 +1777,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
         boolean preReveal = frameBarrier.requestId() > 0 && !frameBarrier.revealed();
         setPaneTargetActive(panes[0], shouldActivatePane(
                 model, ReverseCameraLayout.REAR_CAMERA_INDEX, displayTarget, visibilityMask,
-                preReveal, !centralFrontVisible));
+                preReveal, !centralFrontRequested || !centralFrontVisible));
         setPaneTargetActive(panes[1], shouldActivatePane(
                 model, ReverseCameraLayout.REAR_LEFT_CAMERA_INDEX, displayTarget,
                 visibilityMask, preReveal, true));
@@ -1782,13 +1785,15 @@ final class ReverseCameraCompositionView extends FrameLayout {
                 model, ReverseCameraLayout.REAR_RIGHT_CAMERA_INDEX, displayTarget,
                 visibilityMask, preReveal, true));
         if (centralFrontPane != null) {
-            setPaneTargetActive(centralFrontPane, centralFrontEligible);
+            setPaneTargetActive(centralFrontPane, centralFrontRequested || centralFrontVisible);
         }
         panes[0].setAlpha(centerVisible && !centralFrontVisible && panes[0].frameFresh
                 ? 1.0f : 0.0f);
         if (centralFrontPane != null) {
             centralFrontPane.setAlpha(centralFrontVisible ? 1.0f : 0.0f);
         }
+        BlindSpotCameraView.syncDirectVisibility(panes[0].texture,
+                centralFrontPane == null ? null : centralFrontPane.texture);
         panes[1].setAlpha(leftEligible && panes[1].frameFresh ? 1.0f : 0.0f);
         panes[2].setAlpha(rightEligible && panes[2].frameFresh ? 1.0f : 0.0f);
         sideSelector.setEffectiveVisibility(
@@ -1796,6 +1801,12 @@ final class ReverseCameraCompositionView extends FrameLayout {
         sideSelector.setVisibility(widgetVisible && widgetAvailable
                 && model.targetFor(ReverseCameraLayout.WIDGET_PANE_ID) == displayTarget
                 ? View.VISIBLE : View.GONE);
+    }
+
+    /** Keep the live outgoing source until the requested source passes its existing fresh-frame gate. */
+    static boolean selectCentralFront(
+            boolean requestFront, boolean showingFront, boolean frontReady, boolean rearReady) {
+        return frontReady && (requestFront || showingFront && !rearReady);
     }
 
     private void setPaneTargetActive(PaneView pane, boolean active) {
@@ -1811,6 +1822,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     private void resetPaneFreshness() {
+        centralFrontDisplayed = false;
         for (PaneView pane : panes) {
             pane.frameFresh = false;
             pane.discardNextFrame = true;

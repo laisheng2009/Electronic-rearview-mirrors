@@ -102,6 +102,7 @@ public final class AvasRecoveryShellMain {
     }
 
     private static void keepAlive(AvasShellSettings settings, RecoveryBinder binder) {
+        java.lang.Process command = null;
         while (binder.running) {
             long started = SystemClock.elapsedRealtime();
             try {
@@ -119,30 +120,31 @@ public final class AvasRecoveryShellMain {
                     break;
                 }
                 // Logging alone must neither launch AVAS nor revive the app when Auto-start is OFF.
-                if (binder.recoveryEnabled) {
-                java.lang.Process command = new ProcessBuilder(
-                        "/system/bin/am", "broadcast", "--user",
-                        Integer.toString(AvasRecoveryPolicy.userIdForUid(binder.appUid)),
-                        "--include-stopped-packages",
-                        "-a", GuardRecovery.ACTION_SHELL_RECOVERY,
-                        "-n", COMPONENT).redirectErrorStream(true)
-                        .redirectOutput(new File("/dev/null")).start();
-                boolean complete;
-                try {
-                    complete = command.waitFor(COMMAND_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-                    if (!complete) {
-                        command.destroy();
-                        command.waitFor(1, TimeUnit.SECONDS);
+                if (command != null && stopCommand(command)) command = null;
+                if (command != null) {
+                    journal("recovery_request_skipped", "reason", "previous_command_alive");
+                } else if (binder.recoveryEnabled) {
+                    // --async avoids holding a system_server Binder thread until receiver completion.
+                    command = new ProcessBuilder(
+                            "/system/bin/cmd", "activity", "broadcast", "--async",
+                            "--receiver-foreground", "--user",
+                            Integer.toString(AvasRecoveryPolicy.userIdForUid(binder.appUid)),
+                            "--include-stopped-packages",
+                            "-a", GuardRecovery.ACTION_SHELL_RECOVERY,
+                            "-n", COMPONENT).redirectErrorStream(true)
+                            .redirectOutput(new File("/dev/null")).start();
+                    try {
+                        boolean complete = command.waitFor(COMMAND_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                        journal("recovery_request", "complete", complete,
+                                "exit", complete ? command.exitValue() : -1,
+                                "request_enqueued", complete && command.exitValue() == 0);
+                    } finally {
+                        if (stopCommand(command)) command = null;
                     }
-                    journal("recovery_request", "complete", complete,
-                            "exit", complete ? command.exitValue() : -1);
-                } finally {
-                    if (command.isAlive()) command.destroy();
-                    try { command.getInputStream().close(); } catch (Throwable ignored) {}
-                    try { command.getErrorStream().close(); } catch (Throwable ignored) {}
-                    try { command.getOutputStream().close(); } catch (Throwable ignored) {}
                 }
-                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                binder.running = false;
             } catch (Throwable failure) {
                 journal("recovery_request_failed", "error", summary(failure));
             }
@@ -157,8 +159,33 @@ public final class AvasRecoveryShellMain {
                 remaining = PERIOD_MS - (SystemClock.elapsedRealtime() - started);
             }
         }
+        if (command != null) {
+            try { stopCommand(command); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        }
         journal("daemon_exit");
         System.exit(0);
+    }
+
+    /** Own the actual cmd process, not am's shell wrapper; never replace a surviving child. */
+    static boolean stopCommand(java.lang.Process command) throws InterruptedException {
+        try {
+            if (command.isAlive()) {
+                command.destroy();
+                if (!command.waitFor(1, TimeUnit.SECONDS)) {
+                    command.destroyForcibly();
+                    command.waitFor(1, TimeUnit.SECONDS);
+                }
+            }
+            return !command.isAlive();
+        } catch (InterruptedException interrupted) {
+            command.destroyForcibly();
+            throw interrupted;
+        } finally {
+            try { command.getInputStream().close(); } catch (Exception ignored) {}
+            try { command.getErrorStream().close(); } catch (Exception ignored) {}
+            try { command.getOutputStream().close(); } catch (Exception ignored) {}
+        }
     }
 
     static final class RecoveryBinder extends Binder {
