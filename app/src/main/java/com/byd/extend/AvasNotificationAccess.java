@@ -16,13 +16,15 @@ final class AvasNotificationAccess {
 
     private AvasNotificationAccess() {}
 
-    static boolean required(SharedPreferences preferences) {
-        if (preferences == null) return false;
+    static boolean required(Context context, SharedPreferences preferences) {
+        if (context == null || preferences == null) return false;
         try {
             return preferences.getBoolean(GuardRecovery.KEY_AUTO_START, true)
                     && (hasEnabledAvasAudio(preferences)
                         || preferences.getBoolean("adb_recovery_enabled", false)
-                        || preferences.getBoolean("motion_monitoring_enabled", false));
+                        || preferences.getBoolean("motion_monitoring_enabled", false)
+                        || CameraChargeSettings.isRemoteViewingEnabled(context)
+                                && com.byd.extend.remote.CameraViewingController.hasAuthorizedProfiles(context));
         } catch (RuntimeException ignored) {
             return false;
         }

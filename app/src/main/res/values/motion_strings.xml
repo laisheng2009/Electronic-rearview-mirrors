@@ -17,7 +17,7 @@
     <string name="cameras_vdo_hint">"A private viewing link and password; no separate phone VPN client."</string>
     <string name="cameras_stream_id">"Stream ID"</string>
     <string name="cameras_viewer_password">"Viewer password (required)"</string>
-    <string name="cameras_regenerate">"Regenerate access"</string>
+    <string name="cameras_regenerate">"Generate ID"</string>
     <string name="cameras_private">"Private · Serve"</string>
     <string name="cameras_public">"Public · Funnel"</string>
     <string name="cameras_private_security">"Private: only authorized devices in your Tailscale network. Restrict access to your devices and the viewer port; the phone needs Tailscale."</string>
@@ -36,6 +36,8 @@
     <string name="cameras_error_password_length">"The viewing password must not exceed 1024 characters."</string>
     <string name="cameras_error_token_length">"The account token must not exceed 4096 characters."</string>
     <string name="cameras_error_token_required">"Enter the Zrok account token before authorizing the vehicle."</string>
+    <string name="cameras_error_name_required">"Enter a connection name before authorizing."</string>
+    <string name="cameras_error_viewer_password_required">"Enter a viewing password before authorizing."</string>
     <string name="cameras_error_authorization_required">"Authorize this device with the service, then return to the application."</string>
     <string name="cameras_error_local_viewer">"Could not prepare the local viewing server. Turn viewing off and on to retry."</string>
     <string name="cameras_error_tunnel_runtime">"The embedded tunnel runtime failed. Retry viewing; if it fails again, share the application’s diagnostic logs."</string>
@@ -63,6 +65,11 @@
     <string name="cameras_qr">"QR code"</string>
     <string name="cameras_qr_failed">"Could not create a QR code for this link."</string>
     <string name="cameras_revoke">"Revoke access"</string>
+    <string name="cameras_retry_revoke">"Retry revoke"</string>
+    <string name="cameras_retry_connection">"Retry connection"</string>
+    <string name="cameras_access_authorized">"This provider has one authorized access. Revoke it to replace the account or access."</string>
+    <string name="cameras_access_identity">"Saved access identity: %1$s"</string>
+    <string name="cameras_revoke_pending">"Remote revocation is still pending. Retry it before authorizing again."</string>
     <string name="cameras_session_hint">"Only one viewer can connect at a time. Viewing shares cameras that are already active. Otherwise, cameras start on demand and session-owned resources are released when viewing stops. An offline vehicle cannot receive a request."</string>
     <string name="cameras_secret_show">"Show secret"</string>
     <string name="cameras_secret_hide">"Hide secret"</string>

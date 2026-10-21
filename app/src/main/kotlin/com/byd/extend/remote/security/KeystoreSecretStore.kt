@@ -13,7 +13,7 @@ import javax.crypto.SecretKey
  * Stores small secret values in app-private preferences, encrypted with an Android Keystore key.
  * Preference names are identifiers only; all values are authenticated AES-GCM ciphertext.
  */
-class KeystoreSecretStore(context: Context) {
+class KeystoreSecretStore(context: Context) : TunnelSecretStore {
     private val preferences = context.applicationContext.getSharedPreferences(
         PREFERENCES_FILE,
         Context.MODE_PRIVATE,
@@ -66,10 +66,18 @@ class KeystoreSecretStore(context: Context) {
     }
 
     /** JNI clears exceptions: retain their class and operation, never secret names or values. */
-    fun getNative(key: String): ByteArray? = nativeOperation("read") { get(key) }
-    fun putNative(key: String, value: ByteArray) = nativeOperation("write") { put(key, value) }
-    fun removeNative(key: String) = nativeOperation("remove") { remove(key) }
-    fun removePrefixNative(prefix: String) = nativeOperation("remove_prefix") { removePrefix(prefix) }
+    override fun getNative(key: String): ByteArray? = nativeOperation("read") { get(key) }
+    override fun putNative(key: String, value: ByteArray) = nativeOperation("write") { put(key, value) }
+    override fun removeNative(key: String) = nativeOperation("remove") { remove(key) }
+    override fun removePrefixNative(prefix: String) = nativeOperation("remove_prefix") { removePrefix(prefix) }
+
+    /** Used only for one-time, authenticated handoff to the independent viewing process. */
+    @Synchronized
+    fun snapshot(prefix: String): Map<String, ByteArray> {
+        require(prefix.isNotEmpty() && NAME_PATTERN.matches(prefix))
+        return preferences.all.keys.filter { it.startsWith(prefix) }
+            .associateWith { checkNotNull(get(it)) }
+    }
 
     private fun <T> nativeOperation(operation: String, action: () -> T): T = try { action() }
     catch (failure: Exception) {

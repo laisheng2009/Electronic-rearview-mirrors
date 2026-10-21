@@ -101,6 +101,7 @@ internal fun FormScope.MotionIntegrationScreen(
     strings: UiStrings,
     cameraHost: @Composable (com.byd.extend.ui.CameraHostSlot) -> Unit,
     archiveState: MotionArchiveState,
+    uiSession: com.byd.extend.ui.RuntimeUiSession.Session,
 ): FormScope {
     val context = LocalContext.current
     val store = remember(context) { MotionTemplateStore(context) }
@@ -121,7 +122,7 @@ internal fun FormScope.MotionIntegrationScreen(
     var dialog by rememberSaveable { mutableIntStateOf(0) }
     var draft by rememberSaveable { mutableStateOf<MotionTemplate?>(null) }
     var importing by remember { mutableStateOf(false) }
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    var tab by remember(uiSession) { mutableIntStateOf(uiSession.motionCameraTab()) }
     var checkupOpen by rememberSaveable { mutableStateOf(false) }
     val chargeState = rememberCameraChargeState(context)
     var socThreshold by remember(context) {
@@ -170,6 +171,7 @@ internal fun FormScope.MotionIntegrationScreen(
             .map { strings.motionText(it) }, tab, colors, Modifier.fillMaxWidth()) {
             focus.clearFocus()
             tab = it
+            uiSession.selectMotionCameraTab(it)
         }
         Spacer(Modifier.height(12.dp))
     }

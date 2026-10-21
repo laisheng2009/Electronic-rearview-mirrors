@@ -10,6 +10,7 @@ import org.json.JSONObject;
 /** Loopback-only HTTP endpoint behind the authenticated native tunnel. */
 public final class CameraViewerServer implements AutoCloseable {
     public interface Stream {
+        boolean acquire();
         void connected();
         void disconnected();
         String status();
@@ -113,8 +114,10 @@ public final class CameraViewerServer implements AutoCloseable {
                 String key;
                 synchronized (access) {
                     boolean wasOccupied = access.occupied();
+                    if (!wasOccupied && !stream.acquire()) { json(socket, 409, "busy", null); return; }
                     key = access.admit(session, now());
                     if (key != null && !wasOccupied) stream.connected();
+                    else if (key == null && !wasOccupied) stream.disconnected();
                 }
                 if (key == null) { json(socket, 409, "busy", null); return; }
                 json(socket, 200, "preparing", "viewer=" + key + "; Path=/; Secure; HttpOnly; SameSite=Strict");

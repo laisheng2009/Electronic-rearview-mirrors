@@ -937,8 +937,15 @@ public final class CameraHelperService extends Service {
             if (adbReminder != null) adbReminder.close();
             setAvasWakeLock(false, "explicit_shutdown");
             avasRecoveryDaemon.reconcile(false, "explicit_shutdown");
-            stopRuntime(true, "explicit_shutdown", action, command.startId);
-            stopServiceFromRuntime(command.startId, "explicit_shutdown", action);
+            com.byd.extend.remote.CameraViewingController.get(this).explicitShutdown(() -> {
+                Runnable finishShutdown = () -> {
+                    stopRuntime(true, "explicit_shutdown", action, command.startId);
+                    stopServiceFromRuntime(command.startId, "explicit_shutdown", action);
+                };
+                if (!postRuntime(finishShutdown)) {
+                    new Thread(finishShutdown, "service-viewing-shutdown-teardown").start();
+                }
+            });
             return;
         }
         if (ACTION_FLUSH_LOGS.equals(action)) {

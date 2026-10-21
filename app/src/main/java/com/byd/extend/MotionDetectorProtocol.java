@@ -17,7 +17,7 @@ public final class MotionDetectorProtocol {
     static final String CONFIG_PATH = STATE_ROOT + "/config.json";
     static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
     static final String EXTRA_SESSION = "motion_session_id";
-    static final int VERSION = 14;
+    static final int VERSION = 15;
     public static final String EXTRA_WINDOW_REPORTER = "motion_window_reporter";
     public static final String WINDOW_COMMANDS = "window_commands";
     public static final String WINDOW_CANCELLED = "window_cancelled";
@@ -62,6 +62,9 @@ public final class MotionDetectorProtocol {
     static final int TX_READ_CHARGE = IBinder.FIRST_CALL_TRANSACTION + 22;
     static final int TX_VIEW_PREPARE = IBinder.FIRST_CALL_TRANSACTION + 23;
     static final int TX_VIEW_RELEASE = IBinder.FIRST_CALL_TRANSACTION + 24;
+    static final int TX_REGISTER_VIEW_HELPER = IBinder.FIRST_CALL_TRANSACTION + 25;
+    static final int TX_VIEW_OBSERVE_CHARGE = IBinder.FIRST_CALL_TRANSACTION + 26;
+    static final int TX_VIEW_DETACH_CHARGE = IBinder.FIRST_CALL_TRANSACTION + 27;
 
     static final int CB_PREPARED = IBinder.FIRST_CALL_TRANSACTION;
     static final int CB_STATUS = IBinder.FIRST_CALL_TRANSACTION + 1;
@@ -70,6 +73,8 @@ public final class MotionDetectorProtocol {
     static final int CB_SCREEN = IBinder.FIRST_CALL_TRANSACTION + 4;
     static final int CB_CHARGE = IBinder.FIRST_CALL_TRANSACTION + 5;
     static final int CB_CONFIGURED = IBinder.FIRST_CALL_TRANSACTION + 6;
+    static final String VIEW_CHARGE_CALLBACK_DESCRIPTOR = "com.byd.extend.ICameraViewingChargeCallback";
+    static final int CB_VIEW_CHARGE = IBinder.FIRST_CALL_TRANSACTION;
 
     // CameraRuntimeHost operations on byd_extend_guard/TX_CAMERA_RUNTIME.
     static final int CAMERA_ATTACH = 13;

@@ -17,7 +17,7 @@
     <string name="cameras_vdo_hint">"Приватная ссылка для просмотра и пароль; отдельный VPN-клиент на телефоне не нужен."</string>
     <string name="cameras_stream_id">"Идентификатор потока"</string>
     <string name="cameras_viewer_password">"Пароль просмотра (обязательный)"</string>
-    <string name="cameras_regenerate">"Перевыпустить доступ"</string>
+    <string name="cameras_regenerate">"Создать ID"</string>
     <string name="cameras_private">"Приватный · Serve"</string>
     <string name="cameras_public">"Публичный · Funnel"</string>
     <string name="cameras_private_security">"Приватный: только авторизованные устройства вашей сети Tailscale. Ограничьте доступ своими устройствами и портом просмотра; на телефоне нужен Tailscale."</string>
@@ -36,6 +36,8 @@
     <string name="cameras_error_password_length">"Пароль просмотра не должен превышать 1024 символа."</string>
     <string name="cameras_error_token_length">"Токен учётной записи не должен превышать 4096 символов."</string>
     <string name="cameras_error_token_required">"Перед авторизацией авто введите токен учётной записи Zrok."</string>
+    <string name="cameras_error_name_required">"Введите имя подключения перед авторизацией."</string>
+    <string name="cameras_error_viewer_password_required">"Введите пароль просмотра перед авторизацией."</string>
     <string name="cameras_error_authorization_required">"Авторизуйте это устройство в сервисе и вернитесь в приложение."</string>
     <string name="cameras_error_local_viewer">"Не удалось подготовить локальный сервер просмотра. Выключите и снова включите просмотр для повторной попытки."</string>
     <string name="cameras_error_tunnel_runtime">"Ошибка встроенного модуля туннеля. Повторите запуск просмотра; если ошибка повторится, отправьте диагностические логи приложения."</string>
@@ -63,6 +65,11 @@
     <string name="cameras_qr">"QR-код"</string>
     <string name="cameras_qr_failed">"Не удалось создать QR-код для этой ссылки."</string>
     <string name="cameras_revoke">"Отозвать доступ"</string>
+    <string name="cameras_retry_revoke">"Повторить отзыв"</string>
+    <string name="cameras_retry_connection">"Повторить подключение"</string>
+    <string name="cameras_access_authorized">"Для этого провайдера разрешён один доступ. Чтобы заменить учётную запись или доступ, сначала отзовите его."</string>
+    <string name="cameras_access_identity">"Сохранённая идентичность доступа: %1$s"</string>
+    <string name="cameras_revoke_pending">"Удалённый отзыв ещё не завершён. Повторите его перед новой авторизацией."</string>
     <string name="cameras_session_hint">"Одновременно может подключиться только один зритель. Просмотр использует уже активные камеры. Иначе камеры запускаются по запросу, а ресурсы этого сеанса освобождаются после его завершения. Авто без сети не получит запрос."</string>
     <string name="cameras_secret_show">"Показать секрет"</string>
     <string name="cameras_secret_hide">"Скрыть секрет"</string>

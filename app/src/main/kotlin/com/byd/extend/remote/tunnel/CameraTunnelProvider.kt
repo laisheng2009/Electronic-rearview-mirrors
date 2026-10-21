@@ -3,10 +3,12 @@ package com.byd.extend.remote.tunnel
 import android.content.Context
 import android.util.Log
 import com.byd.extend.remote.security.KeystoreSecretStore
+import com.byd.extend.remote.security.TunnelSecretStore
+import java.io.File
+import java.util.UUID
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
-import java.util.UUID
 import org.json.JSONObject
 
 data class CameraTunnelResult(
@@ -22,11 +24,21 @@ class CameraTunnelProvider(
     context: Context,
     private val kind: String,
     private val name: String,
+    private val secretStore: TunnelSecretStore,
+    private val runtimeDirectory: File,
+    private val nativeLibraryPath: File,
 ) : AutoCloseable {
-    private val appContext = context.applicationContext
-    private val secretStore = KeystoreSecretStore(appContext)
+    constructor(context: Context, kind: String, name: String) : this(
+        context.applicationContext ?: context,
+        kind,
+        name,
+        appSecretStore(context),
+        File((context.applicationContext ?: context).filesDir, "camera-tunnel-runtime"),
+        File((context.applicationContext ?: context).applicationInfo.nativeLibraryDir, "libcamera_tunnel.so"),
+    )
+
     private val instanceId = UUID.randomUUID().toString()
-    private val executor = acquireExecutor()
+    private val executor: ExecutorService = providerExecutor(kind)
     private val lifecycleLock = Any()
     private var closeRequested = false
 
@@ -101,12 +113,22 @@ class CameraTunnelProvider(
     }
 
     private fun ensureNativeInitialized() {
+        val runtimePath = runtimeDirectory.absolutePath
+        val libraryPath = nativeLibraryPath.absolutePath
         synchronized(nativeInitLock) {
-            if (nativeInitialized) return
-            check(NativeTunnelBridge.nativeInitialize(secretStore, appContext.cacheDir.absolutePath)) {
+            nativeConfiguration?.let { current ->
+                check(
+                    current.runtimeDirectory == runtimePath &&
+                        current.nativeLibraryPath == libraryPath &&
+                        current.secretStore === secretStore,
+                ) { "Native tunnel runtime is already bound to another private configuration." }
+                return
+            }
+            NativeTunnelBridge.loadFromPath(libraryPath)
+            check(NativeTunnelBridge.nativeInitialize(secretStore, runtimePath)) {
                 "secure native tunnel initialization failed"
             }
-            nativeInitialized = true
+            nativeConfiguration = NativeConfiguration(runtimePath, libraryPath, secretStore)
         }
     }
 
@@ -119,36 +141,32 @@ class CameraTunnelProvider(
             closeRequested = true
             try {
                 executor.execute {
-                    try {
-                        val result = try {
-                            ensureNativeInitialized()
-                            parseResult(NativeTunnelBridge.nativeCall(
-                                "close",
-                                JSONObject()
-                                    .put("provider", kind)
-                                    .put("instanceId", instanceId)
-                                    .put("name", name)
-                                    .toString(),
-                            ))
-                        } catch (failure: UnsatisfiedLinkError) {
-                            logFailure("close", failure)
-                            unavailableResult()
-                        } catch (failure: Exception) {
-                            logFailure("close", failure)
-                            unavailableResult()
-                        }
-                        runCatching { callback(result) }
-                    } finally {
-                        releaseExecutor(executor)
+                    val result = try {
+                        ensureNativeInitialized()
+                        parseResult(NativeTunnelBridge.nativeCall(
+                            "close",
+                            JSONObject()
+                                .put("provider", kind)
+                                .put("instanceId", instanceId)
+                                .put("name", name)
+                                .toString(),
+                        ))
+                    } catch (failure: UnsatisfiedLinkError) {
+                        logFailure("close", failure)
+                        unavailableResult()
+                    } catch (failure: Exception) {
+                        logFailure("close", failure)
+                        unavailableResult()
                     }
+                    runCatching { callback(result) }
                 }
             } catch (_: RejectedExecutionException) {
                 releaseNow = true
-            } finally {
-                if (releaseNow) releaseExecutor(executor)
             }
         }
-        if (releaseNow) runCatching { callback(unavailableResult()) }
+        if (releaseNow) {
+            runCatching { callback(unavailableResult()) }
+        }
     }
 
     private fun logFailure(operation: String, failure: Throwable) {
@@ -156,36 +174,50 @@ class CameraTunnelProvider(
             " cause=${failure.cause?.javaClass?.simpleName ?: "none"}")
     }
 
-    private companion object {
-        private val executorLock = Any()
-        val nativeInitLock = Any()
-        private var sharedExecutor: ExecutorService? = null
-        private var executorLeaseCount = 0
+    private data class NativeConfiguration(
+        val runtimeDirectory: String,
+        val nativeLibraryPath: String,
+        val secretStore: TunnelSecretStore,
+    )
+
+    companion object {
+        private val nativeInitLock = Any()
+        private val appSecretStoreLock = Any()
+        private val tailscaleExecutor = newProviderExecutor("tailscale")
+        private val zrokExecutor = newProviderExecutor("zrok")
+        @Volatile
+        private var convenienceSecretStore: TunnelSecretStore? = null
+
+        private fun providerExecutor(kind: String): ExecutorService = when (kind) {
+            "tailscale" -> tailscaleExecutor
+            "zrok" -> zrokExecutor
+            else -> throw IllegalArgumentException("Unsupported tunnel provider kind.")
+        }
+
+        private fun newProviderExecutor(kind: String): ExecutorService =
+            Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "camera-tunnel-$kind").apply { isDaemon = true }
+            }
+
+        private fun appSecretStore(context: Context): TunnelSecretStore =
+            convenienceSecretStore ?: synchronized(appSecretStoreLock) {
+                convenienceSecretStore ?: KeystoreSecretStore(context.applicationContext ?: context)
+                    .also { convenienceSecretStore = it }
+            }
 
         @Volatile
-        var nativeInitialized = false
+        private var nativeConfiguration: NativeConfiguration? = null
 
-        fun acquireExecutor(): ExecutorService = synchronized(executorLock) {
-            val current = sharedExecutor ?: Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "camera-tunnel").apply { isDaemon = true }
-            }.also { sharedExecutor = it }
-            executorLeaseCount++
-            current
-        }
-
-        fun releaseExecutor(executor: ExecutorService) {
-            synchronized(executorLock) {
-                if (sharedExecutor !== executor) return
-                check(executorLeaseCount > 0) { "Tunnel executor lease underflow" }
-                executorLeaseCount--
-                if (executorLeaseCount == 0) {
-                    sharedExecutor = null
-                    executor.shutdown()
+        @JvmStatic
+        fun notifyNetworkChanged() {
+            if (nativeConfiguration == null) return
+            runCatching { NativeTunnelBridge.nativeNetworkChanged() }
+                .onFailure { failure ->
+                    Log.w("CameraViewing", "tunnel_network_changed type=${failure.javaClass.simpleName}")
                 }
-            }
         }
 
-        fun parseResult(raw: String?): CameraTunnelResult {
+        private fun parseResult(raw: String?): CameraTunnelResult {
             if (raw.isNullOrBlank()) return unavailableResult()
             val value = JSONObject(raw)
             return CameraTunnelResult(
@@ -197,7 +229,7 @@ class CameraTunnelProvider(
             )
         }
 
-        fun unavailableResult() = CameraTunnelResult(
+        private fun unavailableResult() = CameraTunnelResult(
             state = "error",
             errorCode = "native_unavailable",
             errorDetail = "The secure tunnel runtime is unavailable on this device.",

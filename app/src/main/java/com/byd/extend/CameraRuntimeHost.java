@@ -21,7 +21,7 @@ final class CameraRuntimeHost {
             MOTION_RECORD_ATTACH = 16, MOTION_RECORD_DETACH = 17,
             MOTION_OWN_WAKE = 18, MOTION_END_WAKE = 19, MOTION_BIND_WORKER = 20,
             MOTION_UNBIND_WORKER = 21;
-    static final int VIEW_ATTACH = 22, VIEW_DETACH = 23;
+    static final int VIEW_ATTACH = 22, VIEW_DETACH = 23, VIEW_REGISTER_HELPER = 24;
     static final String CALLBACK = "com.byd.extend.ICameraRuntimeClient";
     static final int POWER_QUICKBOOT = 1, POWER_SCREEN_OFF = 2, POWER_SCREEN_ON = 3,
             POWER_USER_PRESENT = 4;
@@ -48,6 +48,10 @@ final class CameraRuntimeHost {
     private IBinder.DeathRecipient motionDeath;
     private IBinder viewerOwner;
     private IBinder.DeathRecipient viewerDeath;
+    private IBinder viewingHelper;
+    private IBinder.DeathRecipient viewingHelperDeath;
+    private int viewingHelperPid;
+    private final String viewingHelperApkIdentity;
     private final String motionSourceEpoch = java.util.UUID.randomUUID().toString();
     private final MotionWakeOwnership motionWake = new MotionWakeOwnership();
     private JSONObject motionPower, motionLock, motionDisplay;
@@ -87,6 +91,7 @@ final class CameraRuntimeHost {
         this.appUid = appUid;
         this.journal = journal;
         this.platformSignal = platformSignal;
+        viewingHelperApkIdentity = CameraViewingShellProtocol.currentApkIdentity(system);
         context = new CameraRuntimeContext(system, appUid, this::readAvmConfig,
                 value -> platformSignal.accept(POWER, value));
         CameraShellMain.initializeSystemFontsForShell();
@@ -98,7 +103,7 @@ final class CameraRuntimeHost {
 
     int transact(Parcel data, Parcel reply) throws Exception {
         int operation = data.readInt();
-        if (operation == VIEW_ATTACH || operation == VIEW_DETACH)
+        if (operation == VIEW_ATTACH || operation == VIEW_DETACH || operation == VIEW_REGISTER_HELPER)
             return transactViewing(operation, data, reply);
         if (operation >= MOTION_ATTACH && operation <= MOTION_UNBIND_WORKER)
             return transactMotion(operation, data, reply);
@@ -269,7 +274,43 @@ final class CameraRuntimeHost {
     }
 
     private int transactViewing(int operation, Parcel data, Parcel reply) throws Exception {
-        if (Binder.getCallingUid() != appUid) throw new SecurityException("viewer caller denied");
+        if (operation == VIEW_REGISTER_HELPER) {
+            if (Binder.getCallingUid() != appUid)
+                throw new SecurityException("viewing helper registration requires app UID");
+            IBinder helperProcess = data.readStrongBinder();
+            int pid = data.readInt();
+            String apk = data.readString();
+            if (helperProcess == null || !helperProcess.isBinderAlive() || pid <= 0
+                    || !viewingHelperApkIdentity.equals(apk) || data.dataAvail() != 0)
+                throw new IllegalArgumentException("invalid viewing helper registration");
+            CameraViewingShellProtocol.Identity identity = CameraViewingShellProtocol.readIdentity(helperProcess);
+            if (identity == null || !identity.matches(pid, viewingHelperApkIdentity))
+                throw new SecurityException("viewing helper APK/PID identity mismatch");
+            call(() -> {
+                if (viewingHelper == helperProcess && viewingHelperPid == pid) return null;
+                if (viewingHelper != null && viewingHelper.isBinderAlive())
+                    throw new SecurityException("another viewing helper is already registered");
+                if (viewerOwner != null) clearViewer();
+                clearViewingHelper();
+                IBinder.DeathRecipient death = () -> handler.post(() -> {
+                    if (viewingHelper == helperProcess) {
+                        if (viewerOwner != null) clearViewer();
+                        clearViewingHelper();
+                    }
+                });
+                helperProcess.linkToDeath(death, 0);
+                viewingHelper = helperProcess;
+                viewingHelperPid = pid;
+                viewingHelperDeath = death;
+                return null;
+            });
+            reply.writeNoException();
+            reply.writeInt(1);
+            return operation;
+        }
+        if (Binder.getCallingUid() != 2000 || Binder.getCallingPid() != viewingHelperPid
+                || viewingHelper == null || !viewingHelper.isBinderAlive())
+            throw new SecurityException("unregistered viewing helper caller");
         IBinder owner = data.readStrongBinder();
         String session = data.readString();
         android.view.Surface[] surfaces = operation == VIEW_ATTACH
@@ -323,6 +364,14 @@ final class CameraRuntimeHost {
         helper.detachViewing();
         if (viewerOwner != null && viewerDeath != null) viewerOwner.unlinkToDeath(viewerDeath, 0);
         viewerOwner = null; viewerDeath = null;
+    }
+
+    private void clearViewingHelper() {
+        if (viewingHelper != null && viewingHelperDeath != null)
+            viewingHelper.unlinkToDeath(viewingHelperDeath, 0);
+        viewingHelper = null;
+        viewingHelperDeath = null;
+        viewingHelperPid = 0;
     }
 
     private void clearMotion() {
@@ -609,6 +658,7 @@ final class CameraRuntimeHost {
         lifetime.shutdown(() -> {
             try { clearViewer(); }
             catch (Exception error) { event("camera_viewing_detach_error", "error", error.getClass().getSimpleName()); }
+            clearViewingHelper();
             boolean motionDrained = false;
             try {
                 helper.detachMotionRecording();

@@ -108,6 +108,7 @@ class RuntimeUiSession {
 
     class Session internal constructor(initial: RuntimeUiSelections) {
         private var selected = initial
+        private var motionCameraTab = 0
         private val mainViewports = LinkedHashMap<String, RuntimeViewport>()
         private val sidebarViewports = LinkedHashMap<String, RuntimeViewport>()
 
@@ -116,6 +117,15 @@ class RuntimeUiSession {
 
         @Synchronized
         fun select(value: RuntimeUiSelections) { selected = value }
+
+        @Synchronized
+        fun motionCameraTab(): Int = motionCameraTab
+
+        @Synchronized
+        fun selectMotionCameraTab(value: Int) {
+            require(value in 0..2)
+            motionCameraTab = value
+        }
 
         @Synchronized
         fun viewport(key: String, kind: RuntimeViewportKind): RuntimeViewport =

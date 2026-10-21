@@ -46,22 +46,14 @@ func (p *tailscaleProvider) Authorize(name, credential string) tunnelResult {
 		if p.httpServer != nil {
 			return failure("provider_unavailable")
 		}
-		_ = p.server.Close()
-		p.server = nil
+		p.discardServer()
 	}
 	if p.server == nil {
-		p.name = name
-		p.server = &tsnet.Server{
-			Dir:      p.runtimeDir,
-			Hostname: name,
-			Store:    tailscaleEncryptedStateStore{},
-			Logf:     func(string, ...any) {},
-			UserLogf: func(string, ...any) {},
-			AuthKey:  credential,
-		}
+		p.newServer(name, credential)
 	}
 	if err := p.server.Start(); err != nil {
 		p.server.AuthKey = ""
+		p.discardServer()
 		return failure("provider_unavailable")
 	}
 	// Auth keys are one-shot input; the long-lived node identity is kept only by Store.
@@ -78,18 +70,12 @@ func (p *tailscaleProvider) Status(name string) tunnelResult {
 	}
 	if p.server == nil || p.name != name {
 		if p.server != nil {
-			_ = p.server.Close()
+			p.discardServer()
 		}
-		p.server = &tsnet.Server{
-			Dir:      p.runtimeDir,
-			Hostname: name,
-			Store:    tailscaleEncryptedStateStore{},
-			Logf:     func(string, ...any) {},
-			UserLogf: func(string, ...any) {},
-		}
-		p.name = name
+		p.newServer(name, "")
 	}
 	if err := p.server.Start(); err != nil {
+		p.discardServer()
 		return failure("provider_unavailable")
 	}
 	return p.waitForStatus(8 * time.Second)
@@ -219,12 +205,7 @@ func (p *tailscaleProvider) privateAdmissionHandler(next http.Handler, privatePr
 }
 
 func (p *tailscaleProvider) Stop() tunnelResult {
-	p.stopServing()
-	if p.server != nil {
-		_ = p.server.Close()
-		p.server = nil
-	}
-	p.address = ""
+	p.discardServer()
 	return tunnelResult{State: "stopped"}
 }
 
@@ -234,16 +215,10 @@ func (p *tailscaleProvider) Revoke(name string) tunnelResult {
 	}
 	var logoutFailed bool
 	if p.server == nil {
-		p.server = &tsnet.Server{
-			Dir:      p.runtimeDir,
-			Hostname: name,
-			Store:    tailscaleEncryptedStateStore{},
-			Logf:     func(string, ...any) {},
-			UserLogf: func(string, ...any) {},
-		}
-		p.name = name
+		p.newServer(name, "")
 		if err := p.server.Start(); err != nil {
 			logoutFailed = true
+			p.discardServer()
 		}
 	}
 	if p.server != nil && !logoutFailed {
@@ -261,17 +236,12 @@ func (p *tailscaleProvider) Revoke(name string) tunnelResult {
 			cancel()
 		}
 	}
-	p.stopServing()
-	if p.server != nil {
-		_ = p.server.Close()
-		p.server = nil
+	p.discardServer()
+	if logoutFailed {
+		return failure("provider_unavailable")
 	}
 	if err := deleteSecretPrefix(tailscaleStatePrefix); err != nil {
 		return failure("secure_store_error")
-	}
-	p.address = ""
-	if logoutFailed {
-		return failure("provider_unavailable")
 	}
 	return tunnelResult{State: "revoked"}
 }
@@ -290,10 +260,37 @@ func (p *tailscaleProvider) stopServing() {
 }
 
 func (p *tailscaleProvider) CloseForModeChange() {
+	p.discardServer()
+}
+
+func (p *tailscaleProvider) newServer(name, authKey string) {
+	p.name = name
+	p.server = &tsnet.Server{
+		Dir:      p.runtimeDir,
+		Hostname: name,
+		Store:    tailscaleEncryptedStateStore{},
+		Logf:     func(string, ...any) {},
+		UserLogf: func(string, ...any) {},
+		AuthKey:  authKey,
+	}
+}
+
+func (p *tailscaleProvider) discardServer() {
 	p.stopServing()
 	if p.server != nil {
 		_ = p.server.Close()
 		p.server = nil
+	}
+	p.address = ""
+}
+
+func (p *tailscaleProvider) discardAfterFailure() {
+	p.discardServer()
+}
+
+func (p *tailscaleProvider) NetworkChanged() {
+	if p.server != nil {
+		p.server.NetworkChanged()
 	}
 }
 

@@ -13,10 +13,12 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -62,6 +64,7 @@ import com.byd.extend.ui.SwitchLine
 import com.byd.extend.ui.UiPalette
 import com.byd.extend.ui.UiStrings
 import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.awaitCancellation
 import java.util.Locale
@@ -142,6 +145,7 @@ internal fun FormScope.CameraViewingScreen(
     var revealPassword by remember { mutableStateOf(false) }
     var revealToken by remember { mutableStateOf(false) }
     var showQr by remember { mutableStateOf(false) }
+    var revokeSubmitted by remember { mutableStateOf(false) }
     var suppressFocusCommit by remember { mutableStateOf(false) }
     val transport = state.config.transport
     val isZrok = transport == "zrok"
@@ -162,13 +166,13 @@ internal fun FormScope.CameraViewingScreen(
         nextTransport: String? = null,
         public: Boolean? = null,
         authorize: Boolean = false,
-        regenerate: Boolean = false,
     ) {
         val edits = CameraViewingEdits(transport,
             streamIdDraft.takeIf { streamIdDirty },
             passwordDraft.takeIf { passwordLoaded && passwordDirty },
             tokenDraft.takeIf { tokenLoaded && tokenDirty })
-        controller.update(edits, enabled, nextTransport, public, authorize, regenerate) {
+        controller.update(edits, enabled = enabled, transport = nextTransport,
+            tailscalePublic = public, authorize = authorize, onSaved = {
             if (controller.state.value.config.transport == edits.transport) {
                 if (edits.streamId != null && streamIdDraft == edits.streamId) {
                     streamIdDirty = false
@@ -177,7 +181,7 @@ internal fun FormScope.CameraViewingScreen(
                 if (edits.password != null && passwordDraft == edits.password) passwordDirty = false
                 if (edits.token != null && tokenDraft == edits.token) tokenDirty = false
             }
-        }
+        })
     }
 
     fun commitEdits() {
@@ -190,7 +194,8 @@ internal fun FormScope.CameraViewingScreen(
         suppressFocusCommit = false
     }
 
-    LaunchedEffect(transport, state.config.tailscalePublic) {
+    LaunchedEffect(transport, state.config.tailscalePublic, state.authorized,
+        state.revocationPending, state.passwordConfigured, state.tokenConfigured) {
         clearFocusForAction()
         streamIdDraft = state.config.streamId
         streamIdDirty = false
@@ -239,12 +244,26 @@ internal fun FormScope.CameraViewingScreen(
     }
     val phase = state.phase
     val blocked = chargeState.isBlocked()
+    val fieldsLocked = state.authorized || state.revocationPending || state.busy
+    LaunchedEffect(state.revocationPending, phase, state.error) {
+        if (!state.revocationPending || phase == "revoke_pending" || state.error != null) {
+            revokeSubmitted = false
+        }
+    }
+    val revokeInProgress = state.revocationPending && phase == "revoking"
+    val canRevoke = !revokeSubmitted && !revokeInProgress && (!state.busy || state.authorized)
     val passwordRequired = transport == "vdo" || transport == "zrok" ||
         (transport == "tailscale" && state.config.tailscalePublic)
-    val passwordAvailable = if (passwordLoaded) passwordDraft.isNotBlank() else state.passwordConfigured
-    val tokenAvailable = transport != "zrok" || if (tokenLoaded) tokenDraft.isNotBlank() else state.tokenConfigured
+    val authInputsLoaded = (!passwordRequired || passwordLoaded) && (transport != "zrok" || tokenLoaded)
+    val editsForAuthorization = CameraViewingEdits(transport, streamIdDraft,
+        passwordDraft.takeIf { passwordLoaded }, tokenDraft.takeIf { tokenLoaded })
+    val validationError = if (authInputsLoaded)
+        editsForAuthorization.authorizationError(state.config.tailscalePublic) else null
+    val canAuthorize = state.config.enabled && !state.busy && !state.revocationPending &&
+        authInputsLoaded && (state.authorized || validationError == null)
     val shareable = !streamIdDirty && !passwordDirty && !tokenDirty && !state.viewerUrl.isNullOrBlank()
     val phaseStatus = when {
+        state.revocationPending -> strings.motionText(R.string.cameras_revoke_pending)
         blocked || phase == "low_battery" -> strings.motionText(R.string.cameras_status_low_battery)
         phase == "authorizing" -> strings.motionText(R.string.cameras_status_authorizing)
         phase == "connecting" -> strings.motionText(R.string.cameras_status_connecting)
@@ -255,6 +274,7 @@ internal fun FormScope.CameraViewingScreen(
         else -> strings.motionText(R.string.cameras_not_connected)
     }
     val phaseTone = when {
+        state.revocationPending -> StatusTone.Warning
         blocked || phase in setOf("low_battery", "authorizing", "connecting", "preparing") -> StatusTone.Warning
         phase == "connected" -> StatusTone.Ok
         phase == "error" -> StatusTone.Error
@@ -290,7 +310,8 @@ internal fun FormScope.CameraViewingScreen(
                 row("mode") {
                     Segmented(listOf(strings.motionText(R.string.cameras_private),
                         strings.motionText(R.string.cameras_public)),
-                        if (state.config.tailscalePublic) 1 else 0, colors, Modifier.fillMaxWidth()) {
+                        if (state.config.tailscalePublic) 1 else 0, colors, Modifier.fillMaxWidth(),
+                        enabled = { !fieldsLocked }) {
                         clearFocusForAction()
                         submit(public = it == 1)
                     }
@@ -307,7 +328,7 @@ internal fun FormScope.CameraViewingScreen(
                 }
                 row("name") {
                     ConnectionField(strings.motionText(R.string.cameras_device_name), streamIdDraft,
-                        colors, onValueChange = {
+                        colors, enabled = !fieldsLocked, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
                         }, onCommit = ::commitEdits,
@@ -315,7 +336,8 @@ internal fun FormScope.CameraViewingScreen(
                 }
                 if (state.config.tailscalePublic) row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
-                        colors, secret = true, revealed = revealPassword, enabled = passwordLoaded,
+                        colors, secret = true, revealed = revealPassword,
+                        enabled = passwordLoaded && !fieldsLocked,
                         revealDescription = strings.motionText(if (revealPassword) R.string.cameras_secret_hide
                             else R.string.cameras_secret_show),
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
@@ -330,7 +352,8 @@ internal fun FormScope.CameraViewingScreen(
                 }
                 row("token") {
                     ConnectionField(strings.motionText(R.string.cameras_account_token), tokenDraft,
-                        colors, secret = true, revealed = revealToken, enabled = tokenLoaded,
+                        colors, secret = true, revealed = revealToken,
+                        enabled = tokenLoaded && !fieldsLocked,
                         revealDescription = strings.motionText(if (revealToken) R.string.cameras_secret_hide
                             else R.string.cameras_secret_show),
                         onReveal = { revealToken = !revealToken }, onValueChange = {
@@ -340,7 +363,7 @@ internal fun FormScope.CameraViewingScreen(
                 }
                 row("name") {
                     ConnectionField(strings.motionText(R.string.cameras_connection_name), streamIdDraft,
-                        colors, onValueChange = {
+                        colors, enabled = !fieldsLocked, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
                         }, onCommit = ::commitEdits,
@@ -348,7 +371,8 @@ internal fun FormScope.CameraViewingScreen(
                 }
                 row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
-                        colors, secret = true, revealed = revealPassword, enabled = passwordLoaded,
+                        colors, secret = true, revealed = revealPassword,
+                        enabled = passwordLoaded && !fieldsLocked,
                         revealDescription = strings.motionText(if (revealPassword) R.string.cameras_secret_hide
                             else R.string.cameras_secret_show),
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
@@ -363,7 +387,7 @@ internal fun FormScope.CameraViewingScreen(
                 }
                 row("id") {
                     ConnectionField(strings.motionText(R.string.cameras_stream_id), streamIdDraft,
-                        colors, onValueChange = {
+                        colors, enabled = !fieldsLocked, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
                         }, onCommit = ::commitEdits,
@@ -371,7 +395,8 @@ internal fun FormScope.CameraViewingScreen(
                 }
                 row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
-                        colors, secret = true, revealed = revealPassword, enabled = passwordLoaded,
+                        colors, secret = true, revealed = revealPassword,
+                        enabled = passwordLoaded && !fieldsLocked,
                         revealDescription = strings.motionText(if (revealPassword) R.string.cameras_secret_hide
                             else R.string.cameras_secret_show),
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
@@ -382,13 +407,33 @@ internal fun FormScope.CameraViewingScreen(
                 }
             }
         }
-        row("provider-actions") {
-            ActionButton(strings.motionText(if (transport == "vdo") R.string.cameras_regenerate
-                else R.string.cameras_authorize), colors, Modifier.fillMaxWidth(),
-                enabled = state.config.enabled &&
-                    (transport == "vdo" || ((!passwordRequired || passwordAvailable) && tokenAvailable))) {
-                clearFocusForAction()
-                submit(authorize = transport != "vdo", regenerate = transport == "vdo")
+        if (!state.revocationPending && (!state.authorized || phase == "error")) row("provider-actions") {
+            Column(horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp,
+                    Alignment.CenterHorizontally)) {
+                    if (transport == "vdo" && !state.authorized) {
+                        ActionButton(strings.motionText(R.string.cameras_regenerate), colors,
+                            Modifier.width(160.dp), enabled = !fieldsLocked) {
+                            clearFocusForAction()
+                            streamIdDraft = CameraViewingEdits.newName("vdo")
+                            streamIdDirty = true
+                            submit()
+                        }
+                    }
+                    ActionButton(strings.motionText(if (state.authorized) R.string.cameras_retry_connection
+                        else R.string.cameras_authorize), colors, Modifier.width(180.dp),
+                        enabled = canAuthorize) {
+                        clearFocusForAction()
+                        submit(authorize = true)
+                    }
+                }
+                validationError?.let {
+                    Text(strings.motionText(it), color = colors.red, fontSize = 13.sp)
+                }
+                state.fieldError?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, color = colors.red, fontSize = 13.sp)
+                }
             }
         }
         this
@@ -400,6 +445,15 @@ internal fun FormScope.CameraViewingScreen(
             StatusPill(StatusUiState(phaseStatus, phaseTone, true), phaseStatus, colors)
             state.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = colors.red, fontSize = 13.sp) }
         }
+        state.identity?.takeIf { it.isNotBlank() }?.let { identity ->
+            if (state.authorized || state.revocationPending) row("identity") {
+                Text(strings.motionText(R.string.cameras_access_identity, identity),
+                    color = colors.muted, fontSize = 13.sp)
+            }
+        }
+        if (state.authorized && state.identity.isNullOrBlank()) row("identity") {
+            Text(strings.motionText(R.string.cameras_access_authorized), color = colors.muted, fontSize = 13.sp)
+        }
         state.viewerUrl?.let { viewerUrl -> row("viewer-url") {
             Text(viewerUrl, color = colors.muted, fontSize = 12.sp)
         } }
@@ -408,32 +462,29 @@ internal fun FormScope.CameraViewingScreen(
                 else R.string.cameras_link_pending), color = colors.muted, fontSize = 13.sp)
         }
         row("link-actions") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp,
+                Alignment.CenterHorizontally)) {
                 ActionButton(strings.motionText(R.string.cameras_copy_link), colors,
-                    Modifier.weight(1f), enabled = shareable) {
+                    Modifier.width(140.dp), enabled = shareable) {
                     state.viewerUrl?.let { copyViewerUrl(context, it, strings) }
                 }
-                ActionButton(strings.motionText(R.string.cameras_qr), colors, Modifier.weight(1f),
+                ActionButton(strings.motionText(R.string.cameras_qr), colors, Modifier.width(140.dp),
                     enabled = shareable) { showQr = true }
-                ActionButton(strings.motionText(R.string.cameras_revoke), colors,
-                    Modifier.weight(1f),
-                    enabled = state.config.enabled || state.viewerUrl != null || state.phase != "idle" ||
-                        state.passwordConfigured || state.tokenConfigured) {
+                if (state.authorized || state.revocationPending || state.viewerUrl != null ||
+                    state.passwordConfigured || state.tokenConfigured) {
+                    ActionButton(strings.motionText(if (state.revocationPending)
+                        R.string.cameras_retry_revoke else R.string.cameras_revoke), colors,
+                        Modifier.width(140.dp), destructive = true, enabled = canRevoke) {
                     clearFocusForAction()
+                    revokeSubmitted = true
                     controller.revoke()
-                    streamIdDraft = ""
-                    streamIdDirty = false
-                    passwordDraft = ""
-                    tokenDraft = ""
-                    passwordDirty = false
-                    tokenDirty = false
-                    revealPassword = false
-                    revealToken = false
                     showQr = false
-                    passwordLoaded = true
-                    tokenLoaded = true
+                    }
                 }
             }
+        }
+        if (state.revocationPending) row("revoke-pending") {
+            Text(strings.motionText(R.string.cameras_revoke_pending), color = colors.yellow, fontSize = 13.sp)
         }
         if (blocked) row("charge-blocked") {
             Text(strings.motionText(R.string.cameras_charge_paused), color = colors.yellow, fontSize = 13.sp)
@@ -525,7 +576,8 @@ private fun ConnectionField(
 private fun CameraViewerQrDialog(url: String, colors: UiPalette, strings: UiStrings, onClose: () -> Unit) {
     val bitmap = remember(url) {
         runCatching {
-            val matrix = QRCodeWriter().encode(url, BarcodeFormat.QR_CODE, 480, 480)
+            val matrix = QRCodeWriter().encode(url, BarcodeFormat.QR_CODE, 480, 480,
+                mapOf(EncodeHintType.MARGIN to 4))
             val pixels = IntArray(matrix.width * matrix.height) { index ->
                 if (matrix.get(index % matrix.width, index / matrix.width)) AndroidColor.BLACK else AndroidColor.WHITE
             }
@@ -535,15 +587,34 @@ private fun CameraViewerQrDialog(url: String, colors: UiPalette, strings: UiStri
         }.getOrNull()
     }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.fillMaxWidth(.8f).clip(RoundedCornerShape(10.dp)).background(colors.surface)
-            .border(1.dp, colors.borderStrong, RoundedCornerShape(10.dp)).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(strings.motionText(R.string.cameras_qr), color = colors.text, fontSize = 20.sp,
-                fontWeight = FontWeight.SemiBold)
-            if (bitmap != null) Image(bitmap.asImageBitmap(), contentDescription = strings.motionText(R.string.cameras_qr),
-                modifier = Modifier.fillMaxWidth().aspectRatio(1f).background(Color.White))
-            else Text(strings.motionText(R.string.cameras_qr_failed), color = colors.red, fontSize = 14.sp)
-            ActionButton(strings.motionText(R.string.motion_close), colors, Modifier.fillMaxWidth(), onClick = onClose)
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val qrSide = minOf(240.dp, (maxHeight - 88.dp).coerceAtLeast(0.dp))
+            Column(Modifier.widthIn(max = 320.dp).fillMaxWidth().heightIn(max = maxHeight)
+                .verticalScroll(rememberScrollState()).clip(RoundedCornerShape(10.dp))
+                .background(colors.surface).border(1.dp, colors.borderStrong, RoundedCornerShape(10.dp))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(strings.motionText(R.string.cameras_qr), color = colors.text, fontSize = 20.sp,
+                        fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    IconButton(onClick = onClose, modifier = Modifier.size(48.dp)
+                        .semantics { contentDescription = strings.motionText(R.string.motion_close) }) {
+                        Canvas(Modifier.size(20.dp)) {
+                            val inset = size.width * .25f
+                            drawLine(colors.muted, androidx.compose.ui.geometry.Offset(inset, inset),
+                                androidx.compose.ui.geometry.Offset(size.width - inset, size.height - inset),
+                                strokeWidth = 2.dp.toPx())
+                            drawLine(colors.muted, androidx.compose.ui.geometry.Offset(size.width - inset, inset),
+                                androidx.compose.ui.geometry.Offset(inset, size.height - inset),
+                                strokeWidth = 2.dp.toPx())
+                        }
+                    }
+                }
+                if (bitmap != null) Image(bitmap.asImageBitmap(),
+                    contentDescription = strings.motionText(R.string.cameras_qr),
+                    modifier = Modifier.size(qrSide).background(Color.White))
+                else Text(strings.motionText(R.string.cameras_qr_failed), color = colors.red, fontSize = 14.sp)
+            }
         }
     }
 }

@@ -39,7 +39,7 @@ public final class RecoveryNotificationListener extends NotificationListenerServ
     private void recover(String reason) {
         boolean needed = GuardRecovery.shouldRecover(this)
                 && (GuardRecovery.hasActiveSession(this) || AvasNotificationAccess.required(
-                        getSharedPreferences("settings", MODE_PRIVATE)));
+                        this, getSharedPreferences("settings", MODE_PRIVATE)));
         boolean accepted = needed && GuardRecovery.startService(this, reason);
         AvasRecoveryJournal.event(this, "notification_listener_recovery",
                 "reason", reason, "needed", needed, "accepted", accepted);

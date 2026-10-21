@@ -1,5 +1,7 @@
 package com.byd.extend.remote
 
+import androidx.annotation.StringRes
+import com.byd.extend.R
 import java.util.UUID
 
 /** A snapshot of one provider's edits; null secrets mean unchanged, not deleted. */
@@ -31,6 +33,29 @@ class CameraViewingEdits(
 
     fun validateToken() {
         require(token == null || token.length <= 4096)
+    }
+
+    @StringRes
+    fun authorizationError(tailscalePublic: Boolean = false): Int? {
+        val name = try { validatedName() }
+        catch (_: IllegalArgumentException) {
+            return if (transport == "vdo") R.string.cameras_vdo_id_hint else R.string.cameras_error_name
+        }
+        if (name.isNullOrBlank()) return R.string.cameras_error_name_required
+
+        val passwordRequired = transport == "vdo" || transport == "zrok" ||
+            (transport == "tailscale" && tailscalePublic)
+        if (passwordRequired && password.isNullOrBlank()) return R.string.cameras_error_viewer_password_required
+        try { validatePassword() }
+        catch (_: IllegalArgumentException) {
+            return if (transport == "vdo") R.string.cameras_vdo_password_hint
+            else R.string.cameras_error_password_length
+        }
+
+        if (transport == "zrok" && token.isNullOrBlank()) return R.string.cameras_error_token_required
+        try { validateToken() }
+        catch (_: IllegalArgumentException) { return R.string.cameras_error_token_length }
+        return null
     }
 
     companion object {

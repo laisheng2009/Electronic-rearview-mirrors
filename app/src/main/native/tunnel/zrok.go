@@ -70,39 +70,11 @@ func (p *zrokProvider) Authorize(name, credential string) tunnelResult {
 		}
 		return failure("credential_required")
 	}
-	if root.IsEnabled() && root.Environment().AccountToken == credential {
-		return tunnelResult{State: "authorized"}
-	}
 	if root.IsEnabled() {
-		if p.httpServer != nil {
-			return failure("provider_unavailable")
+		if root.Environment().AccountToken == credential {
+			return tunnelResult{State: "authorized"}
 		}
-		if oldShare, loadErr := loadZrokShare(); loadErr != nil {
-			return failure("secure_store_error")
-		} else if oldShare != nil {
-			if err := sdk.DeleteShare(root, &sdk.Share{Token: oldShare.Token}); err != nil {
-				return failure("provider_unavailable")
-			}
-			if err := deleteSecret(zrokShareKey); err != nil {
-				return failure("secure_store_error")
-			}
-			p.share = nil
-			p.address = ""
-		}
-		if sdk.DisableEnvironment(&sdk.Environment{
-			Host:         root.environmentHost,
-			ZitiIdentity: root.Environment().ZitiIdentity,
-		}, root) != nil {
-			return failure("provider_unavailable")
-		}
-		if err := deleteSecretPrefix(zrokSecretPrefix); err != nil {
-			return failure("secure_store_error")
-		}
-		root, err = loadMemoryRoot()
-		if err != nil {
-			return failure("secure_store_error")
-		}
-		defer root.CloseMemfds()
+		return failure("revoke_required")
 	}
 	root.SetEnvironmentInMemory(&env_core.Environment{
 		AccountToken: credential,
@@ -343,6 +315,10 @@ func (p *zrokProvider) stopServing() {
 		_ = p.listener.Close()
 		p.listener = nil
 	}
+}
+
+func (p *zrokProvider) discardAfterFailure() {
+	p.stopServing()
 }
 
 type memoryRoot struct {

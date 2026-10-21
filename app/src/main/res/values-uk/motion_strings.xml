@@ -17,7 +17,7 @@
     <string name="cameras_vdo_hint">"Приватне посилання для перегляду та пароль; без окремого VPN-клієнта на телефоні."</string>
     <string name="cameras_stream_id">"Ідентифікатор потоку"</string>
     <string name="cameras_viewer_password">"Пароль перегляду (обов’язковий)"</string>
-    <string name="cameras_regenerate">"Перевидати доступ"</string>
+    <string name="cameras_regenerate">"Створити ID"</string>
     <string name="cameras_private">"Приватний · Serve"</string>
     <string name="cameras_public">"Публічний · Funnel"</string>
     <string name="cameras_private_security">"Приватний: лише авторизовані пристрої вашої мережі Tailscale. Обмежте доступ своїми пристроями та портом перегляду; на телефоні потрібен Tailscale."</string>
@@ -36,6 +36,8 @@
     <string name="cameras_error_password_length">"Пароль перегляду не повинен перевищувати 1024 символи."</string>
     <string name="cameras_error_token_length">"Токен облікового запису не повинен перевищувати 4096 символів."</string>
     <string name="cameras_error_token_required">"Перед авторизацією авто введіть токен облікового запису Zrok."</string>
+    <string name="cameras_error_name_required">"Введіть назву підключення перед авторизацією."</string>
+    <string name="cameras_error_viewer_password_required">"Введіть пароль перегляду перед авторизацією."</string>
     <string name="cameras_error_authorization_required">"Авторизуйте цей пристрій у сервісі та поверніться до застосунку."</string>
     <string name="cameras_error_local_viewer">"Не вдалося підготувати локальний сервер перегляду. Вимкніть і знову ввімкніть перегляд для повторної спроби."</string>
     <string name="cameras_error_tunnel_runtime">"Помилка вбудованого модуля тунелю. Повторіть запуск перегляду; якщо помилка повториться, надішліть діагностичні логи застосунку."</string>
@@ -63,6 +65,11 @@
     <string name="cameras_qr">"QR-код"</string>
     <string name="cameras_qr_failed">"Не вдалося створити QR-код для цього посилання."</string>
     <string name="cameras_revoke">"Відкликати доступ"</string>
+    <string name="cameras_retry_revoke">"Повторити відкликання"</string>
+    <string name="cameras_retry_connection">"Повторити підключення"</string>
+    <string name="cameras_access_authorized">"Для цього провайдера авторизовано один доступ. Щоб замінити обліковий запис або доступ, спершу відкличте його."</string>
+    <string name="cameras_access_identity">"Збережена ідентичність доступу: %1$s"</string>
+    <string name="cameras_revoke_pending">"Відкликання на сервері ще не завершено. Повторіть відкликання перед новою авторизацією."</string>
     <string name="cameras_session_hint">"Одночасно може підключитися лише один глядач. Перегляд використовує вже активні камери. Інакше камери запускаються на запит, а ресурси цього сеансу звільняються після його завершення. Авто без мережі не отримає запит."</string>
     <string name="cameras_secret_show">"Показати секрет"</string>
     <string name="cameras_secret_hide">"Приховати секрет"</string>

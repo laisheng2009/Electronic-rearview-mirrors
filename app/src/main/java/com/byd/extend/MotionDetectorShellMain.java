@@ -185,9 +185,22 @@ public final class MotionDetectorShellMain {
     private final FrameCadence frameCadence = new FrameCadence();
     private final int[] loggedFrameLayout = new int[8];
     private String lastReportedDetectorState = "";
+    private final Map<IBinder, ChargeObserver> viewingChargeObservers = new IdentityHashMap<>();
+    private volatile IBinder viewingHelper;
+    private volatile int viewingHelperPid;
+    private IBinder.DeathRecipient registeredViewingHelperDeath;
     private boolean firstInferenceReceived;
     private volatile ManualCheck manualCheck;
     private final Map<IBinder, RemoteViewLease> remoteViewLeases = new IdentityHashMap<>();
+
+    private final class ChargeObserver {
+        final IBinder callback;
+        final IBinder.DeathRecipient death;
+        ChargeObserver(IBinder callback) {
+            this.callback = callback;
+            death = () -> control.post(() -> removeViewingChargeObserver(callback));
+        }
+    }
 
     private static final class ConfigureResult {
         final MotionSessionConfigStore.Snapshot snapshot;
@@ -332,7 +345,18 @@ public final class MotionDetectorShellMain {
                 control.post(() -> acceptTelemetry(id, line));
                 return true;
             }
-            if (callerUid != appUid) {
+            if (code == MotionDetectorProtocol.TX_REGISTER_VIEW_HELPER && callerUid != appUid) {
+                if (reply != null) reply.writeException(new SecurityException("viewing helper registration requires app UID"));
+                return true;
+            }
+            if (isViewingHelperOperation(code)) {
+                boolean appChargeRead = code == MotionDetectorProtocol.TX_READ_CHARGE
+                        && callerUid == appUid;
+                if (!appChargeRead && !isRegisteredViewingCaller(callerUid, Binder.getCallingPid())) {
+                    if (reply != null) reply.writeException(new SecurityException("unregistered viewing helper"));
+                    return true;
+                }
+            } else if (callerUid != appUid) {
                 if (reply != null) reply.writeException(new SecurityException("motion caller denied"));
                 return true;
             }
@@ -441,6 +465,40 @@ public final class MotionDetectorShellMain {
                         });
                         reply.writeNoException();
                         MotionDetectorProtocol.writeChargeState(reply, fresh);
+                        return true;
+                    }
+                    case MotionDetectorProtocol.TX_REGISTER_VIEW_HELPER: {
+                        IBinder helper = data.readStrongBinder();
+                        int pid = data.readInt();
+                        String apk = data.readString();
+                        if (helper == null || !helper.isBinderAlive() || pid <= 0
+                                || !extendIdentity.equals(apk) || data.dataAvail() != 0)
+                            throw new IllegalArgumentException("invalid viewing helper registration");
+                        CameraViewingShellProtocol.Identity identity = CameraViewingShellProtocol.readIdentity(helper);
+                        if (identity == null || !identity.matches(pid, extendIdentity))
+                            throw new SecurityException("viewing helper APK/PID identity mismatch");
+                        registerViewingHelper(helper, pid);
+                        reply.writeNoException();
+                        reply.writeInt(1);
+                        return true;
+                    }
+                    case MotionDetectorProtocol.TX_VIEW_OBSERVE_CHARGE: {
+                        IBinder callback = data.readStrongBinder();
+                        if (callback == null || !callback.isBinderAlive() || data.dataAvail() != 0)
+                            throw new IllegalArgumentException("invalid viewing charge observer");
+                        callControl(() -> { addViewingChargeObserver(callback); return null; });
+                        reply.writeNoException();
+                        reply.writeInt(1);
+                        sendViewingChargeState(callback, cameraChargeState);
+                        return true;
+                    }
+                    case MotionDetectorProtocol.TX_VIEW_DETACH_CHARGE: {
+                        IBinder callback = data.readStrongBinder();
+                        if (callback == null || data.dataAvail() != 0)
+                            throw new IllegalArgumentException("invalid viewing charge observer detach");
+                        callControl(() -> { removeViewingChargeObserver(callback); return null; });
+                        reply.writeNoException();
+                        reply.writeInt(1);
                         return true;
                     }
                     case MotionDetectorProtocol.TX_VIEW_PREPARE: {
@@ -644,6 +702,90 @@ public final class MotionDetectorShellMain {
         return power != 0 || cameraPreparation.ready(sessionId);
     }
 
+    private static boolean isViewingHelperOperation(int code) {
+        return code == MotionDetectorProtocol.TX_READ_CHARGE
+                || code == MotionDetectorProtocol.TX_VIEW_PREPARE
+                || code == MotionDetectorProtocol.TX_VIEW_RELEASE
+                || code == MotionDetectorProtocol.TX_VIEW_OBSERVE_CHARGE
+                || code == MotionDetectorProtocol.TX_VIEW_DETACH_CHARGE;
+    }
+
+    private boolean isRegisteredViewingCaller(int uid, int pid) {
+        IBinder helper = viewingHelper;
+        return uid == 2000 && pid > 0 && pid == viewingHelperPid
+                && helper != null && helper.isBinderAlive();
+    }
+
+    private void registerViewingHelper(IBinder helper, int pid) throws Exception {
+        callControl(() -> {
+            synchronized (binder) {
+                if (viewingHelper == helper && viewingHelperPid == pid) return null;
+                if (viewingHelper != null && viewingHelper.isBinderAlive())
+                    throw new SecurityException("another viewing helper is already registered");
+                clearViewingHelperLocked();
+                IBinder.DeathRecipient death = () -> control.post(() -> viewingHelperDied(helper));
+                helper.linkToDeath(death, 0);
+                viewingHelper = helper;
+                viewingHelperPid = pid;
+                registeredViewingHelperDeath = death;
+                return null;
+            }
+        });
+    }
+
+    private void viewingHelperDied(IBinder expected) {
+        synchronized (binder) {
+            if (viewingHelper != expected) return;
+            clearViewingHelperLocked();
+        }
+    }
+
+    private void clearViewingHelperLocked() {
+        IBinder old = viewingHelper;
+        IBinder.DeathRecipient death = registeredViewingHelperDeath;
+        viewingHelper = null;
+        viewingHelperPid = 0;
+        registeredViewingHelperDeath = null;
+        if (old != null && death != null) {
+            try { old.unlinkToDeath(death, 0); } catch (Throwable ignored) { }
+        }
+        ArrayList<IBinder> callbacks = new ArrayList<>(viewingChargeObservers.keySet());
+        for (IBinder callback : callbacks) removeViewingChargeObserver(callback);
+    }
+
+    private void addViewingChargeObserver(IBinder callback) throws RemoteException {
+        ChargeObserver previous = viewingChargeObservers.get(callback);
+        if (previous != null) return;
+        ChargeObserver observer = new ChargeObserver(callback);
+        callback.linkToDeath(observer.death, 0);
+        viewingChargeObservers.put(callback, observer);
+    }
+
+    private void removeViewingChargeObserver(IBinder callback) {
+        ChargeObserver observer = viewingChargeObservers.remove(callback);
+        if (observer != null) {
+            try { callback.unlinkToDeath(observer.death, 0); } catch (Throwable ignored) { }
+        }
+    }
+
+    private void sendViewingChargeState(IBinder callback, CameraChargePolicy.State state) {
+        if (callback == null || state == null || !callback.isBinderAlive()) return;
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(MotionDetectorProtocol.VIEW_CHARGE_CALLBACK_DESCRIPTOR);
+            MotionDetectorProtocol.writeChargeState(data, state);
+            if (!callback.transact(MotionDetectorProtocol.CB_VIEW_CHARGE, data, null, IBinder.FLAG_ONEWAY))
+                control.post(() -> removeViewingChargeObserver(callback));
+        } catch (RemoteException unavailable) {
+            control.post(() -> removeViewingChargeObserver(callback));
+        } finally { data.recycle(); }
+    }
+
+    private void sendViewingChargeState(CameraChargePolicy.State state) {
+        for (ChargeObserver observer : new ArrayList<>(viewingChargeObservers.values()))
+            sendViewingChargeState(observer.callback, state);
+    }
+
     private int releaseRemoteViewOnControl(String id, IBinder owner) {
         RemoteViewLease lease = remoteViewLeases.get(owner);
         if (lease != null && lease.id.equals(id)) {
@@ -672,6 +814,7 @@ public final class MotionDetectorShellMain {
         if (next == null) return;
         CameraChargePolicy.State previous = cameraChargeState;
         cameraChargeState = next;
+        sendViewingChargeState(next);
         String id = sessionId;
         if (id != null) sendChargeState(id, next);
         if (!chargeHandlingEnabled || !next.isMonitoring() || !sameSession(id)

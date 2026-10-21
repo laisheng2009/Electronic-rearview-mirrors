@@ -1,484 +1,249 @@
 package com.byd.extend.remote
 
 import android.content.Context
-import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.byd.extend.CameraChargePolicy
 import com.byd.extend.CameraChargeSettings
-import com.byd.extend.CameraChargeTelemetry
+import com.byd.extend.CameraViewingShellClient
 import com.byd.extend.MotionRuntime
 import com.byd.extend.R
-import com.byd.extend.RemoteCameraSource
 import com.byd.extend.remote.security.KeystoreSecretStore
-import com.byd.extend.remote.tunnel.CameraTunnelProvider
-import com.byd.extend.remote.tunnel.CameraTunnelResult
-import java.security.SecureRandom
-import java.net.URI
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
+import org.json.JSONObject
+import java.security.SecureRandom
+import java.util.Base64
+import java.util.concurrent.Executors
 
-data class CameraViewingConfig(
-    val enabled: Boolean = false,
-    val transport: String = "vdo",
-    val tailscalePublic: Boolean = false,
-    val streamId: String = "",
-)
+data class CameraViewingConfig(val enabled: Boolean = false, val transport: String = "vdo",
+    val tailscalePublic: Boolean = false, val streamId: String = "")
+data class CameraViewingState(val config: CameraViewingConfig, val phase: String = "idle",
+    val viewerUrl: String? = null, val authorizationUrl: String? = null, val error: String? = null,
+    val passwordConfigured: Boolean = false, val tokenConfigured: Boolean = false,
+    val authorizationRequest: Long = 0, val authorized: Boolean = false,
+    val revocationPending: Boolean = false, val identity: String? = null,
+    val busy: Boolean = false, val fieldError: String? = null)
 
-data class CameraViewingState(
-    val config: CameraViewingConfig,
-    val phase: String = "idle",
-    val viewerUrl: String? = null,
-    val authorizationUrl: String? = null,
-    val error: String? = null,
-    val passwordConfigured: Boolean = false,
-    val tokenConfigured: Boolean = false,
-    val authorizationRequest: Long = 0,
-)
-
-/** Owns only the viewer; no network caller can reach an ADB or arbitrary OEM command. */
+/** UI/draft facade; providers and camera lifetimes belong to the independent shell process. */
 class CameraViewingController private constructor(private val context: Context) {
     private val preferences = context.getSharedPreferences("camera_viewing", Context.MODE_PRIVATE)
-    private val executor = Executors.newSingleThreadScheduledExecutor { task ->
-        Thread(task, "camera-view-owner")
-    }
     private val secrets by lazy { KeystoreSecretStore(context) }
+    private val owner = Executors.newSingleThreadExecutor { Thread(it, "viewing-app-client") }
     private val main = Handler(Looper.getMainLooper())
     private val mutable = MutableStateFlow(CameraViewingState(readConfig()))
     val state: StateFlow<CameraViewingState> = mutable.asStateFlow()
-    private var generation = 0L
-    private var provider: CameraTunnelProvider? = null
-    private var publisher: VdoCameraPublisher? = null
-    private var server: CameraViewerServer? = null
-    private var source: RemoteCameraSource? = null
-    @Volatile private var encoder: CameraHlsEncoder? = null
-    private var viewerPresent = false
-    private var preparationDeadline = 0L
-    private var preparationPending = false
-    private var videoActive = false
-    private var observation: CameraChargeTelemetry.Observation? = null
-    private var interactiveAuthorization = false
-    private var authorizationRequest = 0L
+    private var client: CameraViewingShellClient? = null
+    private val snapshots = linkedMapOf<String, JSONObject>()
+    init { execute { refresh() } }
 
-    init { execute { refreshConfiguration() } }
-
-    private fun readConfig(): CameraViewingConfig {
-        val transport = preferences.getString("transport", "vdo")
-            ?.takeIf { it in setOf("vdo", "tailscale", "zrok") } ?: "vdo"
-        return CameraViewingConfig(CameraChargeSettings.isRemoteViewingEnabled(context), transport,
-            preferences.getBoolean("tailscale_public", false),
-            preferences.getString("${transport}_name", "") ?: "")
+    private fun selected() = preferences.getString("transport", "vdo")?.takeIf { it in METHODS } ?: "vdo"
+    private fun draftName(method: String) = preferences.getString("draft_${method}_name",
+        preferences.getString("${method}_name", "")) ?: ""
+    private fun publicMode() = preferences.getBoolean("draft_tailscale_public", preferences.getBoolean("tailscale_public", false))
+    private fun readConfig() = selected().let { CameraViewingConfig(
+        CameraChargeSettings.isRemoteViewingEnabled(context), it, publicMode(), draftName(it)) }
+    private fun secret(method: String, field: String): String {
+        val bytes = secrets.get("draft.camera.$method.$field") ?: secrets.get("camera.$method.$field") ?: return ""
+        return try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0) }
     }
+    fun getPassword() = secret(selected(), "password")
+    fun getToken() = secret(selected(), "token")
+    private fun shadow(method: String, field: String) = preferences.getBoolean("${method}_$field", false)
+    private fun locked(method: String) = snapshots[method]?.let {
+        it.optBoolean("authorized") || it.optBoolean("revocationPending")
+    } ?: (shadow(method, "authorized") || shadow(method, "revocationPending"))
 
-    private fun refreshConfiguration() {
+    private fun refresh() {
         val config = readConfig()
-        mutable.value = mutable.value.copy(config = config,
-            passwordConfigured = readSecret(config.transport, "password").isNotEmpty(),
-            tokenConfigured = readSecret(config.transport, "token").isNotEmpty())
+        val method = config.transport
+        val current = snapshots[method]
+        val authorized = current?.optBoolean("authorized") ?: shadow(method, "authorized")
+        val pending = current?.optBoolean("revocationPending") ?: shadow(method, "revocationPending")
+        val phase = current?.optString("phase", "idle") ?: "idle"
+        mutable.value = CameraViewingState(
+            config = if ((authorized || pending) && current != null) config.copy(
+                streamId = current.optString("name"), tailscalePublic = current.optBoolean("public")) else config,
+            phase = phase, viewerUrl = current?.nullable("viewerUrl"),
+            authorizationUrl = current?.nullable("authorizationUrl"),
+            error = current?.nullable("error")?.let { context.getString(errorResource(it)) },
+            passwordConfigured = secret(method, "password").isNotEmpty(),
+            tokenConfigured = secret(method, "token").isNotEmpty(),
+            authorizationRequest = current?.optLong("authorizationRequest") ?: 0,
+            authorized = authorized, revocationPending = pending,
+            identity = current?.nullable("identity") ?: if (authorized || pending)
+                preferences.getString("${method}_identity", null) else null,
+            busy = phase in setOf("authorizing", "connecting", "revoking"))
     }
 
-    fun getPassword(): String = readSecret(state.value.config.transport, "password")
-    fun getToken(): String = readSecret(state.value.config.transport, "token")
-
-    private fun readSecret(transport: String, field: String): String {
-        val bytes = secrets.get("camera.$transport.$field") ?: return ""
-        return try { bytes.toString(Charsets.UTF_8) } finally { bytes.fill(0) }
-    }
-
-    /** Save and act as one owner operation; failed validation/storage never falls through to login. */
-    fun update(
-        edits: CameraViewingEdits,
-        enabled: Boolean? = null,
-        transport: String? = null,
-        tailscalePublic: Boolean? = null,
-        authorize: Boolean = false,
-        regenerate: Boolean = false,
-        onSaved: () -> Unit = {},
-    ) = execute("save_configuration") {
-        // A departing field may deliver a focus-loss save after its provider has switched.
-        if (edits.transport != state.value.config.transport) return@execute
-        if (enabled == false) {
-            // Turning access off must still work when an unfinished field is invalid.
-            MotionRuntime.setRemoteViewingEnabled(context, false)
-            mutable.value = state.value.copy(config = readConfig())
-            stopListening()
-        }
-        val name = if (regenerate) null else validatedName(edits)
-        validatePassword(edits)
-        try { edits.validateToken() }
-        catch (failure: IllegalArgumentException) { throw ViewingFailure(R.string.cameras_error_token_length) }
-        require(transport == null || transport in setOf("vdo", "tailscale", "zrok"))
-        val config = state.value.config
-        val changedSecrets = listOf("password" to edits.password, "token" to edits.token)
-            .filter { (field, value) -> value != null && value != readSecret(edits.transport, field) }
-        val changed = changedSecrets.isNotEmpty() || (name != null && name != config.streamId) ||
-            (enabled != null && enabled != config.enabled) ||
-            (transport != null && transport != config.transport) ||
-            (tailscalePublic != null && tailscalePublic != config.tailscalePublic) || regenerate
-        if (changed) {
-            stopListening()
-            for ((field, value) in changedSecrets) {
-                val key = "camera.${edits.transport}.$field"
-                if (value!!.isEmpty()) secrets.remove(key)
-                else value.toByteArray(Charsets.UTF_8).let { bytes ->
-                    try { secrets.put(key, bytes) } finally { bytes.fill(0) }
-                }
+    /** Focus loss, keyboard dismissal and provider selection commit drafts only. */
+    fun update(edits: CameraViewingEdits, enabled: Boolean? = null, transport: String? = null,
+               tailscalePublic: Boolean? = null, authorize: Boolean = false, regenerate: Boolean = false,
+               onSaved: () -> Unit = {}) = execute {
+        require(edits.transport in METHODS && (transport == null || transport in METHODS))
+        val method = edits.transport
+        val wasLocked = locked(method)
+        val editor = preferences.edit()
+        if (!wasLocked) {
+            edits.streamId?.let { editor.putString("draft_${method}_name", it) }
+            if (regenerate) editor.putString("draft_${method}_name", CameraViewingEdits.newName(method))
+            tailscalePublic?.let { editor.putBoolean("draft_tailscale_public", it) }
+            for ((field, value) in listOf("password" to edits.password, "token" to edits.token)) if (value != null) {
+                val bytes = value.toByteArray()
+                try { secrets.put("draft.camera.$method.$field", bytes) } finally { bytes.fill(0) }
             }
-            val editor = preferences.edit()
-            if (name != null) editor.putString("${edits.transport}_name", name)
-            if (regenerate) {
-                check(edits.transport == "vdo")
-                editor.putString("vdo_name", CameraViewingEdits.newName("vdo"))
-            }
-            if (transport != null) editor.putString("transport", transport)
-            if (tailscalePublic != null) editor.putBoolean("tailscale_public", tailscalePublic)
-            check(editor.commit())
-            if (enabled != null) MotionRuntime.setRemoteViewingEnabled(context, enabled)
-            refreshConfiguration()
         }
+        transport?.let { editor.putString("transport", it) }
+        check(editor.commit())
+        if (enabled != null) MotionRuntime.setRemoteViewingEnabled(context, enabled)
+        refresh()
         main.post(onSaved)
-        if (authorize) connectOnOwner(interactive = true)
-        else if (changed && state.value.config.enabled && canStart()) connectOnOwner()
-    }
-
-    /** Called by the existing foreground runtime, never by a socket or a web command. */
-    fun runtimeStarted() = execute {
-        if (observation == null) observation = CameraChargeTelemetry.get(context).observe { charge ->
-            execute { chargeChanged(charge) }
-        }
-        refreshConfiguration()
-        if (state.value.config.enabled && provider == null && server == null && publisher == null && canStart()) connectOnOwner()
-    }
-
-    fun runtimeStopped() = execute {
-        observation?.close(); observation = null
-        stopListening()
-    }
-
-    fun workerReconfigured() = execute {
-        if (!viewerPresent) return@execute
-        closeVideo()
-        preparationDeadline = SystemClock.elapsedRealtime() + 30_000L
-        prepareVideo(generation)
-    }
-
-    private fun publicAccess(): Boolean = state.value.config.let {
-        it.transport != "tailscale" || it.tailscalePublic
-    }
-
-    private fun canStart(): Boolean = (!publicAccess() || getPassword().isNotBlank()) &&
-        (state.value.config.transport != "zrok" || getToken().isNotBlank())
-
-    private fun requirePassword() {
-        if (publicAccess()) {
-            val password = getPassword()
-            if (password.isBlank()) throw ViewingFailure(R.string.cameras_error_password_required)
-            validatePassword(CameraViewingEdits(state.value.config.transport, password = password))
-        }
-    }
-
-    private fun validatedName(edits: CameraViewingEdits): String? = try { edits.validatedName() }
-        catch (failure: IllegalArgumentException) {
-            throw ViewingFailure(if (edits.transport == "vdo") R.string.cameras_vdo_id_hint
-                else R.string.cameras_error_name)
-        }
-
-    private fun validatePassword(edits: CameraViewingEdits) {
-        try { edits.validatePassword() }
-        catch (failure: IllegalArgumentException) {
-            throw ViewingFailure(if (edits.transport == "vdo") R.string.cameras_vdo_password_hint
-                else R.string.cameras_error_password_length)
-        }
-    }
-
-    private fun ensureName(): String {
-        if (state.value.config.streamId.isNotEmpty()) return state.value.config.streamId
-        val name = CameraViewingEdits.newName(state.value.config.transport)
-        check(preferences.edit().putString("${state.value.config.transport}_name", name).commit())
-        refreshConfiguration()
-        return name
-    }
-
-    private fun connectOnOwner(interactive: Boolean = false) {
-        if (!state.value.config.enabled) return
-        requirePassword()
-        stopListening()
-        interactiveAuthorization = interactive
-        val config = state.value.config
-        if (config.transport == "vdo") {
-            startOnOwner()
-            return
-        }
-        val token = getToken().ifBlank { null }
-        val name = ensureName()
-        validatedName(CameraViewingEdits(config.transport, name))
-        val active = CameraTunnelProvider(context, config.transport, name)
-        provider = active
-        val epoch = generation
-        mutable.value = state.value.copy(phase = "authorizing", error = null)
-        active.authorize(token) { result -> execute("authorize_result") {
-            if (epoch != generation || provider !== active) return@execute
-            acceptProviderResult(result)
-            if (result.state == "login_required") awaitAuthorization(active, epoch)
-            else if (result.state == "authorized") startOnOwner(reuseAuthorization = true)
-        } }
-    }
-
-    private fun awaitAuthorization(active: CameraTunnelProvider, epoch: Long) {
-        executor.schedule({ execute {
-            if (epoch != generation || provider !== active || state.value.phase != "authorizing") return@execute
-            active.status { result -> execute("authorization_status") {
-                if (epoch != generation || provider !== active) return@execute
-                acceptProviderResult(result)
-                if (result.state == "login_required") awaitAuthorization(active, epoch)
-                else if (result.state == "authorized") startOnOwner(reuseAuthorization = true)
-            } }
-        } }, 2, TimeUnit.SECONDS)
-    }
-
-    private fun startOnOwner(reuseAuthorization: Boolean = false) {
-        if (!state.value.config.enabled) return
-        requirePassword()
-        if (!reuseAuthorization) stopListening()
-        val config = state.value.config
-        val name = ensureName()
-        validatedName(CameraViewingEdits(config.transport, name))
-        val password = getPassword()
-        val epoch = generation
-        mutable.value = state.value.copy(phase = "connecting", error = null, authorizationUrl = null)
-        MotionRuntime.settingsChanged(context)
-        if (config.transport == "vdo") {
-            publisher = VdoCameraPublisher(context, name, password, object : VdoCameraPublisher.Listener {
-                override fun onReady(viewerUrl: String) = execute {
-                    if (epoch == generation) mutable.value = state.value.copy(
-                        viewerUrl = viewerUrl, phase = "ready", error = null)
+        if (enabled == true) accept(ensureClient().request("configure", JSONObject().put("enabled", true)))
+        else if (enabled == false && preferences.getBoolean("helper_provisioned", false))
+            accept(ensureClient(false).request("configure", JSONObject().put("enabled", false)))
+        if (authorize) {
+            val payload = profilePayload(method)
+            if (!wasLocked) {
+                val authorizationEdits = CameraViewingEdits(method, payload.getString("name"),
+                    payload.getString("password"), payload.getString("token"))
+                val validation = authorizationEdits.authorizationError(payload.getBoolean("public"))
+                if (validation != null) {
+                    mutable.value = state.value.copy(fieldError = context.getString(validation))
+                    return@execute
                 }
-                override fun onViewerConnected() = execute { if (epoch == generation) viewerConnected(epoch) }
-                override fun onViewerDisconnected() = execute { if (epoch == generation) viewerDisconnected() }
-                override fun onError(encoderUnavailable: Boolean) = execute {
-                    if (epoch == generation) throw ViewingFailure(if (encoderUnavailable)
-                        R.string.cameras_error_encoder_unavailable else R.string.cameras_error_connection)
-                }
-            }).also { it.start() }
-            return
-        }
-        val privateProof = if (publicAccess()) null else randomProof()
-        server?.close()
-        val http = CameraViewerServer(password, privateProof, object : CameraViewerServer.Stream {
-            override fun connected() = execute { if (epoch == generation) viewerConnected(epoch) }
-            override fun disconnected() = execute { if (epoch == generation) viewerDisconnected() }
-            override fun status(): String = state.value.phase
-            override fun unavailableChargeMask(): Int = CameraChargeTelemetry.get(context).snapshot().let {
-                (if (it.isSocUnavailable) 1 else 0) or (if (it.isVoltageUnavailable) 2 else 0)
+                val name = checkNotNull(authorizationEdits.validatedName())
+                payload.put("name", name)
+                check(preferences.edit().putString("draft_${method}_name", name).commit())
+                refresh()
             }
-            override fun video(): FragmentedVideoWindow? = encoder?.window
-            override fun resource(name: String): ByteArray = context.assets.open("camera-view/$name").use { it.readBytes() }
-        })
-        server = http
-        val active = provider ?: CameraTunnelProvider(context, config.transport, name).also { provider = it }
-        active.start(http.port(), config.tailscalePublic || config.transport == "zrok", privateProof) { result -> execute("start_result") {
-            if (epoch != generation || provider !== active) return@execute
-            acceptProviderResult(result)
-            if (result.state == "login_required") awaitAuthorization(active, epoch)
-        } }
+            accept(ensureClient().request(if (wasLocked) "reconnect" else "authorize",
+                JSONObject().put("transport", method).put("profile", payload)))
+        }
     }
 
-    private fun acceptProviderResult(result: CameraTunnelResult) {
-        if (result.errorCode != null) {
-            // Native codes are bounded identifiers; never journal provider details, URLs or secrets.
-            val code = result.errorCode.takeIf { it.matches(Regex("[a-z_]{1,64}")) } ?: "unknown"
-            Log.w("CameraViewing", "provider=${state.value.config.transport} error=$code")
-            throw ViewingFailure(when (code) {
-                "invalid_name" -> if (state.value.config.transport == "vdo") R.string.cameras_vdo_id_hint
-                    else R.string.cameras_error_name
-                "credential_required" -> R.string.cameras_error_token_required
-                "not_authorized", "login_required" -> R.string.cameras_error_authorization_required
-                "secure_store_error" -> R.string.cameras_error_secret
-                "native_unavailable", "runtime_error", "invalid_provider" -> R.string.cameras_error_tunnel_runtime
-                "invalid_port", "private_credential_missing", "invalid_request" -> R.string.cameras_error_local_viewer
-                "tailscale_https_failed" -> R.string.cameras_error_tailscale_https
-                "tailscale_funnel_failed" -> R.string.cameras_error_tailscale_funnel
-                "zrok_enable_failed" -> R.string.cameras_error_zrok_enable
-                "zrok_share_failed" -> R.string.cameras_error_zrok_share
-                else -> R.string.cameras_error_connection
-            })
+    private fun profilePayload(method: String) = JSONObject().put("name", draftName(method))
+        .put("password", secret(method, "password")).put("token", secret(method, "token"))
+        .put("public", method == "tailscale" && publicMode())
+
+    private fun ensureClient(restoreEnabled: Boolean = CameraChargeSettings.isRemoteViewingEnabled(context)): CameraViewingShellClient {
+        client?.let { if (it.isConnected) return it else { it.close(); client = null } }
+        val connected = CameraViewingShellClient(context)
+        val observer = object : CameraViewingShellClient.Listener {
+            override fun onSnapshot(snapshot: JSONObject) = execute { if (client === connected) accept(snapshot) }
+            override fun onHelperDied() = execute {
+                if (client === connected) {
+                    client = null
+                    snapshots.values.forEach { it.put("phase", "error").put("error", "helper_unavailable")
+                        .put("viewerUrl", JSONObject.NULL).put("authorizationUrl", JSONObject.NULL) }
+                    refresh()
+                }
+            }
         }
-        for (address in listOfNotNull(result.address, result.loginUrl)) {
-            val uri = URI(address)
-            if (uri.scheme != "https" || uri.host.isNullOrBlank() || uri.userInfo != null)
-                throw ViewingFailure(R.string.cameras_error_connection)
+        try {
+            connected.ensureConnected()
+            connected.setListener(observer)
+            val profiles = JSONArray()
+            for (method in METHODS) {
+                val keyName = "viewing.$method.data_key"
+                val key = secrets.get(keyName) ?: ByteArray(32).also { SecureRandom().nextBytes(it); secrets.put(keyName, it) }
+                val migration = secrets.snapshot("tunnel.$method.")
+                try {
+                    val entries = JSONObject()
+                    migration.forEach { (name, bytes) -> entries.put(name, Base64.getEncoder().encodeToString(bytes)) }
+                    profiles.put(JSONObject().put("transport", method).put("key", Base64.getEncoder().encodeToString(key))
+                        .put("migration", entries).put("initial", profilePayload(method)))
+                } finally { key.fill(0); migration.values.forEach { it.fill(0) } }
+            }
+            client = connected
+            accept(connected.request("provision", JSONObject().put("profiles", profiles)
+                .put("enabled", restoreEnabled)))
+            check(preferences.edit().putBoolean("helper_provisioned", true).commit())
+            return connected
+        } catch (failure: Exception) {
+            if (client === connected) client = null
+            connected.close()
+            throw failure
         }
-        val openLogin = interactiveAuthorization && !result.loginUrl.isNullOrBlank()
-        if (openLogin) interactiveAuthorization = false
-        mutable.value = state.value.copy(
-            phase = when (result.state) {
-                "serving" -> "ready"
-                "authorized" -> "connecting"
-                "login_required" -> "authorizing"
-                else -> "idle"
-            },
-            viewerUrl = result.address.takeIf { result.state == "serving" },
-            authorizationUrl = result.loginUrl,
-            authorizationRequest = if (openLogin) ++authorizationRequest else state.value.authorizationRequest,
-            error = null)
     }
 
+    private fun accept(snapshot: JSONObject) {
+        val profiles = snapshot.optJSONArray("profiles") ?: return
+        val editor = preferences.edit()
+        for (i in 0 until profiles.length()) {
+            val item = profiles.getJSONObject(i)
+            val method = item.getString("transport")
+            require(method in METHODS)
+            val authorized = item.optBoolean("authorized")
+            val pending = item.optBoolean("revocationPending")
+            if (item.optLong("revocationEpoch") > preferences.getLong("${method}_revocationEpoch", 0)) {
+                secrets.removePrefix("draft.camera.$method."); secrets.removePrefix("camera.$method.")
+                secrets.removePrefix("tunnel.$method.")
+                editor.putString("draft_${method}_name", item.optString("name"))
+                    .putLong("${method}_revocationEpoch", item.optLong("revocationEpoch"))
+            }
+            snapshots[method] = JSONObject(item.toString())
+            editor.putBoolean("${method}_authorized", authorized).putBoolean("${method}_revocationPending", pending)
+                .putString("${method}_identity", item.nullable("identity"))
+        }
+        check(editor.commit())
+        refresh()
+    }
+
+    fun runtimeStarted() = execute { if (CameraChargeSettings.isRemoteViewingEnabled(context)) ensureClient() }
+    fun runtimeStopped() = execute { client?.close(); client = null }
+    fun explicitShutdown() = explicitShutdown(Runnable {})
+    fun explicitShutdown(onComplete: Runnable) = execute {
+        try { (client ?: if (preferences.getBoolean("helper_provisioned", false)) ensureClient(false) else null)
+            ?.request("shutdown", JSONObject()) }
+        finally { client?.close(); client = null; main.post(onComplete) }
+    }
+    fun workerReconfigured() = execute { client?.let {
+        it.ensureConnected()
+        accept(it.request("reconfigured", JSONObject()))
+    } }
     fun authorizationOpened(request: Long) = execute {
-        if (request == state.value.authorizationRequest)
-            mutable.value = state.value.copy(authorizationRequest = 0)
+        client?.let { accept(it.request("authorization_opened", JSONObject().put("transport", selected()).put("request", request))) }
     }
+    fun revoke() = execute { accept(ensureClient().request("revoke", JSONObject().put("transport", selected()))) }
 
-    private fun viewerConnected(epoch: Long) {
-        if (viewerPresent) return
-        viewerPresent = true
-        preparationDeadline = SystemClock.elapsedRealtime() + 30_000L
-        prepareVideo(epoch)
-    }
-
-    private fun prepareVideo(epoch: Long) {
-        if (epoch != generation || !viewerPresent || videoActive || !state.value.config.enabled) return
-        preparationPending = false
-        val charge = try { if (source == null) CameraChargeTelemetry.checkBeforeViewing(context)
-            else CameraChargeTelemetry.get(context).snapshot() }
-        catch (unavailable: Exception) { retryPreparation(epoch); return }
-        if (charge.isBlocked) {
-            closeVideo()
-            mutable.value = state.value.copy(phase = "low_battery", error = null)
-            return
-        }
-        mutable.value = state.value.copy(phase = "preparing", error = null)
-        val camera = source ?: RemoteCameraSource(context) { _ -> execute {
-            if (epoch == generation) throw ViewingFailure(R.string.cameras_error_camera_unavailable)
-        } }.also { source = it }
-        val ready = try { camera.prepare() } catch (notReady: Exception) { false }
-        if (!ready) { retryPreparation(epoch); return }
-        val surface = try {
-            publisher?.startVideo() ?: CameraHlsEncoder { _ -> execute {
-                if (epoch == generation) throw ViewingFailure(R.string.cameras_error_encoder_unavailable)
-            } }.also { encoder = it }.start()
-        } catch (failure: Exception) { throw ViewingFailure(R.string.cameras_error_encoder_unavailable) }
-        try { camera.attach(surface, CameraHlsEncoder.WIDTH, CameraHlsEncoder.HEIGHT) }
-        catch (failure: Exception) { throw ViewingFailure(R.string.cameras_error_camera_unavailable) }
-        videoActive = true
-        mutable.value = state.value.copy(phase = "connected", error = null)
-    }
-
-    private fun retryPreparation(epoch: Long) {
-        if (SystemClock.elapsedRealtime() >= preparationDeadline)
-            throw ViewingFailure(R.string.cameras_error_camera_unavailable)
-        if (!preparationPending) {
-            preparationPending = true
-            executor.schedule({ execute { if (epoch == generation) prepareVideo(epoch) } }, 500, TimeUnit.MILLISECONDS)
-        }
-    }
-
-    private fun chargeChanged(charge: CameraChargePolicy.State) {
-        if (!viewerPresent) return
-        if (charge.isBlocked) {
-            closeVideo()
-            mutable.value = state.value.copy(phase = "low_battery", error = null)
-        } else if (state.value.phase == "low_battery") {
-            preparationDeadline = SystemClock.elapsedRealtime() + 30_000L
-            prepareVideo(generation)
-        }
-    }
-
-    private fun viewerDisconnected() {
-        viewerPresent = false
-        closeVideo()
-        mutable.value = state.value.copy(phase = if (server != null || publisher != null) "ready" else "idle")
-    }
-
-    private fun closeVideo() {
-        preparationPending = false
-        val current = source
-        try {
-            current?.close()
-            source = null
-        } finally {
-            // A failed preparation-lease release must not retain an already detached encoder.
-            if (current == null || current.isVideoDetached) {
-                publisher?.stopVideo()
-                encoder?.close()
-                encoder = null
-                videoActive = false
-            }
-        }
-    }
-
-    private fun stopListening(reportTunnelFailure: Boolean = true) {
-        generation++
-        interactiveAuthorization = false
-        val epoch = generation
-        viewerPresent = false
-        server?.close(); server = null
-        val closingProvider = provider
-        provider = null
-        closingProvider?.close { result ->
-            if (reportTunnelFailure && result.errorCode != null) execute {
-                if (epoch == generation) throw ViewingFailure(R.string.cameras_error_connection)
-            }
-        }
-        try {
-            closeVideo()
-        } finally {
-            if (source == null || source?.isVideoDetached == true) {
-                publisher?.close(); publisher = null
-            }
-            mutable.value = state.value.copy(phase = "idle", viewerUrl = null, authorizationUrl = null,
-                authorizationRequest = 0, error = null)
-        }
-    }
-
-    fun revoke() = execute {
-        val config = state.value.config
-        val name = ensureName()
-        // Revocation must continue even when a detached shell lease needs a later cleanup retry.
-        val cleanupFailure = try { stopListening(reportTunnelFailure = false); null }
-            catch (failure: Exception) { failure }
-        val old = if (config.transport != "vdo") CameraTunnelProvider(context, config.transport, name) else null
-        MotionRuntime.setRemoteViewingEnabled(context, false)
-        secrets.removePrefix("camera.${config.transport}.")
-        check(preferences.edit().remove("${config.transport}_name").commit())
-        refreshConfiguration()
-        val epoch = generation
-        old?.revoke { result -> execute {
-            old.close()
-            if (epoch == generation) {
-                if (result.errorCode != null) throw ViewingFailure(R.string.cameras_error_connection)
-                if (cleanupFailure != null) throw cleanupFailure
-            }
-        } }
-        if (old == null && cleanupFailure != null) throw cleanupFailure
-    }
-
-    private fun execute(stage: String = "runtime", action: () -> Unit) {
-        executor.execute {
+    private fun execute(action: () -> Unit) {
+        owner.execute {
             try { action() }
             catch (failure: Exception) {
-                Log.w("CameraViewing", "$stage failed provider=${state.value.config.transport}" +
-                    " type=${failure.javaClass.simpleName} cause=${failure.cause?.javaClass?.simpleName ?: "none"}")
-                runCatching { stopListening() }
-                val message = (failure as? ViewingFailure)?.messageResource
-                    ?: if (failure is SecurityException) R.string.cameras_error_secret
-                    else R.string.cameras_error_connection
-                mutable.value = state.value.copy(phase = "error", error = context.getString(message))
+                Log.w("CameraViewing", "app_operation failed type=${failure.javaClass.simpleName}")
+                mutable.value = state.value.copy(busy = false, error = context.getString(
+                    if (failure is SecurityException) R.string.cameras_error_secret else R.string.cameras_error_connection))
             }
         }
     }
-
-    private class ViewingFailure(val messageResource: Int) : Exception()
-
     companion object {
+        private val METHODS = listOf("vdo", "tailscale", "zrok")
         @Volatile private var instance: CameraViewingController? = null
         @JvmStatic fun get(context: Context): CameraViewingController = instance ?: synchronized(this) {
             instance ?: CameraViewingController(context.applicationContext).also { instance = it }
         }
-        private fun randomProof(): String = ByteArray(32).also(SecureRandom()::nextBytes)
-            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        @JvmStatic fun hasAuthorizedProfiles(context: Context): Boolean {
+            val p = context.getSharedPreferences("camera_viewing", Context.MODE_PRIVATE)
+            return METHODS.any { p.getBoolean("${it}_authorized", false) || p.getBoolean("${it}_revocationPending", false) }
+        }
+        private fun JSONObject.nullable(name: String): String? = if (isNull(name)) null else optString(name).takeIf { it.isNotEmpty() }
+        private fun errorResource(code: String) = when (code) {
+            "invalid_name" -> R.string.cameras_error_name
+            "credential_required" -> R.string.cameras_error_token_required
+            "password_required" -> R.string.cameras_error_password_required
+            "not_authorized", "login_required", "revoke_required" -> R.string.cameras_error_authorization_required
+            "secure_store_error" -> R.string.cameras_error_secret
+            "native_unavailable", "runtime_error", "invalid_provider" -> R.string.cameras_error_tunnel_runtime
+            "invalid_port", "private_credential_missing", "invalid_request" -> R.string.cameras_error_local_viewer
+            "tailscale_https_failed" -> R.string.cameras_error_tailscale_https
+            "tailscale_funnel_failed" -> R.string.cameras_error_tailscale_funnel
+            "zrok_enable_failed" -> R.string.cameras_error_zrok_enable
+            "zrok_share_failed" -> R.string.cameras_error_zrok_share
+            "camera_unavailable" -> R.string.cameras_error_camera_unavailable
+            "encoder_unavailable" -> R.string.cameras_error_encoder_unavailable
+            else -> R.string.cameras_error_connection
+        }
     }
 }

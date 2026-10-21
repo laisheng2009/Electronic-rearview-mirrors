@@ -102,6 +102,22 @@ try {
     ) -join $newline
     $patched = $source.Substring(0, $start) + $replacement + $source.Substring($end)
     $patched = [regex]::Replace($patched, "(?m)^\s*`"tailscale.com/(?:logpolicy|util/clientmetric|util/testenv)`"\r?\n", "")
+    $networkAnchor = "// LocalClient returns a LocalClient that speaks to s."
+    $networkInsert = $patched.IndexOf($networkAnchor, [StringComparison]::Ordinal)
+    if ($networkInsert -lt 0 -or $patched.Contains("func (s *Server) NetworkChanged()")) {
+        throw "Pinned tsnet network-monitor patch markers changed; refusing to build."
+    }
+    $networkMethod = @(
+        "// NetworkChanged asks the platform monitor to rescan network interfaces.",
+        "func (s *Server) NetworkChanged() {",
+        "`tif s.netMon != nil {",
+        "`t`ts.netMon.InjectEvent()",
+        "`t}",
+        "}",
+        "",
+        ""
+    ) -join $newline
+    $patched = $patched.Insert($networkInsert, $networkMethod)
     [IO.File]::WriteAllText($patchedTsnet, $patched, [Text.UTF8Encoding]::new($false))
 
     $certSource = [IO.File]::ReadAllText($certStoreSource)

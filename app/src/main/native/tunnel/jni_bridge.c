@@ -3,11 +3,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <android/log.h>
 #include "jni_bridge.h"
 
 extern char *camera_tunnel_call(char *operation, char *request_json);
 extern void camera_tunnel_free(char *value);
-extern void camera_tunnel_set_runtime_dir(char *path);
+extern int camera_tunnel_set_runtime_dir(char *path);
+extern void camera_tunnel_network_changed(void);
 
 static JavaVM *g_vm;
 static jobject g_secret_store;
@@ -207,6 +209,14 @@ void camera_secret_clear(void *value, size_t length) {
     if (value != NULL) wipe(value, length);
 }
 
+void camera_tunnel_log_panic(const char *operation, const char *stage, const char *location) {
+    __android_log_print(ANDROID_LOG_ERROR, "CameraTunnel",
+            "native_panic operation=%s stage=%s at=%s",
+            operation == NULL ? "unknown" : operation,
+            stage == NULL ? "unknown" : stage,
+            location == NULL ? "unknown" : location);
+}
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
     g_vm = vm;
@@ -238,8 +248,9 @@ Java_com_byd_extend_remote_tunnel_NativeTunnelBridge_nativeInitialize(
     (*env)->ReleaseStringUTFChars(env, runtime_path, path);
     (*env)->DeleteLocalRef(env, runtime_path);
     if (path_copy == NULL) return JNI_FALSE;
-    camera_tunnel_set_runtime_dir(path_copy);
+    int runtime_ready = camera_tunnel_set_runtime_dir(path_copy);
     free(path_copy);
+    if (runtime_ready == 0) return JNI_FALSE;
 
     jobject global_store = (*env)->NewGlobalRef(env, secret_store);
     if (global_store == NULL) return JNI_FALSE;
@@ -253,6 +264,14 @@ Java_com_byd_extend_remote_tunnel_NativeTunnelBridge_nativeInitialize(
     pthread_mutex_unlock(&g_store_mutex);
     if (old_store != NULL) (*env)->DeleteGlobalRef(env, old_store);
     return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_byd_extend_remote_tunnel_NativeTunnelBridge_nativeNetworkChanged(
+    JNIEnv *env, jclass clazz) {
+    (void)env;
+    (void)clazz;
+    camera_tunnel_network_changed();
 }
 
 JNIEXPORT jstring JNICALL

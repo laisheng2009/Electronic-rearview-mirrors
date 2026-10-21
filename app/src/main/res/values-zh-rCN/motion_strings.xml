@@ -17,7 +17,7 @@
     <string name="cameras_vdo_hint">"私密查看链接和密码；手机无需额外VPN客户端。"</string>
     <string name="cameras_stream_id">"视频流标识"</string>
     <string name="cameras_viewer_password">"查看密码（必填）"</string>
-    <string name="cameras_regenerate">"重新生成访问凭据"</string>
+    <string name="cameras_regenerate">"生成 ID"</string>
     <string name="cameras_private">"私密 · Serve"</string>
     <string name="cameras_public">"公开 · Funnel"</string>
     <string name="cameras_private_security">"私密访问：仅允许Tailscale网络中已授权的设备。请限制为自己的设备和查看端口；手机需要Tailscale。"</string>
@@ -36,6 +36,8 @@
     <string name="cameras_error_password_length">"查看密码不能超过 1024 个字符。"</string>
     <string name="cameras_error_token_length">"账户令牌不能超过 4096 个字符。"</string>
     <string name="cameras_error_token_required">"授权车辆前，请输入 Zrok 账户令牌。"</string>
+    <string name="cameras_error_name_required">"授权前请输入连接名称。"</string>
+    <string name="cameras_error_viewer_password_required">"授权前请输入查看密码。"</string>
     <string name="cameras_error_authorization_required">"请在服务中授权此设备，然后返回应用。"</string>
     <string name="cameras_error_local_viewer">"无法准备本地查看服务器。请关闭后重新启用查看以重试。"</string>
     <string name="cameras_error_tunnel_runtime">"内置隧道模块出错。请重新启动查看；若再次失败，请发送应用的诊断日志。"</string>
@@ -63,6 +65,11 @@
     <string name="cameras_qr">"二维码"</string>
     <string name="cameras_qr_failed">"无法为此链接生成二维码。"</string>
     <string name="cameras_revoke">"撤销访问"</string>
+    <string name="cameras_retry_revoke">"重试撤销"</string>
+    <string name="cameras_retry_connection">"重试连接"</string>
+    <string name="cameras_access_authorized">"此服务提供方当前授权了一个访问身份。替换账户或访问前，请先撤销。"</string>
+    <string name="cameras_access_identity">"已保存的访问身份：%1$s"</string>
+    <string name="cameras_revoke_pending">"远程撤销仍未完成。请先重试撤销，再进行授权。"</string>
     <string name="cameras_session_hint">"同时仅允许一位查看者连接。查看会复用已运行的摄像头；否则按需启动摄像头，停止查看时仅释放本次会话的资源。离线车辆无法收到请求。"</string>
     <string name="cameras_secret_show">"显示机密"</string>
     <string name="cameras_secret_hide">"隐藏机密"</string>

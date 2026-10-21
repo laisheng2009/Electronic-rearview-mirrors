@@ -1,6 +1,7 @@
 package com.byd.extend.remote
 
 import java.net.URI
+import com.byd.extend.R
 import ninja.vdo.sdk.core.Sanitize
 import org.junit.Assert.*
 import org.junit.Test
@@ -49,6 +50,33 @@ class CameraViewingEditsTest {
         assertThrows(IllegalArgumentException::class.java) {
             CameraViewingEdits("zrok", token = "x".repeat(4097)).validateSecrets()
         }
+    }
+
+    @Test fun authorizationValidationChecksRequiredFieldsAndKeepsTokensOpaque() {
+        assertEquals(R.string.cameras_error_name_required,
+            CameraViewingEdits("vdo", password = "Pass123").authorizationError())
+        assertEquals(R.string.cameras_error_viewer_password_required,
+            CameraViewingEdits("vdo", "Camera_1").authorizationError())
+        assertNull(CameraViewingEdits("vdo", "Camera_1", "Pass123").authorizationError())
+        assertEquals(R.string.cameras_vdo_id_hint,
+            CameraViewingEdits("vdo", "old-id", "Pass123").authorizationError())
+        assertEquals(R.string.cameras_vdo_password_hint,
+            CameraViewingEdits("vdo", "Camera_1", "bad password").authorizationError())
+
+        assertNull(CameraViewingEdits("tailscale", "my-car").authorizationError())
+        assertEquals(R.string.cameras_error_viewer_password_required,
+            CameraViewingEdits("tailscale", "my-car").authorizationError(tailscalePublic = true))
+        assertNull(CameraViewingEdits("tailscale", "my-car", "private1")
+            .authorizationError(tailscalePublic = true))
+
+        assertEquals(R.string.cameras_error_token_required,
+            CameraViewingEdits("zrok", "my-car", "view1").authorizationError())
+        assertEquals(R.string.cameras_error_viewer_password_required,
+            CameraViewingEdits("zrok", "my-car", token = "opaque-token").authorizationError())
+        val opaqueToken = " x!?\n" + "t".repeat(4091)
+        assertNull(CameraViewingEdits("zrok", "my-car", "view1", opaqueToken).authorizationError())
+        assertEquals(R.string.cameras_error_token_length,
+            CameraViewingEdits("zrok", "my-car", "view1", "t".repeat(4097)).authorizationError())
     }
 
     @Test fun viewerLinkKeepsTheSdkIdAndRequestsPasswordWithoutExposingIt() {

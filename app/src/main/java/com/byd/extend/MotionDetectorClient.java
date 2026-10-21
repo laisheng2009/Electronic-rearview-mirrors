@@ -565,7 +565,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
     static boolean prepareRemoteView(Context context, IBinder owner, String id) throws Exception {
         if (owner == null || !MotionDetectorProtocol.validSession(id))
             throw new IllegalArgumentException("remote view owner and 32-character session are required");
-        IBinder target = verifiedWorker(context);
+        IBinder target = verifiedWorker(context, CameraViewingShellProtocol.currentApkIdentity(context));
         Parcel data = Parcel.obtain(), reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
@@ -584,7 +584,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
     static void releaseRemoteView(Context context, IBinder owner, String id) throws Exception {
         if (owner == null || !MotionDetectorProtocol.validSession(id))
             throw new IllegalArgumentException("remote view owner and 32-character session are required");
-        IBinder target = verifiedWorker(context);
+        IBinder target = verifiedWorker(context, CameraViewingShellProtocol.currentApkIdentity(context));
         Parcel data = Parcel.obtain(), reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
@@ -602,13 +602,28 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         if (context == null) throw new IllegalArgumentException("context required");
         Context application = context.getApplicationContext();
         Context app = application == null ? context : application;
+        return verifiedWorker(context, currentApkIdentity(app));
+    }
+
+    static IBinder verifiedWorker(Context context, String expectedApkIdentity) throws Exception {
+        if (context == null || expectedApkIdentity == null || expectedApkIdentity.isEmpty())
+            throw new IllegalArgumentException("context and expected APK identity are required");
         IBinder candidate = resolveWorker();
         WorkerIdentity identity = readIdentity(candidate);
         if (candidate == null || identity == null || identity.version != MotionDetectorProtocol.VERSION
                 || identity.build != BuildConfig.VERSION_CODE
-                || !currentApkIdentity(app).equals(identity.apk))
+                || !expectedApkIdentity.equals(identity.apk))
             throw new IllegalStateException("current Motion worker is unavailable or obsolete");
         return candidate;
+    }
+
+    static int verifiedWorkerPid(IBinder candidate, String expectedApkIdentity) throws Exception {
+        WorkerIdentity identity = readIdentity(candidate);
+        if (identity == null || identity.version != MotionDetectorProtocol.VERSION
+                || identity.build != BuildConfig.VERSION_CODE || identity.pid <= 0
+                || !expectedApkIdentity.equals(identity.apk))
+            throw new IllegalStateException("current Motion worker identity is invalid");
+        return identity.pid;
     }
 
     public static boolean isLiveWarningSession(Context context, String id) {

@@ -8,5 +8,8 @@ int camera_secret_put(const char *key, const char *value, size_t length);
 int camera_secret_remove(const char *key);
 int camera_secret_remove_prefix(const char *prefix);
 void camera_secret_clear(void *value, size_t length);
+int camera_tunnel_set_runtime_dir(char *path);
+void camera_tunnel_network_changed(void);
+void camera_tunnel_log_panic(const char *operation, const char *stage, const char *location);
 
 #endif

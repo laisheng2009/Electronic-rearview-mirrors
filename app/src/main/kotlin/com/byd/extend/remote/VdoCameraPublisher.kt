@@ -32,6 +32,8 @@ internal class VdoCameraPublisher(
     private val streamId: String,
     private val password: String,
     private val listener: Listener,
+    private val acquireViewer: () -> Boolean = { true },
+    private val releaseCandidate: () -> Unit = {},
 ) : AutoCloseable {
     interface Listener {
         fun onReady(viewerUrl: String)
@@ -69,6 +71,7 @@ internal class VdoCameraPublisher(
     }
 
     @Volatile private var closed = false
+    private var accessStopped = false
     private var startRequested = false
     private var opening = false
     private var ready = false
@@ -83,8 +86,9 @@ internal class VdoCameraPublisher(
 
     private val publisherAdmission = object : PublisherPeerAdmission {
         override fun tryAdmit(uuid: String): Boolean = synchronized(lock) {
-            if (closed) return@synchronized false
+            if (closed || accessStopped) return@synchronized false
             if (candidatePeerId == null && acceptedPeerId == null) {
+                if (!acquireViewer()) return@synchronized false
                 candidatePeerId = uuid
                 true
             } else false
@@ -92,7 +96,10 @@ internal class VdoCameraPublisher(
 
         override fun release(uuid: String) {
             synchronized(lock) {
-                if (candidatePeerId == uuid) candidatePeerId = null
+                if (candidatePeerId == uuid) {
+                    candidatePeerId = null
+                    if (acceptedPeerId == null) releaseCandidate()
+                }
             }
         }
     }
@@ -115,7 +122,7 @@ internal class VdoCameraPublisher(
 
     /** Returns the WebRTC input surface for the existing camera/GPU composer. */
     fun startVideo(): Surface = synchronized(lock) {
-        check(!closed && ready) { "VDO publisher is not ready" }
+        check(!closed && !accessStopped && ready) { "VDO publisher is not ready" }
         check(acceptedPeerId != null) { "No authenticated viewer" }
         check(video == null) { "VDO video is already running" }
         val active = checkNotNull(resources) { "VDO publisher is unavailable" }
@@ -175,6 +182,15 @@ internal class VdoCameraPublisher(
         if (awaitingViewerCleanup) {
             acceptedPeerId = null
             awaitingViewerCleanup = false
+        }
+    }
+
+    /** Cut off viewers before detaching the camera, without releasing its still-attached Surface. */
+    fun stopAccess() = synchronized(lock) {
+        accessStopped = true
+        try { video?.track?.setEnabled(false) }
+        finally {
+            listOfNotNull(candidatePeerId, acceptedPeerId).distinct().forEach { resources?.sdk?.disconnectPeer(it) }
         }
     }
 
@@ -356,7 +372,10 @@ internal class VdoCameraPublisher(
                         viewerNotified = false
                         // The controller's disconnect callback calls stopVideo after releasing its camera lease.
                         awaitingViewerCleanup = wasNotified
-                        if (!wasNotified) acceptedPeerId = null
+                        if (!wasNotified) {
+                            acceptedPeerId = null
+                            releaseCandidate()
+                        }
                         wasNotified
                     }
                 }
@@ -445,7 +464,14 @@ internal class VdoCameraPublisher(
             synchronized(initializationLock) {
                 if (webRtcInitialized) return
                 PeerConnectionFactory.initialize(
-                    PeerConnectionFactory.InitializationOptions.builder(context).createInitializationOptions(),
+                    PeerConnectionFactory.InitializationOptions.builder(context)
+                        .setNativeLibraryLoader { name ->
+                            try {
+                                System.load(java.io.File(context.applicationInfo.nativeLibraryDir,
+                                    "lib$name.so").absolutePath)
+                                true
+                            } catch (_: UnsatisfiedLinkError) { false }
+                        }.createInitializationOptions(),
                 )
                 webRtcInitialized = true
             }

@@ -11,7 +11,12 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/sirupsen/logrus"
@@ -51,23 +56,122 @@ type tunnelProvider interface {
 	Revoke(name string) tunnelResult
 }
 
+type registeredProvider struct {
+	mu       sync.Mutex
+	provider tunnelProvider
+	closed   bool
+}
+
 var (
-	providerMu sync.Mutex
-	providers  = map[string]tunnelProvider{}
-	runtimeDir string
+	providerMu             sync.Mutex
+	providers              = map[string]*registeredProvider{}
+	runtimeDir             string
+	networkEventGeneration atomic.Uint64
+	networkWorkerRunning   atomic.Bool
 )
 
 //export camera_tunnel_set_runtime_dir
-func camera_tunnel_set_runtime_dir(path *C.char) {
+func camera_tunnel_set_runtime_dir(path *C.char) C.int {
+	requestedPath := C.GoString(path)
+	if requestedPath == "" {
+		return 0
+	}
+	requested, err := filepath.Abs(requestedPath)
+	if err != nil {
+		return 0
+	}
 	providerMu.Lock()
-	runtimeDir = C.GoString(path)
-	providerMu.Unlock()
+	defer providerMu.Unlock()
+	if runtimeDir != "" && runtimeDir != requested {
+		return 0
+	}
+	absolute, err := prepareRuntimeDirectory(requested)
+	if err != nil {
+		return 0
+	}
+	if runtimeDir != "" && runtimeDir != absolute {
+		return 0
+	}
+	runtimeDir = absolute
+	return 1
+}
+
+func prepareRuntimeDirectory(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("private runtime directory missing")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	logs := filepath.Join(absolute, "logs")
+	for _, directory := range []string{absolute, logs} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(directory, 0700); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Setenv("TS_LOGS_DIR", logs); err != nil {
+		return "", err
+	}
+	return absolute, nil
+}
+
+//export camera_tunnel_network_changed
+func camera_tunnel_network_changed() {
+	networkEventGeneration.Add(1)
+	if networkWorkerRunning.CompareAndSwap(false, true) {
+		go processNetworkChanges()
+	}
+}
+
+func processNetworkChanges() {
+	for {
+		generation := networkEventGeneration.Load()
+		providerMu.Lock()
+		entries := make([]*registeredProvider, 0, len(providers))
+		for _, entry := range providers {
+			entries = append(entries, entry)
+		}
+		providerMu.Unlock()
+
+		for _, entry := range entries {
+			entry.mu.Lock()
+			if !entry.closed {
+				if provider, ok := entry.provider.(*tailscaleProvider); ok {
+					provider.NetworkChanged()
+				}
+			}
+			entry.mu.Unlock()
+		}
+
+		networkWorkerRunning.Store(false)
+		if networkEventGeneration.Load() == generation ||
+			!networkWorkerRunning.CompareAndSwap(false, true) {
+			return
+		}
+	}
 }
 
 //export camera_tunnel_call
 func camera_tunnel_call(operation *C.char, requestJSON *C.char) (result *C.char) {
+	operationName := safeOperation(C.GoString(operation))
+	stage := "decode_request"
+	var entry *registeredProvider
+	var entryLocked bool
+	var providerKey string
 	defer func() {
 		if recover() != nil {
+			if entryLocked {
+				entry.closed = true
+				safeDisposeProvider(entry.provider)
+				entry.mu.Unlock()
+				entryLocked = false
+				removeProvider(providerKey, entry)
+			}
+			logNativePanic(operationName, stage, panicLocation())
 			result = C.CString(encodeResult(failure("runtime_error")))
 		}
 	}()
@@ -78,46 +182,138 @@ func camera_tunnel_call(operation *C.char, requestJSON *C.char) (result *C.char)
 		return C.CString(encodeResult(failure("invalid_request")))
 	}
 	wipeBytes(requestBytes)
-	providerMu.Lock()
-	defer providerMu.Unlock()
-	if runtimeDir == "" {
+	stage = "validate_request"
+	if currentRuntimeDirectory() == "" {
 		return C.CString(encodeResult(failure("native_unavailable")))
 	}
 	if !validInstanceID(request.InstanceID) {
 		return C.CString(encodeResult(failure("invalid_request")))
 	}
-	providerKey := request.Provider + "\x00" + request.InstanceID
-	provider, ok := providers[providerKey]
-	if !ok {
-		switch request.Provider {
+	if !validOperation(operationName) {
+		return C.CString(encodeResult(failure("invalid_request")))
+	}
+	if request.Provider != "tailscale" && request.Provider != "zrok" {
+		return C.CString(encodeResult(failure("invalid_provider")))
+	}
+	providerKey = request.Provider + "\x00" + request.InstanceID
+	stage = "provider_lookup"
+	entry = lookupProvider(providerKey, request.Provider, operationName)
+	if entry == nil {
+		return C.CString(encodeResult(tunnelResult{State: "stopped"}))
+	}
+	entry.mu.Lock()
+	entryLocked = true
+	if entry.closed {
+		entry.mu.Unlock()
+		entryLocked = false
+		return C.CString(encodeResult(failure("native_unavailable")))
+	}
+	stage = "provider_call"
+	var output tunnelResult
+	switch operationName {
+	case "authorize":
+		output = entry.provider.Authorize(request.Name, request.Credential)
+	case "status":
+		output = entry.provider.Status(request.Name)
+	case "start":
+		output = entry.provider.Start(request.Name, request.LocalPort, request.Public, request.PrivateProxyCredential)
+	case "stop":
+		output = entry.provider.Stop()
+	case "close":
+		entry.closed = true
+		output = entry.provider.Stop()
+		removeProvider(providerKey, entry)
+	case "revoke":
+		output = entry.provider.Revoke(request.Name)
+	}
+	entry.mu.Unlock()
+	entryLocked = false
+	return C.CString(encodeResult(output))
+}
+
+func safeOperation(value string) string {
+	switch value {
+	case "authorize", "status", "start", "stop", "close", "revoke":
+		return value
+	default:
+		return "unknown"
+	}
+}
+
+func validOperation(value string) bool { return value != "unknown" }
+
+func lookupProvider(key, kind, operation string) *registeredProvider {
+	providerMu.Lock()
+	defer providerMu.Unlock()
+	entry := providers[key]
+	if entry == nil {
+		if operation == "stop" || operation == "close" {
+			return nil
+		}
+		var provider tunnelProvider
+		switch kind {
 		case "tailscale":
 			provider = newTailscaleProvider(runtimeDir)
 		case "zrok":
 			provider = newZrokProvider(runtimeDir)
-		default:
-			return C.CString(encodeResult(failure("invalid_provider")))
 		}
-		providers[providerKey] = provider
+		entry = &registeredProvider{provider: provider}
+		providers[key] = entry
 	}
-	var output tunnelResult
-	switch C.GoString(operation) {
-	case "authorize":
-		output = provider.Authorize(request.Name, request.Credential)
-	case "status":
-		output = provider.Status(request.Name)
-	case "start":
-		output = provider.Start(request.Name, request.LocalPort, request.Public, request.PrivateProxyCredential)
-	case "stop":
-		output = provider.Stop()
-	case "close":
-		output = provider.Stop()
-		delete(providers, providerKey)
-	case "revoke":
-		output = provider.Revoke(request.Name)
-	default:
-		output = failure("invalid_request")
+	return entry
+}
+
+func currentRuntimeDirectory() string {
+	providerMu.Lock()
+	defer providerMu.Unlock()
+	return runtimeDir
+}
+
+func removeProvider(key string, entry *registeredProvider) {
+	providerMu.Lock()
+	if providers[key] == entry {
+		delete(providers, key)
 	}
-	return C.CString(encodeResult(output))
+	providerMu.Unlock()
+}
+
+func safeDisposeProvider(provider tunnelProvider) {
+	defer func() { _ = recover() }()
+	switch provider := provider.(type) {
+	case *tailscaleProvider:
+		provider.discardAfterFailure()
+	case *zrokProvider:
+		provider.discardAfterFailure()
+	}
+}
+
+func panicLocation() string {
+	var pcs [20]uintptr
+	count := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:count])
+	for {
+		frame, more := frames.Next()
+		if !strings.HasPrefix(frame.Function, "runtime.") &&
+			!strings.Contains(frame.Function, "camera_tunnel_call.func") &&
+			frame.Function != "main.camera_tunnel_call" && frame.Function != "main.panicLocation" {
+			if frame.Function != "" {
+				return frame.Function
+			}
+		}
+		if !more {
+			return "unknown"
+		}
+	}
+}
+
+func logNativePanic(operation, stage, location string) {
+	cOperation := C.CString(operation)
+	cStage := C.CString(stage)
+	cLocation := C.CString(location)
+	defer C.free(unsafe.Pointer(cOperation))
+	defer C.free(unsafe.Pointer(cStage))
+	defer C.free(unsafe.Pointer(cLocation))
+	C.camera_tunnel_log_panic(cOperation, cStage, cLocation)
 }
 
 //export camera_tunnel_free
@@ -203,6 +399,7 @@ func failure(code string) tunnelResult {
 		"zrok_enable_failed":         "The vehicle could not be registered with Zrok.",
 		"zrok_share_failed":          "The Zrok viewing link could not be created.",
 		"secure_store_error":         "Encrypted tunnel state could not be read or saved.",
+		"revoke_required":            "Revoke the current Zrok account before authorizing another account.",
 		"native_unavailable":         "The secure tunnel runtime is unavailable on this device.",
 		"runtime_error":              "The secure tunnel runtime could not complete the request.",
 	}

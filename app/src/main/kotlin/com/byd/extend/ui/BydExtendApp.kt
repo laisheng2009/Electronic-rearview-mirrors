@@ -211,7 +211,7 @@ fun BydExtendApp(
                     when (state.activeTab) {
                         RootTab.Signals -> SignalsScreen(
                             state.signals, state.avas, state.adbRecovery, strings, colors, dispatchAction,
-                            sidebarScroll, cameraHost, motionArchiveState)
+                            sidebarScroll, cameraHost, motionArchiveState, uiSession)
                         RootTab.Blind -> BlindScreen(state.blind, strings, colors, dispatchAction, cameraHost, onPreview)
                         RootTab.Parking -> ParkingScreen(state.parking, strings, colors, dispatchAction, cameraHost, onPreview)
                         RootTab.Reverse -> ReverseScreen(state.reverse, strings, colors, dispatchAction, cameraHost, onPreview)
@@ -396,6 +396,7 @@ private fun SignalsScreen(
     sidebarScroll: ScrollState,
     cameraHost: @Composable (CameraHostSlot) -> Unit,
     motionArchiveState: MotionArchiveState,
+    uiSession: RuntimeUiSession.Session,
 ) {
     var editingCallsProfile by rememberSaveable {
         mutableStateOf<com.byd.extend.CallsSettings.Profile?>(null)
@@ -537,7 +538,7 @@ private fun SignalsScreen(
                             onEditDestination = { editingCallsProfile = it })
                     }
                     SignalsCategory.Motion -> LazyForm(Modifier.fillMaxSize(), LocalPrimaryLazyList.current) {
-                        MotionIntegrationScreen(colors, strings, cameraHost, motionArchiveState)
+                        MotionIntegrationScreen(colors, strings, cameraHost, motionArchiveState, uiSession)
                     }
                 }
             }
