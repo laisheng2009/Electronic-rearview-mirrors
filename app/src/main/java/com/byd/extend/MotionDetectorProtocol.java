@@ -65,6 +65,7 @@ public final class MotionDetectorProtocol {
     static final int TX_REGISTER_VIEW_HELPER = IBinder.FIRST_CALL_TRANSACTION + 25;
     static final int TX_VIEW_OBSERVE_CHARGE = IBinder.FIRST_CALL_TRANSACTION + 26;
     static final int TX_VIEW_DETACH_CHARGE = IBinder.FIRST_CALL_TRANSACTION + 27;
+    static final int TX_CAMERA_HOST_READY = IBinder.FIRST_CALL_TRANSACTION + 28;
 
     static final int CB_PREPARED = IBinder.FIRST_CALL_TRANSACTION;
     static final int CB_STATUS = IBinder.FIRST_CALL_TRANSACTION + 1;

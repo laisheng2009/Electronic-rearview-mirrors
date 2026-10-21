@@ -28,5 +28,7 @@ public final class NativeTunnelBridge {
 
     public static native void nativeNetworkChanged();
 
+    public static native void nativeCancel(String provider, String instanceId);
+
     public static native String nativeCall(String operation, String requestJson);
 }

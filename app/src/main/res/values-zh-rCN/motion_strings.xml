@@ -50,6 +50,7 @@
     <string name="cameras_access">"查看权限"</string>
     <string name="cameras_not_connected">"未连接"</string>
     <string name="cameras_status_authorizing">"正在授权服务…"</string>
+    <string name="cameras_status_approval_pending">"正在等待 Tailscale 设备批准…"</string>
     <string name="cameras_status_ready">"已准备好开始查看"</string>
     <string name="cameras_status_preparing">"正在准备摄像头…"</string>
     <string name="cameras_status_connected">"查看者已连接"</string>

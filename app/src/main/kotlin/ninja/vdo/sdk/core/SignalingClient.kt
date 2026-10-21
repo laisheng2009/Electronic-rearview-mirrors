@@ -93,6 +93,8 @@ class SignalingClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                com.byd.extend.remote.CameraViewingDiagnostics.failure(
+                    "signaling_websocket_http_${response?.code ?: 0}", "vdo", t)
                 error = t.message ?: t.toString()
                 log?.invoke("signaling error: $error")
                 handleClosed(gen)

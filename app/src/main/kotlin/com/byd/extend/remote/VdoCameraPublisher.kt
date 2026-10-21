@@ -248,6 +248,8 @@ internal class VdoCameraPublisher(
             }
             if (encoderFactory.getSupportedCodecs().isEmpty()) throw HardwareEncoderUnavailable()
             val factory = PeerConnectionFactory.builder()
+                // app_process is not an AMS application; the default monitor registers app receivers.
+                .setOptions(PeerConnectionFactory.Options().apply { disableNetworkMonitor = true })
                 .setVideoEncoderFactory(encoderFactory)
                 .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
                 .createPeerConnectionFactory()
@@ -295,11 +297,10 @@ internal class VdoCameraPublisher(
             }
             completed = true
         } catch (failure: HardwareEncoderUnavailable) {
-            Log.w("CameraViewing", "vdo_open type=${failure.javaClass.simpleName}")
+            CameraViewingDiagnostics.failure("publisher_open", "vdo", failure, password)
             notifyErrorUnlessClosed(encoderUnavailable = true)
         } catch (failure: Exception) {
-            Log.w("CameraViewing", "vdo_open type=${failure.javaClass.simpleName}" +
-                " cause=${failure.cause?.javaClass?.simpleName ?: "none"}")
+            CameraViewingDiagnostics.failure("publisher_open", "vdo", failure, password)
             notifyErrorUnlessClosed(encoderUnavailable = false)
         } finally {
             val disposeSdk: VdoNinja?
@@ -381,7 +382,19 @@ internal class VdoCameraPublisher(
                 }
                 if (notifyViewer) notifyViewerDisconnectedUnlessClosed()
             }
-            VdoEvents.RECONNECT_FAILED -> notifyErrorUnlessClosed(encoderUnavailable = false)
+            VdoEvents.RECONNECT_FAILED -> {
+                CameraViewingDiagnostics.failure("signaling_reconnect", "vdo",
+                    IllegalStateException(event.message ?: "signaling reconnect exhausted"), password)
+                notifyErrorUnlessClosed(encoderUnavailable = false)
+            }
+            VdoEvents.ERROR -> CameraViewingDiagnostics.failure("sdk_event", "vdo",
+                IllegalStateException(event.message ?: "SDK error without message"), password)
+        }
+    }
+
+    fun networkChanged() {
+        synchronized(lock) {
+            if (!closed && !accessStopped) resources?.sdk?.networkChanged()
         }
     }
 
@@ -407,24 +420,28 @@ internal class VdoCameraPublisher(
     ) : VideoEncoderFactory {
         private val hardware = try {
             HardwareVideoEncoderFactory(sharedContext, false, false)
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            CameraViewingDiagnostics.failure("encoder_factory", "vdo", failure)
             onUnavailable()
-            throw HardwareEncoderUnavailable()
+            throw HardwareEncoderUnavailable(failure)
         }
         private val h264Codecs = try {
             hardware.supportedCodecs
                 .filter { it.name.equals("H264", ignoreCase = true) }
                 .toTypedArray()
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            CameraViewingDiagnostics.failure("encoder_codecs", "vdo", failure)
             onUnavailable()
-            throw HardwareEncoderUnavailable()
+            throw HardwareEncoderUnavailable(failure)
         }
 
         override fun getSupportedCodecs(): Array<VideoCodecInfo> = h264Codecs.copyOf()
 
         override fun createEncoder(codecInfo: VideoCodecInfo): VideoEncoder? {
             if (!codecInfo.name.equals("H264", ignoreCase = true) || h264Codecs.isEmpty()) return null
-            val encoder = try { hardware.createEncoder(codecInfo) } catch (_: Exception) { null }
+            val encoder = try { hardware.createEncoder(codecInfo) } catch (failure: Exception) {
+                CameraViewingDiagnostics.failure("encoder_create", "vdo", failure); null
+            }
             if (encoder == null) {
                 onUnavailable()
                 return null
@@ -441,15 +458,19 @@ internal class VdoCameraPublisher(
             settings: VideoEncoder.Settings,
             callback: VideoEncoder.Callback,
         ): VideoCodecStatus {
-            val result = try { delegate.initEncode(settings, callback) } catch (_: Exception) {
+            val result = try { delegate.initEncode(settings, callback) } catch (failure: Exception) {
+                CameraViewingDiagnostics.failure("encoder_init", "vdo", failure)
                 VideoCodecStatus.ERROR
             }
-            if (result != VideoCodecStatus.OK) onUnavailable()
+            if (result != VideoCodecStatus.OK) {
+                Log.w("CameraViewing", "stage=encoder_init provider=vdo status=$result")
+                onUnavailable()
+            }
             return result
         }
     }
 
-    private class HardwareEncoderUnavailable : Exception()
+    private class HardwareEncoderUnavailable(cause: Throwable? = null) : Exception("Hardware H264 unavailable", cause)
 
     companion object {
         const val WIDTH = 1280
@@ -470,7 +491,10 @@ internal class VdoCameraPublisher(
                                 System.load(java.io.File(context.applicationInfo.nativeLibraryDir,
                                     "lib$name.so").absolutePath)
                                 true
-                            } catch (_: UnsatisfiedLinkError) { false }
+                            } catch (failure: UnsatisfiedLinkError) {
+                                CameraViewingDiagnostics.failure("webrtc_library_load", "vdo", failure)
+                                false
+                            }
                         }.createInitializationOptions(),
                 )
                 webRtcInitialized = true

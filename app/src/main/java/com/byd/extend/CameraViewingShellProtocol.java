@@ -32,7 +32,7 @@ public final class CameraViewingShellProtocol {
     public static boolean isOperationAllowed(String operation) {
         return "provision".equals(operation) || "configure".equals(operation)
                 || "authorize".equals(operation) || "authorization_opened".equals(operation)
-                || "reconnect".equals(operation) || "revoke".equals(operation)
+                || "reconnect".equals(operation) || "revoke".equals(operation) || "cancel".equals(operation)
                 || "shutdown".equals(operation) || "reconfigured".equals(operation);
     }
 

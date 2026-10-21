@@ -50,6 +50,7 @@
     <string name="cameras_access">"Доступ до перегляду"</string>
     <string name="cameras_not_connected">"Не підключено"</string>
     <string name="cameras_status_authorizing">"Авторизація провайдера…"</string>
+    <string name="cameras_status_approval_pending">"Очікування підтвердження пристрою в Tailscale…"</string>
     <string name="cameras_status_ready">"Готово до запуску перегляду"</string>
     <string name="cameras_status_preparing">"Підготовка камер…"</string>
     <string name="cameras_status_connected">"Переглядач підключений"</string>

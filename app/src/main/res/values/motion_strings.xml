@@ -50,6 +50,7 @@
     <string name="cameras_access">"Viewing access"</string>
     <string name="cameras_not_connected">"Not connected"</string>
     <string name="cameras_status_authorizing">"Authorizing provider…"</string>
+    <string name="cameras_status_approval_pending">"Waiting for device approval in Tailscale…"</string>
     <string name="cameras_status_ready">"Ready to start viewing"</string>
     <string name="cameras_status_preparing">"Preparing cameras…"</string>
     <string name="cameras_status_connected">"Viewer connected"</string>

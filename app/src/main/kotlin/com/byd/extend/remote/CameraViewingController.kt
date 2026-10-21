@@ -3,7 +3,6 @@ package com.byd.extend.remote
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import com.byd.extend.CameraChargeSettings
 import com.byd.extend.CameraViewingShellClient
 import com.byd.extend.MotionRuntime
@@ -41,7 +40,7 @@ class CameraViewingController private constructor(private val context: Context) 
     val state: StateFlow<CameraViewingState> = mutable.asStateFlow()
     private var client: CameraViewingShellClient? = null
     private val snapshots = linkedMapOf<String, JSONObject>()
-    init { execute { refresh() } }
+    init { execute("initial_state") { refresh() } }
 
     private fun selected() = preferences.getString("transport", "vdo")?.takeIf { it in METHODS } ?: "vdo"
     private fun draftName(method: String) = preferences.getString("draft_${method}_name",
@@ -79,13 +78,13 @@ class CameraViewingController private constructor(private val context: Context) 
             authorized = authorized, revocationPending = pending,
             identity = current?.nullable("identity") ?: if (authorized || pending)
                 preferences.getString("${method}_identity", null) else null,
-            busy = phase in setOf("authorizing", "connecting", "revoking"))
+            busy = phase in setOf("authorizing", "starting", "approval_pending", "connecting", "revoking"))
     }
 
     /** Focus loss, keyboard dismissal and provider selection commit drafts only. */
     fun update(edits: CameraViewingEdits, enabled: Boolean? = null, transport: String? = null,
                tailscalePublic: Boolean? = null, authorize: Boolean = false, regenerate: Boolean = false,
-               onSaved: () -> Unit = {}) = execute {
+               onSaved: () -> Unit = {}) = execute(if (authorize) "authorize" else "update_draft", edits.transport) {
         require(edits.transport in METHODS && (transport == null || transport in METHODS))
         val method = edits.transport
         val wasLocked = locked(method)
@@ -139,8 +138,8 @@ class CameraViewingController private constructor(private val context: Context) 
         client?.let { if (it.isConnected) return it else { it.close(); client = null } }
         val connected = CameraViewingShellClient(context)
         val observer = object : CameraViewingShellClient.Listener {
-            override fun onSnapshot(snapshot: JSONObject) = execute { if (client === connected) accept(snapshot) }
-            override fun onHelperDied() = execute {
+            override fun onSnapshot(snapshot: JSONObject) = execute("snapshot") { if (client === connected) accept(snapshot) }
+            override fun onHelperDied() = execute("helper_died") {
                 if (client === connected) {
                     client = null
                     snapshots.values.forEach { it.put("phase", "error").put("error", "helper_unavailable")
@@ -189,12 +188,11 @@ class CameraViewingController private constructor(private val context: Context) 
                 connected.prepareCameraBackend()
                 connected.request("reconfigured", JSONObject().put("restartVideo", reset))
             }.exceptionOrNull()
-            execute {
+            execute("backend_result") {
                 if (backendSetup === connected) backendSetup = null
                 if (client !== connected) return@execute
                 backendError = if (failure == null) null else "camera_backend_unavailable"
-                if (failure != null) Log.w("CameraViewing",
-                    "stage=backend_setup type=${failure.javaClass.simpleName}")
+                if (failure != null) CameraViewingDiagnostics.failure("backend_setup", "shared", failure)
                 refresh()
                 if (backendResetRequested) {
                     backendResetRequested = false
@@ -227,29 +225,33 @@ class CameraViewingController private constructor(private val context: Context) 
         refresh()
     }
 
-    fun runtimeStarted() = execute {
+    fun runtimeStarted() = execute("runtime_started") {
         if (CameraChargeSettings.isRemoteViewingEnabled(context)) prepareBackend(ensureClient())
     }
-    fun runtimeStopped() = execute { client?.close(); client = null; backendError = null }
+    fun runtimeStopped() = execute("runtime_stopped") { client?.close(); client = null; backendError = null }
     fun explicitShutdown() = explicitShutdown(Runnable {})
-    fun explicitShutdown(onComplete: Runnable) = execute {
+    fun explicitShutdown(onComplete: Runnable) = execute("shutdown") {
         try { (client ?: if (preferences.getBoolean("helper_provisioned", false)) ensureClient(false) else null)
             ?.request("shutdown", JSONObject()) }
         finally { client?.close(); client = null; main.post(onComplete) }
     }
-    fun workerReconfigured() = execute { client?.let {
+    fun workerReconfigured() = execute("worker_reconfigured") { client?.let {
         prepareBackend(it, true)
     } }
-    fun authorizationOpened(request: Long) = execute {
+    fun authorizationOpened(request: Long) = execute("authorization_opened") {
         client?.let { accept(it.request("authorization_opened", JSONObject().put("transport", selected()).put("request", request))) }
     }
-    fun revoke() = execute { accept(ensureClient().request("revoke", JSONObject().put("transport", selected()))) }
+    fun revoke() = execute("revoke") { accept(ensureClient().request("revoke", JSONObject().put("transport", selected()))) }
+    fun cancel() = execute("cancel") { accept(ensureClient().request("cancel", JSONObject().put("transport", selected()))) }
 
-    private fun execute(action: () -> Unit) {
+    private fun execute(operation: String = "state_update", method: String? = null, action: () -> Unit) {
         owner.execute {
             try { action() }
             catch (failure: Exception) {
-                Log.w("CameraViewing", "app_operation failed type=${failure.javaClass.simpleName}")
+                val provider = method ?: selected()
+                val knownSecrets = runCatching { arrayOf(secret(provider, "password"), secret(provider, "token")) }
+                    .getOrDefault(emptyArray())
+                CameraViewingDiagnostics.failure("app_$operation", provider, failure, *knownSecrets)
                 mutable.value = state.value.copy(busy = false, error = context.getString(
                     if (failure is SecurityException) R.string.cameras_error_secret else R.string.cameras_error_helper))
             }

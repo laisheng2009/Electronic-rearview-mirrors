@@ -52,7 +52,10 @@ internal class CameraHlsEncoder(private val failed: (Throwable) -> Unit) : AutoC
             encoder.start()
             drain = Thread({ drain(encoder) }, "camera-view-encode").also { it.start() }
             return surface
-        } catch (error: Throwable) { close(); throw error }
+        } catch (error: Throwable) {
+            try { close() } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }
+            throw error
+        }
     }
 
     private fun drain(encoder: MediaCodec) {
@@ -99,7 +102,7 @@ internal class CameraHlsEncoder(private val failed: (Throwable) -> Unit) : AutoC
             runCatching {
                 if (lastPts > fragmentStart) window.nextFragmentDuration((lastPts - fragmentStart) / 1_000_000.0)
                 muxer?.close()
-            }
+            }.onFailure { CameraViewingDiagnostics.failure("hls_muxer_close", "shared", it) }
             muxer = null
         }
     }

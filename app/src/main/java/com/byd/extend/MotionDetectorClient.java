@@ -63,7 +63,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
     private final ExecutorService commands = Executors.newSingleThreadExecutor(r ->
             new Thread(r, "motion-detector-client"));
     private final Object lock = new Object();
-    private final Callback callback = new Callback();
+    private Callback callback = new Callback(0);
     private volatile String sessionId;
     private volatile String configJson;
     private volatile Listener listener;
@@ -301,6 +301,8 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             listener = nextListener;
             sessionId = null;
             generation = ++requestGeneration;
+            if (callback != null) callback.deactivate();
+            callback = new Callback(generation);
             token = UUID.randomUUID().toString().replace("-", "");
             configureCompletionGeneration = generation;
             configureCompletionToken = token;
@@ -316,6 +318,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
     private void configureOnWorker(int generation, String requestedConfig, String requestToken) {
         String id = "";
         boolean configuredAcknowledged = false;
+        Callback requestCallback = null;
         try {
             if (!isCurrentRequest(generation)) return;
             IBinder candidate = resolveWorker();
@@ -329,13 +332,17 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 if (launched.authorizationRequired || launched.superseded)
                     throw new IllegalStateException("authenticated shell launch failed: " + launched.error);
                 candidate = awaitWorker(6_000L);
+                identity = readIdentity(candidate);
             }
             if (!isCurrentRequest(generation)) return;
-            if (!healthy(candidate)) throw new IllegalStateException("motion shell worker readiness/protocol mismatch");
-            worker = candidate;
-            if (!isCurrentRequest(generation)) {
-                if (worker == candidate) worker = null;
-                return;
+            if (!matchesCurrentApk(identity))
+                throw new IllegalStateException("motion shell worker readiness/protocol mismatch");
+            synchronized (lock) {
+                if (closed || generation != requestGeneration || callback == null
+                        || callback.generation != generation) return;
+                requestCallback = callback;
+                requestCallback.bind(candidate, identity.pid);
+                worker = candidate;
             }
             Parcel data = Parcel.obtain(), reply = Parcel.obtain();
             try {
@@ -344,7 +351,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 data.writeInt(BuildConfig.VERSION_CODE);
                 data.writeString(requestedConfig);
                 data.writeString(requestToken);
-                data.writeStrongBinder(callback);
+                data.writeStrongBinder(requestCallback);
                 if (!candidate.transact(MotionDetectorProtocol.TX_CONFIGURE, data, reply, 0))
                     throw new IllegalStateException("motion worker rejected config transaction");
                 reply.readException();
@@ -357,7 +364,10 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 configuredAcknowledged = applied == 1;
                 if (returned == null || !returned.isBinderAlive())
                     throw new IllegalStateException("motion worker Binder unavailable");
-                worker = returned;
+                WorkerIdentity returnedIdentity = readIdentity(returned);
+                if (!matchesCurrentApk(returnedIdentity) || returnedIdentity.pid != identity.pid)
+                    throw new SecurityException("Motion configure reply came from a changed worker");
+                worker = candidate;
                 if (reply.dataAvail() != 0)
                     throw new IllegalStateException("Motion configure reply has trailing data");
             } finally {
@@ -384,10 +394,11 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             if (!MotionDetectorProtocol.validSession(id))
                 throw new IllegalStateException("motion worker returned an invalid session ID");
             synchronized (lock) { sessionId = id; }
-            attachUi(candidate, id);
             if (configuredAcknowledged) reportRequestConfigured(generation, requestToken);
             else clearConfigureRequest(generation, requestToken);
         } catch (Throwable error) {
+            if (requestCallback != null && !isCurrentCallback(requestCallback))
+                requestCallback.deactivate();
             if (configuredAcknowledged) reportRequestConfigured(generation, requestToken);
             else clearConfigureRequest(generation, requestToken);
             reportRequestError(generation, id, "configure", summary(error));
@@ -403,13 +414,15 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             WorkerIdentity identity = readIdentity(candidate);
             if (!matchesCurrentApk(identity) || identity.pid != workerPid)
                 throw new IllegalStateException("configured Motion worker is unavailable or changed");
-            confirmedWorker = true;
             worker = candidate;
             synchronized (lock) {
                 if (!matchesPendingConfigureLocked(generation, requestToken, requestedConfig)) return;
+                if (callback == null || callback.generation != generation
+                        || !callback.matchesWorker(workerPid))
+                    throw new SecurityException("configured Motion callback worker changed");
                 sessionId = id;
             }
-            attachUi(candidate, id);
+            confirmedWorker = true;
             reportRequestConfigured(generation, requestToken);
         } catch (Throwable error) {
             if (confirmedWorker) reportRequestConfigured(generation, requestToken);
@@ -476,18 +489,11 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         }
     }
 
-    private void attachUi(IBinder target, String id) throws Exception {
-        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
-        try {
-            data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
-            data.writeString(id);
-            data.writeStrongBinder(callback);
-            if (!target.transact(MotionDetectorProtocol.TX_ATTACH_UI, data, reply, 0))
-                throw new IllegalStateException("motion UI observer attach unavailable");
-            reply.readException();
-            if (reply.readInt() != 1 || reply.dataAvail() != 0)
-                throw new IllegalStateException("motion worker refused UI observer attachment");
-        } finally { data.recycle(); reply.recycle(); }
+    private boolean isCurrentCallback(Callback expected) {
+        synchronized (lock) {
+            return !closed && callback == expected && requestGeneration == expected.generation
+                    && expected.isBoundAndAlive();
+        }
     }
 
     void status(String id, Consumer<Status> result) {
@@ -624,6 +630,38 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 || !expectedApkIdentity.equals(identity.apk))
             throw new IllegalStateException("current Motion worker identity is invalid");
         return identity.pid;
+    }
+
+    /** Notify only an already-running, APK-verified worker that the camera host is attached. */
+    static void notifyCameraHostReady(Context context) {
+        if (context == null || android.os.Process.myUid() == 2000) return;
+        try {
+            Context application = context.getApplicationContext();
+            Context app = application == null ? context : application;
+            int ownerUid = app.getPackageManager().getApplicationInfo(
+                    CameraViewingShellProtocol.OWNER_PACKAGE, 0).uid;
+            if (ownerUid != android.os.Process.myUid())
+                throw new SecurityException("Extend package UID changed before camera-ready notification");
+            IBinder candidate = resolveWorker();
+            if (candidate == null || !candidate.isBinderAlive()) return;
+            WorkerIdentity identity = readIdentity(candidate);
+            if (identity == null || identity.version != MotionDetectorProtocol.VERSION
+                    || identity.build != BuildConfig.VERSION_CODE
+                    || !currentApkIdentity(app).equals(identity.apk))
+                throw new SecurityException("camera-ready target is not the current Motion worker");
+            Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+            try {
+                data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
+                if (!candidate.transact(MotionDetectorProtocol.TX_CAMERA_HOST_READY, data, reply, 0))
+                    throw new IllegalStateException("Motion worker rejected camera-host readiness event");
+                reply.readException();
+                if (reply.dataAvail() != 0)
+                    throw new IllegalStateException("Motion camera-host readiness reply has trailing data");
+            } finally { data.recycle(); reply.recycle(); }
+        } catch (Throwable failure) {
+            com.byd.extend.remote.CameraViewingDiagnostics.failure(
+                    "camera_host_ready_notify", "motion_worker", failure);
+        }
     }
 
     public static boolean isLiveWarningSession(Context context, String id) {
@@ -831,6 +869,47 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
     }
 
     private final class Callback extends Binder {
+        final int generation;
+        private volatile IBinder boundWorker;
+        private volatile int boundWorkerPid;
+        private volatile boolean active;
+        private final IBinder.DeathRecipient workerDeath = this::workerDied;
+
+        Callback(int generation) { this.generation = generation; }
+
+        void bind(IBinder owner, int pid) throws RemoteException {
+            if (owner == null || !owner.isBinderAlive() || pid <= 0)
+                throw new IllegalArgumentException("verified Motion worker capability required");
+            owner.linkToDeath(workerDeath, 0);
+            boundWorker = owner;
+            boundWorkerPid = pid;
+            active = true;
+        }
+
+        boolean matchesWorker(int pid) {
+            IBinder owner = boundWorker;
+            return active && pid > 0 && pid == boundWorkerPid
+                    && owner != null && owner.isBinderAlive();
+        }
+
+        boolean isBoundAndAlive() { return matchesWorker(boundWorkerPid); }
+
+        void deactivate() {
+            active = false;
+            IBinder owner = boundWorker;
+            boundWorker = null;
+            boundWorkerPid = 0;
+            if (owner != null) {
+                try { owner.unlinkToDeath(workerDeath, 0); } catch (Throwable ignored) { }
+            }
+        }
+
+        private void workerDied() {
+            active = false;
+            boundWorker = null;
+            boundWorkerPid = 0;
+        }
+
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
             if (code == INTERFACE_TRANSACTION) {
@@ -838,6 +917,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 return true;
             }
             if (Binder.getCallingUid() != 2000) throw new SecurityException("motion callback sender denied");
+            if (!isCurrentCallback(this)) throw new SecurityException("unregistered Motion callback capability");
             data.enforceInterface(MotionDetectorProtocol.CALLBACK_DESCRIPTOR);
             if (code == MotionDetectorProtocol.CB_CONFIGURED) {
                 int protocol = data.readInt();
@@ -847,7 +927,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 String id = data.readString();
                 String requestedConfig = data.readString();
                 if (protocol != MotionDetectorProtocol.VERSION || build != BuildConfig.VERSION_CODE
-                        || workerPid <= 0 || workerPid != Binder.getCallingPid()
+                        || !matchesWorker(workerPid)
                         || !MotionDetectorProtocol.validSession(requestToken)
                         || !MotionDetectorProtocol.validSession(id)
                         || requestedConfig == null || requestedConfig.length() > 8192
@@ -866,8 +946,11 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                     int pid = data.readInt();
                     if (preparedBinder == null || !preparedBinder.isBinderAlive()
                             || protocol != MotionDetectorProtocol.VERSION
-                            || build != BuildConfig.VERSION_CODE || pid <= 0)
+                            || build != BuildConfig.VERSION_CODE || !matchesWorker(pid))
                         throw new SecurityException("invalid motion prepared callback");
+                    WorkerIdentity preparedIdentity = readIdentity(preparedBinder);
+                    if (!matchesCurrentApk(preparedIdentity) || preparedIdentity.pid != pid)
+                        throw new SecurityException("prepared Motion worker identity changed");
                     worker = preparedBinder;
                     reportPrepared(id, preparedBinder);
                     break;
@@ -964,6 +1047,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
     @Override public void close() {
         String id;
         IBinder target;
+        Callback closingCallback;
         synchronized (lock) {
             if (closed) return;
             closed = true;
@@ -973,12 +1057,14 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             configureCompletionJson = null;
             id = sessionId;
             target = worker;
+            closingCallback = callback;
+            if (closingCallback != null) closingCallback.deactivate();
         }
         try {
             commands.execute(() -> {
                 try {
                     if (id != null && target != null && target.isBinderAlive())
-                        transactDetachUi(target, id, callback);
+                        transactDetachUi(target, id, closingCallback);
                 } catch (Throwable ignored) { /* Observer detach is best-effort; worker owns the session. */ }
                 finally {
                     worker = null;

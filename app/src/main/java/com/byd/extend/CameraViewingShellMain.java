@@ -10,6 +10,7 @@ import android.os.Process;
 import android.os.RemoteException;
 
 import com.byd.extend.remote.CameraViewingRuntime;
+import com.byd.extend.remote.CameraViewingDiagnostics;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -22,6 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Independent shell-UID owner of remote camera viewing and its native network runtime. */
 public final class CameraViewingShellMain {
     public static void main(String[] args) {
+        String stage = "arguments";
         try {
             if (args.length != 2 || !args[0].matches("[0-9]{1,10}") || args[1].isEmpty())
                 throw new IllegalArgumentException("Expected app UID and Extend APK identity");
@@ -29,27 +31,34 @@ public final class CameraViewingShellMain {
                 throw new SecurityException("Camera viewing worker must run as shell UID 2000");
             int ownerUid = Integer.parseInt(args[0]);
             if (Looper.myLooper() == null) Looper.prepareMainLooper();
+            stage = "process_lock";
             try (RandomAccessFile file = new RandomAccessFile(CameraViewingShellProtocol.LOCK_PATH, "rw")) {
                 FileLock acquired = file.getChannel().tryLock();
                 if (acquired == null) throw new IllegalStateException("Camera viewing worker already running");
                 try (FileLock lock = acquired) {
+                    stage = "shell_context";
                     Context system = TurnSignalShellMain.systemContext();
                     OemLogPolicy.initialize(system);
                     CameraShellMain.initializeSystemFontsForShell();
                     CameraViewingShellContext shellContext = new CameraViewingShellContext(
                             system, ownerUid, args[1]);
+                    stage = "runtime_create";
                     CameraViewingRuntime runtime = new CameraViewingRuntime(
                             shellContext.runtimeContext(), shellContext.privateDirectory(), ownerUid);
                     CameraViewingShellMain daemon = new CameraViewingShellMain(runtime, shellContext,
                             args[1], ownerUid);
+                    stage = "publish";
                     daemon.publish();
+                    stage = "event_loop";
                     Looper.loop();
                     daemon.close();
                 }
             }
             System.exit(0);
         } catch (Throwable error) {
-            System.err.println("camera_viewing_start_failed type=" + error.getClass().getSimpleName());
+            System.err.println(java.time.Instant.now() + " camera_viewing_start_failed stage=" + stage
+                    + " pid=" + Process.myPid() + " uid=" + Process.myUid() + "\n"
+                    + CameraViewingDiagnostics.describe(error));
             System.exit(1);
         }
     }
@@ -138,8 +147,7 @@ public final class CameraViewingShellMain {
         if (!closed.compareAndSet(false, true)) return;
         detachObserver(null);
         try { runtime.close(); }
-        catch (Throwable error) { System.err.println("camera_viewing_runtime_close_failed "
-                + error.getClass().getSimpleName()); }
+        catch (Throwable error) { CameraViewingDiagnostics.failure("runtime_close", "shared", error); }
         shellContext.close();
     }
 
@@ -224,8 +232,10 @@ public final class CameraViewingShellMain {
                         return false;
                 }
             } catch (JSONException | RuntimeException error) {
+                CameraViewingDiagnostics.failure("ipc_transaction_" + code, "shared", error);
                 if (reply != null) reply.writeException(new IllegalStateException(
-                        "camera viewing request failed (" + error.getClass().getSimpleName() + ")"));
+                        CameraViewingDiagnostics.safeText(error.getMessage())
+                                + " (" + error.getClass().getSimpleName() + ")"));
                 return true;
             }
         }

@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"tailscale.com/ipn"
@@ -19,99 +20,166 @@ import (
 )
 
 const (
-	tailscaleStatePrefix  = "tunnel.tailscale.state."
-	proxyCredentialHeader = "X-Byd-Extend-Proxy-Token"
-	tailnetUserHeader     = "X-Byd-Extend-Tailnet-User"
+	tailscaleStatePrefix      = "tunnel.tailscale.state."
+	tailscaleOperationTimeout = 30 * time.Second
+	tailscaleStatusTimeout    = 2 * time.Second
+	proxyCredentialHeader     = "X-Byd-Extend-Proxy-Token"
+	tailnetUserHeader         = "X-Byd-Extend-Tailnet-User"
 )
 
 type tailscaleProvider struct {
-	runtimeDir string
-	server     *tsnet.Server
-	listener   net.Listener
-	httpServer *http.Server
-	name       string
-	address    string
-	public     bool
+	runtimeDir      string
+	server          *tsnet.Server
+	listener        net.Listener
+	httpServer      *http.Server
+	name            string
+	address         string
+	public          bool
+	operationMu     sync.Mutex
+	operationCancel context.CancelFunc
+	cancelPending   bool
 }
 
 func newTailscaleProvider(runtimeDir string) *tailscaleProvider {
 	return &tailscaleProvider{runtimeDir: runtimeDir}
 }
 
+func (p *tailscaleProvider) beginOperation() (context.Context, func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), tailscaleOperationTimeout)
+	p.operationMu.Lock()
+	cancelPending := p.cancelPending
+	p.cancelPending = false
+	p.operationCancel = cancel
+	p.operationMu.Unlock()
+	if cancelPending {
+		cancel()
+	}
+	return ctx, func() {
+		cancel()
+		p.operationMu.Lock()
+		p.operationCancel = nil
+		p.operationMu.Unlock()
+	}
+}
+
+func (p *tailscaleProvider) cancelOperation() {
+	p.operationMu.Lock()
+	cancel := p.operationCancel
+	if cancel == nil {
+		p.cancelPending = true
+	}
+	p.operationMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (p *tailscaleProvider) clearPendingCancellation() {
+	p.operationMu.Lock()
+	p.cancelPending = false
+	p.operationMu.Unlock()
+}
+
 func (p *tailscaleProvider) Authorize(name, credential string) tunnelResult {
+	ctx, finish := p.beginOperation()
+	defer finish()
+	if ctx.Err() != nil {
+		return tailscaleOperationFailure(ctx, "tailscale_authorize_failed", "authorize", ctx.Err(), credential)
+	}
 	if !validDeviceName(name) {
 		return failure("invalid_name")
 	}
 	if p.server != nil && p.name != name {
 		if p.httpServer != nil {
-			return failure("provider_unavailable")
+			return failureWithReason("provider_unavailable", "authorize.replace_server", "the current Tailscale server is serving another device name", credential)
 		}
-		p.discardServer()
+		if err := p.discardServer(); err != nil {
+			return failureWithDiagnostic("provider_unavailable", "authorize.replace_server", err, credential)
+		}
 	}
 	if p.server == nil {
 		p.newServer(name, credential)
 	}
 	if err := p.server.Start(); err != nil {
 		p.server.AuthKey = ""
-		p.discardServer()
-		return failure("provider_unavailable")
+		result := tailscaleOperationFailure(ctx, "tailscale_start_failed", "authorize.server_start", err, credential)
+		return addSecondaryDiagnostic(result, "authorize.close_after_server_start_failure", p.discardServer(), credential)
 	}
 	// Auth keys are one-shot input; the long-lived node identity is kept only by Store.
 	p.server.AuthKey = ""
-	return p.waitForStatus(8 * time.Second)
+	return p.waitForStatus(ctx, "authorize", credential)
 }
 
 func (p *tailscaleProvider) Status(name string) tunnelResult {
+	ctx, finish := p.beginOperation()
+	defer finish()
+	if ctx.Err() != nil {
+		return tailscaleOperationFailure(ctx, "tailscale_status_failed", "status", ctx.Err())
+	}
+	return p.status(ctx, name)
+}
+
+func (p *tailscaleProvider) status(ctx context.Context, name string, secrets ...string) tunnelResult {
 	if !validDeviceName(name) {
 		return failure("invalid_name")
 	}
 	if p.server != nil && p.name != name && p.httpServer != nil {
-		return failure("provider_unavailable")
+		return failureWithReason("provider_unavailable", "status.replace_server", "the current Tailscale server is serving another device name", secrets...)
 	}
 	if p.server == nil || p.name != name {
 		if p.server != nil {
-			p.discardServer()
+			if err := p.discardServer(); err != nil {
+				return failureWithDiagnostic("provider_unavailable", "status.replace_server", err, secrets...)
+			}
 		}
 		p.newServer(name, "")
 	}
 	if err := p.server.Start(); err != nil {
-		p.discardServer()
-		return failure("provider_unavailable")
+		result := tailscaleOperationFailure(ctx, "tailscale_start_failed", "status.server_start", err, secrets...)
+		return addSecondaryDiagnostic(result, "status.close_after_server_start_failure", p.discardServer(), secrets...)
 	}
-	return p.waitForStatus(8 * time.Second)
+	return p.waitForStatus(ctx, "status", secrets...)
 }
 
-func (p *tailscaleProvider) waitForStatus(timeout time.Duration) tunnelResult {
+func (p *tailscaleProvider) waitForStatus(ctx context.Context, stage string, secrets ...string) tunnelResult {
 	client, err := p.server.LocalClient()
 	if err != nil {
-		return failure("provider_unavailable")
+		return tailscaleOperationFailure(ctx, "tailscale_local_client_failed", stage+".local_client", err, secrets...)
 	}
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return failure("provider_unavailable")
-		}
-		requestTimeout := min(remaining, 2*time.Second)
-		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-		status, statusErr := client.Status(ctx)
-		cancel()
-		if statusErr == nil && status != nil {
-			if status.AuthURL != "" {
-				return tunnelResult{State: "login_required", LoginURL: status.AuthURL}
-			}
-			if status.BackendState == string(ipn.Running) {
-				return tunnelResult{State: "authorized", Address: tailscaleAddress(status)}
-			}
-		}
-		if time.Until(deadline) <= 0 {
-			return failure("provider_unavailable")
-		}
-		time.Sleep(min(150*time.Millisecond, time.Until(deadline)))
+	statusCtx, cancel := context.WithTimeout(ctx, tailscaleStatusTimeout)
+	defer cancel()
+	status, err := client.Status(statusCtx)
+	if err != nil {
+		return tailscaleOperationFailure(ctx, "tailscale_status_failed", stage+".client_status", err, secrets...)
+	}
+	if status == nil {
+		return tunnelResult{State: "starting"}
+	}
+	if status.AuthURL != "" {
+		return tunnelResult{State: "login_required", LoginURL: status.AuthURL}
+	}
+	switch status.BackendState {
+	case string(ipn.NeedsLogin):
+		return tunnelResult{State: "login_required"}
+	case string(ipn.NeedsMachineAuth):
+		return tunnelResult{State: "approval_pending"}
+	case string(ipn.Running):
+		return tunnelResult{State: "authorized", Address: tailscaleAddress(status)}
+	case string(ipn.NoState), string(ipn.Starting):
+		return tunnelResult{State: "starting"}
+	case string(ipn.Stopped):
+		return failureWithReason("tailscale_backend_stopped", stage+".client_status", "backend_state=Stopped", secrets...)
+	default:
+		return failureWithReason("tailscale_backend_state_unknown", stage+".client_status", "backend_state="+status.BackendState, secrets...)
 	}
 }
 
 func (p *tailscaleProvider) Start(name string, localPort int, public bool, privateProxyCredential string) tunnelResult {
+	ctx, finish := p.beginOperation()
+	defer finish()
+	if ctx.Err() != nil {
+		return tailscaleOperationFailure(ctx, "tailscale_start_failed", "start", ctx.Err(), privateProxyCredential)
+	}
 	if !validDeviceName(name) {
 		return failure("invalid_name")
 	}
@@ -125,43 +193,41 @@ func (p *tailscaleProvider) Start(name string, localPort int, public bool, priva
 		if p.name == name && p.public == public {
 			return tunnelResult{State: "serving", Address: p.address}
 		}
-		return failure("provider_unavailable")
+		return failureWithReason("provider_unavailable", "start.replace_server", "the current Tailscale server is already serving a different configuration", privateProxyCredential)
 	}
-	status := p.Status(name)
-	if status.State == "error" {
-		return status
-	}
-	if status.State != "authorized" {
-		if status.State == "login_required" {
-			return status
-		}
-		return failure("login_required")
+	statusResult := p.status(ctx, name, privateProxyCredential)
+	if statusResult.State != "authorized" {
+		return statusResult
 	}
 	if p.server == nil {
-		return failure("not_authorized")
+		return failureWithReason("not_authorized", "start", "Tailscale server is unavailable", privateProxyCredential)
 	}
-	var listener net.Listener
-	var err error
-	if public {
-		listener, err = p.server.ListenFunnel("tcp", ":443", tsnet.FunnelOnly())
-	} else {
-		listener, err = p.server.ListenTLS("tcp", ":443")
-	}
+	status, err := p.server.Up(ctx)
 	if err != nil {
-		if public {
-			return failure("tailscale_funnel_failed")
-		}
-		return failure("tailscale_https_failed")
+		return tailscaleOperationFailure(ctx, "tailscale_up_failed", "start.up", err, privateProxyCredential)
 	}
-	address := tailscaleAddressFromServer(p.server)
+	address := tailscaleAddress(status)
 	if address == "" {
-		_ = listener.Close()
-		return failure("provider_unavailable")
+		return failureWithReason("tailscale_https_failed", "start.status", "running backend status has no HTTPS certificate domain", privateProxyCredential)
+	}
+	listener, err := p.listen(ctx, public)
+	if err != nil {
+		if ctx.Err() != nil {
+			// listen closes tsnet on cancellation and waits for its contextless
+			// listener call to return; drop only the in-memory server handle.
+			p.server = nil
+			p.address = ""
+			return tailscaleOperationFailure(ctx, "tailscale_listen_failed", "start.listen", err, privateProxyCredential)
+		}
+		if public {
+			return failureWithDiagnostic("tailscale_funnel_failed", "start.listen_funnel", err, privateProxyCredential)
+		}
+		return failureWithDiagnostic("tailscale_https_failed", "start.listen_tls", err, privateProxyCredential)
 	}
 	proxy, err := newLoopbackProxy(localPort)
 	if err != nil {
-		_ = listener.Close()
-		return failure("invalid_port")
+		result := failureWithDiagnostic("invalid_port", "start.local_proxy", err, privateProxyCredential)
+		return addSecondaryDiagnostic(result, "start.close_listener_after_proxy_failure", listener.Close(), privateProxyCredential)
 	}
 	handler := http.Handler(proxy)
 	if !public {
@@ -179,6 +245,65 @@ func (p *tailscaleProvider) Start(name string, localPort int, public bool, priva
 	p.name = name
 	go func() { _ = server.Serve(listener) }()
 	return tunnelResult{State: "serving", Address: address}
+}
+
+func (p *tailscaleProvider) listen(ctx context.Context, public bool) (net.Listener, error) {
+	type listenResult struct {
+		listener net.Listener
+		err      error
+	}
+	server := p.server
+	completed := make(chan listenResult, 1)
+	go func() {
+		var listener net.Listener
+		var err error
+		if public {
+			listener, err = server.ListenFunnel("tcp", ":443", tsnet.FunnelOnly())
+		} else {
+			listener, err = server.ListenTLS("tcp", ":443")
+		}
+		if ctx.Err() != nil && listener != nil {
+			_ = listener.Close()
+			listener = nil
+		}
+		completed <- listenResult{listener: listener, err: err}
+	}()
+	select {
+	case result := <-completed:
+		if ctx.Err() != nil {
+			if result.listener != nil {
+				_ = result.listener.Close()
+			}
+			return nil, ctx.Err()
+		}
+		return result.listener, result.err
+	case <-ctx.Done():
+		// tsnet.ListenTLS/ListenFunnel use a background context internally; Close releases that wait.
+		closeErr := server.Close()
+		result := <-completed
+		if result.listener != nil {
+			if err := result.listener.Close(); err != nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("close late tsnet listener: %w", err))
+			}
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close tsnet operation: %w", closeErr)
+		}
+		return nil, ctx.Err()
+	}
+}
+
+func tailscaleOperationFailure(ctx context.Context, code, stage string, err error, secrets ...string) tunnelResult {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return failureWithDiagnostic("provider_unavailable", stage, errors.Join(ctx.Err(), err), secrets...)
+		}
+		return tunnelResult{State: "cancelled", ErrorDetail: nativeErrorDetail(stage, err, secrets...)}
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return failureWithDiagnostic("tailscale_operation_timeout", stage, errors.Join(ctx.Err(), err), secrets...)
+	}
+	return failureWithDiagnostic(code, stage, err, secrets...)
 }
 
 func (p *tailscaleProvider) privateAdmissionHandler(next http.Handler, privateProxyCredential string) http.Handler {
@@ -205,62 +330,79 @@ func (p *tailscaleProvider) privateAdmissionHandler(next http.Handler, privatePr
 }
 
 func (p *tailscaleProvider) Stop() tunnelResult {
-	p.discardServer()
+	if err := p.discardServer(); err != nil {
+		return failureWithDiagnostic("provider_unavailable", "stop.close_server", err)
+	}
 	return tunnelResult{State: "stopped"}
 }
 
 func (p *tailscaleProvider) Revoke(name string) tunnelResult {
+	ctx, finish := p.beginOperation()
+	defer finish()
+	if ctx.Err() != nil {
+		return tailscaleOperationFailure(ctx, "tailscale_revoke_failed", "revoke", ctx.Err())
+	}
 	if !validDeviceName(name) {
 		return failure("invalid_name")
 	}
-	var logoutFailed bool
+	var primary tunnelResult
 	if p.server == nil {
 		p.newServer(name, "")
 		if err := p.server.Start(); err != nil {
-			logoutFailed = true
-			p.discardServer()
+			primary = tailscaleOperationFailure(ctx, "tailscale_start_failed", "revoke.server_start", err)
 		}
 	}
-	if p.server != nil && !logoutFailed {
+	if primary.State == "" && p.server != nil {
 		client, err := p.server.LocalClient()
 		if err != nil {
-			logoutFailed = true
+			primary = tailscaleOperationFailure(ctx, "tailscale_local_client_failed", "revoke.local_client", err)
 		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			status, statusErr := client.Status(ctx)
 			if statusErr != nil {
-				logoutFailed = true
+				primary = tailscaleOperationFailure(ctx, "tailscale_status_failed", "revoke.client_status", statusErr)
+			} else if status == nil {
+				primary = failureWithReason("tailscale_status_failed", "revoke.client_status", "backend returned no status")
 			} else if status != nil && status.AuthURL == "" {
-				logoutFailed = client.Logout(ctx) != nil
+				if err := client.Logout(ctx); err != nil {
+					primary = tailscaleOperationFailure(ctx, "tailscale_logout_failed", "revoke.logout", err)
+				}
 			}
-			cancel()
 		}
 	}
-	p.discardServer()
-	if logoutFailed {
-		return failure("provider_unavailable")
+	cleanupErr := p.discardServer()
+	if primary.State != "" {
+		return addSecondaryDiagnostic(primary, "revoke.close_server", cleanupErr)
+	}
+	if cleanupErr != nil {
+		return failureWithDiagnostic("provider_unavailable", "revoke.close_server", cleanupErr)
 	}
 	if err := deleteSecretPrefix(tailscaleStatePrefix); err != nil {
-		return failure("secure_store_error")
+		return failureWithDiagnostic("secure_store_error", "revoke.delete_state", err)
 	}
 	return tunnelResult{State: "revoked"}
 }
 
-func (p *tailscaleProvider) stopServing() {
+func (p *tailscaleProvider) stopServing() error {
+	var cleanupErr error
 	if p.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = p.httpServer.Shutdown(ctx)
+		if err := p.httpServer.Shutdown(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("shutdown HTTPS server: %w", err))
+		}
 		cancel()
 		p.httpServer = nil
 	}
 	if p.listener != nil {
-		_ = p.listener.Close()
+		if err := p.listener.Close(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("close tunnel listener: %w", err))
+		}
 		p.listener = nil
 	}
+	return cleanupErr
 }
 
 func (p *tailscaleProvider) CloseForModeChange() {
-	p.discardServer()
+	_ = p.discardServer()
 }
 
 func (p *tailscaleProvider) newServer(name, authKey string) {
@@ -275,17 +417,20 @@ func (p *tailscaleProvider) newServer(name, authKey string) {
 	}
 }
 
-func (p *tailscaleProvider) discardServer() {
-	p.stopServing()
+func (p *tailscaleProvider) discardServer() error {
+	cleanupErr := p.stopServing()
 	if p.server != nil {
-		_ = p.server.Close()
+		if err := p.server.Close(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("close tsnet server: %w", err))
+		}
 		p.server = nil
 	}
 	p.address = ""
+	return cleanupErr
 }
 
 func (p *tailscaleProvider) discardAfterFailure() {
-	p.discardServer()
+	_ = p.discardServer()
 }
 
 func (p *tailscaleProvider) NetworkChanged() {

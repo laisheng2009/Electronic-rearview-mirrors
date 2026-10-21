@@ -261,11 +261,13 @@ internal fun FormScope.CameraViewingScreen(
         editsForAuthorization.authorizationError(state.config.tailscalePublic) else null
     val canAuthorize = state.config.enabled && !state.busy && !state.revocationPending &&
         authInputsLoaded && (state.authorized || validationError == null)
+    val canCancel = state.busy && !state.revocationPending
     val shareable = !streamIdDirty && !passwordDirty && !tokenDirty && !state.viewerUrl.isNullOrBlank()
     val phaseStatus = when {
         state.revocationPending -> strings.motionText(R.string.cameras_revoke_pending)
         blocked || phase == "low_battery" -> strings.motionText(R.string.cameras_status_low_battery)
-        phase == "authorizing" -> strings.motionText(R.string.cameras_status_authorizing)
+        phase == "approval_pending" -> strings.motionText(R.string.cameras_status_approval_pending)
+        phase == "authorizing" || phase == "starting" -> strings.motionText(R.string.cameras_status_authorizing)
         phase == "connecting" -> strings.motionText(R.string.cameras_status_connecting)
         phase == "ready" -> strings.motionText(R.string.cameras_status_ready)
         phase == "preparing" -> strings.motionText(R.string.cameras_status_preparing)
@@ -275,7 +277,7 @@ internal fun FormScope.CameraViewingScreen(
     }
     val phaseTone = when {
         state.revocationPending -> StatusTone.Warning
-        blocked || phase in setOf("low_battery", "authorizing", "connecting", "preparing") -> StatusTone.Warning
+        blocked || phase in setOf("low_battery", "authorizing", "starting", "approval_pending", "connecting", "preparing") -> StatusTone.Warning
         phase == "connected" -> StatusTone.Ok
         phase == "error" -> StatusTone.Error
         phase == "ready" -> StatusTone.Ok
@@ -407,7 +409,7 @@ internal fun FormScope.CameraViewingScreen(
                 }
             }
         }
-        if (!state.revocationPending && (!state.authorized || phase == "error")) row("provider-actions") {
+        if (!state.revocationPending && (!state.authorized || phase == "error" || phase == "idle" || canCancel)) row("provider-actions") {
             Column(horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp,
@@ -421,11 +423,12 @@ internal fun FormScope.CameraViewingScreen(
                             submit()
                         }
                     }
-                    ActionButton(strings.motionText(if (state.authorized) R.string.cameras_retry_connection
+                    ActionButton(strings.motionText(if (canCancel) R.string.cancel
+                        else if (state.authorized) R.string.cameras_retry_connection
                         else R.string.cameras_authorize), colors, Modifier.weight(1f),
-                        enabled = canAuthorize) {
+                        enabled = canAuthorize || canCancel) {
                         clearFocusForAction()
-                        submit(authorize = true)
+                        if (canCancel) controller.cancel() else submit(authorize = true)
                     }
                 }
                 validationError?.let {

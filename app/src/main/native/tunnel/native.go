@@ -9,11 +9,14 @@ import "C"
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,14 +60,23 @@ type tunnelProvider interface {
 }
 
 type registeredProvider struct {
-	mu       sync.Mutex
-	provider tunnelProvider
-	closed   bool
+	mu                sync.Mutex
+	cancelMu          sync.Mutex
+	provider          tunnelProvider
+	closed            bool
+	operationInFlight bool
 }
+
+var (
+	nativeURLPattern     = regexp.MustCompile(`(?i)\b(?:https?|wss?)://[^\s<>"']+`)
+	nativeSecretPattern  = regexp.MustCompile(`(?i)(["']?(?:password|credential|privateProxyCredential|token|authkey|authorization|auth[_-]?url)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)`)
+	nativeAuthKeyPattern = regexp.MustCompile(`\btskey-[A-Za-z0-9_-]+\b`)
+)
 
 var (
 	providerMu             sync.Mutex
 	providers              = map[string]*registeredProvider{}
+	pendingCancellations   = map[string]struct{}{}
 	runtimeDir             string
 	networkEventGeneration atomic.Uint64
 	networkWorkerRunning   atomic.Bool
@@ -127,6 +139,28 @@ func camera_tunnel_network_changed() {
 	}
 }
 
+//export camera_tunnel_cancel
+func camera_tunnel_cancel(provider *C.char, instanceID *C.char) {
+	kind := C.GoString(provider)
+	id := C.GoString(instanceID)
+	if (kind != "tailscale" && kind != "zrok") || !validInstanceID(id) {
+		return
+	}
+	providerMu.Lock()
+	entry := providers[kind+"\x00"+id]
+	pendingCancellations[kind+"\x00"+id] = struct{}{}
+	if entry != nil {
+		entry.cancelMu.Lock()
+		if entry.operationInFlight {
+			if cancellable, ok := entry.provider.(interface{ cancelOperation() }); ok {
+				cancellable.cancelOperation()
+			}
+		}
+		entry.cancelMu.Unlock()
+	}
+	providerMu.Unlock()
+}
+
 func processNetworkChanges() {
 	for {
 		generation := networkEventGeneration.Load()
@@ -162,21 +196,26 @@ func camera_tunnel_call(operation *C.char, requestJSON *C.char) (result *C.char)
 	var entry *registeredProvider
 	var entryLocked bool
 	var providerKey string
+	var request tunnelRequest
 	defer func() {
-		if recover() != nil {
+		if panicValue := recover(); panicValue != nil {
 			if entryLocked {
 				entry.closed = true
 				safeDisposeProvider(entry.provider)
+				finishProviderOperation(entry)
 				entry.mu.Unlock()
 				entryLocked = false
 				removeProvider(providerKey, entry)
 			}
-			logNativePanic(operationName, stage, panicLocation())
-			result = C.CString(encodeResult(failure("runtime_error")))
+			location := panicLocation()
+			secrets := []string{request.Credential, request.PrivateProxyCredential}
+			panicDetail := fmt.Sprintf("panic=%s location=%s stack=%s", safePanicText(panicValue, secrets...),
+				location, safeNativeText(string(debug.Stack()), secrets...))
+			logNativePanic(operationName, stage, location, panicDetail)
+			result = C.CString(encodeResult(failureWithReason("runtime_error", stage, panicDetail, secrets...)))
 		}
 	}()
 	requestBytes := []byte(C.GoString(requestJSON))
-	var request tunnelRequest
 	if err := json.Unmarshal(requestBytes, &request); err != nil {
 		wipeBytes(requestBytes)
 		return C.CString(encodeResult(failure("invalid_request")))
@@ -204,6 +243,7 @@ func camera_tunnel_call(operation *C.char, requestJSON *C.char) (result *C.char)
 	entry.mu.Lock()
 	entryLocked = true
 	if entry.closed {
+		finishProviderOperation(entry)
 		entry.mu.Unlock()
 		entryLocked = false
 		return C.CString(encodeResult(failure("native_unavailable")))
@@ -226,6 +266,7 @@ func camera_tunnel_call(operation *C.char, requestJSON *C.char) (result *C.char)
 	case "revoke":
 		output = entry.provider.Revoke(request.Name)
 	}
+	finishProviderOperation(entry)
 	entry.mu.Unlock()
 	entryLocked = false
 	return C.CString(encodeResult(output))
@@ -244,10 +285,11 @@ func validOperation(value string) bool { return value != "unknown" }
 
 func lookupProvider(key, kind, operation string) *registeredProvider {
 	providerMu.Lock()
-	defer providerMu.Unlock()
 	entry := providers[key]
 	if entry == nil {
 		if operation == "stop" || operation == "close" {
+			delete(pendingCancellations, key)
+			providerMu.Unlock()
 			return nil
 		}
 		var provider tunnelProvider
@@ -260,7 +302,31 @@ func lookupProvider(key, kind, operation string) *registeredProvider {
 		entry = &registeredProvider{provider: provider}
 		providers[key] = entry
 	}
+	_, cancelPending := pendingCancellations[key]
+	if cancelPending {
+		delete(pendingCancellations, key)
+	}
+	if operation != "close" && operation != "stop" {
+		entry.cancelMu.Lock()
+		entry.operationInFlight = true
+		entry.cancelMu.Unlock()
+	}
+	if cancelPending && operation != "close" && operation != "stop" {
+		if cancellable, ok := entry.provider.(interface{ cancelOperation() }); ok {
+			cancellable.cancelOperation()
+		}
+	}
+	providerMu.Unlock()
 	return entry
+}
+
+func finishProviderOperation(entry *registeredProvider) {
+	entry.cancelMu.Lock()
+	entry.operationInFlight = false
+	if cancellable, ok := entry.provider.(interface{ clearPendingCancellation() }); ok {
+		cancellable.clearPendingCancellation()
+	}
+	entry.cancelMu.Unlock()
 }
 
 func currentRuntimeDirectory() string {
@@ -306,14 +372,32 @@ func panicLocation() string {
 	}
 }
 
-func logNativePanic(operation, stage, location string) {
+func logNativePanic(operation, stage, location, detail string) {
 	cOperation := C.CString(operation)
 	cStage := C.CString(stage)
 	cLocation := C.CString(location)
+	cDetail := C.CString(detail)
 	defer C.free(unsafe.Pointer(cOperation))
 	defer C.free(unsafe.Pointer(cStage))
 	defer C.free(unsafe.Pointer(cLocation))
-	C.camera_tunnel_log_panic(cOperation, cStage, cLocation)
+	defer C.free(unsafe.Pointer(cDetail))
+	C.camera_tunnel_log_panic(cOperation, cStage, cLocation, cDetail)
+}
+
+func safePanicText(value any, secrets ...string) (text string) {
+	defer func() {
+		if recover() != nil {
+			text = "panic value could not be rendered"
+		}
+	}()
+	switch value := value.(type) {
+	case error:
+		return safeNativeText(fmt.Sprintf("%T: %s", value, value.Error()), secrets...)
+	case string:
+		return safeNativeText(value, secrets...)
+	default:
+		return fmt.Sprintf("%T", value)
+	}
 }
 
 //export camera_tunnel_free
@@ -385,29 +469,92 @@ func deleteSecretPrefix(prefix string) error {
 
 func failure(code string) tunnelResult {
 	details := map[string]string{
-		"invalid_request":            "The tunnel request is invalid.",
-		"invalid_provider":           "The selected tunnel provider is not supported.",
-		"invalid_name":               "Use a valid lowercase device or connection name.",
-		"invalid_port":               "The local camera server is not available on the requested port.",
-		"credential_required":        "Enter the provider credential to authorize this tunnel.",
-		"login_required":             "Complete provider sign-in before starting the tunnel.",
-		"not_authorized":             "Authorize this provider before starting the tunnel.",
-		"private_credential_missing": "Private camera access could not be established.",
-		"provider_unavailable":       "The tunnel provider could not complete the request. Check its account and network settings.",
-		"tailscale_https_failed":     "Private Tailscale HTTPS access could not be started.",
-		"tailscale_funnel_failed":    "Tailscale Funnel could not be started.",
-		"zrok_enable_failed":         "The vehicle could not be registered with Zrok.",
-		"zrok_share_failed":          "The Zrok viewing link could not be created.",
-		"secure_store_error":         "Encrypted tunnel state could not be read or saved.",
-		"revoke_required":            "Revoke the current Zrok account before authorizing another account.",
-		"native_unavailable":         "The secure tunnel runtime is unavailable on this device.",
-		"runtime_error":              "The secure tunnel runtime could not complete the request.",
+		"invalid_request":             "The tunnel request is invalid.",
+		"invalid_provider":            "The selected tunnel provider is not supported.",
+		"invalid_name":                "Use a valid lowercase device or connection name.",
+		"invalid_port":                "The local camera server is not available on the requested port.",
+		"credential_required":         "Enter the provider credential to authorize this tunnel.",
+		"login_required":              "Complete provider sign-in before starting the tunnel.",
+		"not_authorized":              "Authorize this provider before starting the tunnel.",
+		"private_credential_missing":  "Private camera access could not be established.",
+		"provider_unavailable":        "The tunnel provider could not complete the request.",
+		"tailscale_https_failed":      "Private Tailscale HTTPS access could not be started.",
+		"tailscale_funnel_failed":     "Tailscale Funnel could not be started.",
+		"tailscale_start_failed":      "The Tailscale operation could not be started.",
+		"tailscale_status_failed":     "Tailscale status could not be read.",
+		"tailscale_logout_failed":     "The Tailscale session could not be revoked.",
+		"tailscale_operation_timeout": "The Tailscale operation exceeded its time limit.",
+		"zrok_enable_failed":          "The vehicle could not be registered with Zrok.",
+		"zrok_share_failed":           "The Zrok viewing link could not be created.",
+		"zrok_operation_timeout":      "The Zrok operation exceeded its time limit.",
+		"secure_store_error":          "Encrypted tunnel state could not be read or saved.",
+		"revoke_required":             "Revoke the current Zrok account before authorizing another account.",
+		"native_unavailable":          "The secure tunnel runtime is unavailable on this device.",
+		"runtime_error":               "The secure tunnel runtime could not complete the request.",
 	}
 	detail, ok := details[code]
 	if !ok {
-		code, detail = "runtime_error", details["runtime_error"]
+		detail = details["runtime_error"]
 	}
 	return tunnelResult{State: "error", ErrorCode: code, ErrorDetail: detail}
+}
+
+func failureWithDiagnostic(code, stage string, err error, secrets ...string) tunnelResult {
+	result := failure(code)
+	if err != nil {
+		result.ErrorDetail = nativeErrorDetail(stage, err, secrets...)
+	}
+	return result
+}
+
+func failureWithReason(code, stage, reason string, secrets ...string) tunnelResult {
+	result := failure(code)
+	result.ErrorDetail = "stage=" + safeNativeText(stage, secrets...) + " cause=" + safeNativeText(reason, secrets...)
+	return result
+}
+
+func addSecondaryDiagnostic(result tunnelResult, stage string, err error, secrets ...string) tunnelResult {
+	if err != nil {
+		if result.State == "cancelled" {
+			result.State = "error"
+			result.ErrorCode = "provider_unavailable"
+		}
+		result.ErrorDetail += " secondary=" + nativeErrorDetail(stage, err, secrets...)
+	}
+	return result
+}
+
+func nativeErrorDetail(stage string, err error, secrets ...string) string {
+	causes := make([]string, 0, 3)
+	appendNativeCauses(&causes, err, secrets, 0)
+	return "stage=" + safeNativeText(stage, secrets...) + " cause=" + strings.Join(causes, " <- ")
+}
+
+func appendNativeCauses(causes *[]string, err error, secrets []string, depth int) {
+	if err == nil || depth >= 16 {
+		return
+	}
+	*causes = append(*causes, fmt.Sprintf("%T: %s", err, safeNativeText(err.Error(), secrets...)))
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, cause := range joined.Unwrap() {
+			appendNativeCauses(causes, cause, secrets, depth+1)
+		}
+		return
+	}
+	appendNativeCauses(causes, errors.Unwrap(err), secrets, depth+1)
+}
+
+func safeNativeText(value string, secrets ...string) string {
+	value = strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " ")
+	value = nativeURLPattern.ReplaceAllString(value, "[url redacted]")
+	value = nativeSecretPattern.ReplaceAllString(value, "$1[redacted]")
+	value = nativeAuthKeyPattern.ReplaceAllString(value, "[redacted]")
+	for _, secret := range secrets {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[redacted]")
+		}
+	}
+	return strings.TrimSpace(value)
 }
 
 func encodeResult(result tunnelResult) string {

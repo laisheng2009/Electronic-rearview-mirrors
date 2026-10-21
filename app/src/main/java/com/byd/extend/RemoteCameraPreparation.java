@@ -94,7 +94,7 @@ public final class RemoteCameraPreparation {
         String apkIdentity = CameraViewingShellProtocol.currentApkIdentity(context);
         IBinder worker = viewingWorker(context);
         int workerPid = MotionDetectorClient.verifiedWorkerPid(worker, apkIdentity);
-        ChargeObserver callback = new ChargeObserver(workerPid, listener);
+        ChargeObserver callback = new ChargeObserver(worker, workerPid, listener);
         Parcel data = Parcel.obtain(), reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
@@ -107,7 +107,7 @@ public final class RemoteCameraPreparation {
         } catch (Throwable failure) {
             callback.detach();
             if (failure instanceof Exception) throw (Exception) failure;
-            throw new IllegalStateException("shared camera charge observation failed");
+            throw new IllegalStateException("shared camera charge observation failed", failure);
         } finally { data.recycle(); reply.recycle(); }
         return () -> {
             if (!callback.detach()) return;
@@ -130,16 +130,25 @@ public final class RemoteCameraPreparation {
     }
 
     private static final class ChargeObserver extends Binder {
-        private final int workerPid;
+        private final IBinder worker;
         private final Consumer<CameraChargePolicy.State> listener;
         private final AtomicBoolean active = new AtomicBoolean(true);
+        private final IBinder.DeathRecipient workerDeath = this::detach;
 
-        ChargeObserver(int workerPid, Consumer<CameraChargePolicy.State> listener) {
-            this.workerPid = workerPid;
+        ChargeObserver(IBinder worker, int workerPid, Consumer<CameraChargePolicy.State> listener)
+                throws RemoteException {
+            if (worker == null || !worker.isBinderAlive() || workerPid <= 0)
+                throw new IllegalArgumentException("verified Motion worker capability required");
+            this.worker = worker;
             this.listener = listener;
+            worker.linkToDeath(workerDeath, 0);
         }
 
-        boolean detach() { return active.getAndSet(false); }
+        boolean detach() {
+            if (!active.getAndSet(false)) return false;
+            try { worker.unlinkToDeath(workerDeath, 0); } catch (Throwable ignored) { }
+            return true;
+        }
 
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
@@ -148,7 +157,9 @@ public final class RemoteCameraPreparation {
                 return true;
             }
             if (code != MotionDetectorProtocol.CB_VIEW_CHARGE) return false;
-            if (!active.get() || Binder.getCallingUid() != 2000 || Binder.getCallingPid() != workerPid)
+            // One-way callbacks have no usable caller PID. This endpoint was passed only to the
+            // APK-verified worker Binder above and is revoked with that exact Binder's lifetime.
+            if (!active.get() || Binder.getCallingUid() != 2000 || !worker.isBinderAlive())
                 throw new SecurityException("Motion charge callback sender denied");
             data.enforceInterface(MotionDetectorProtocol.VIEW_CHARGE_CALLBACK_DESCRIPTOR);
             CameraChargePolicy.State state = MotionDetectorProtocol.readChargeState(data);

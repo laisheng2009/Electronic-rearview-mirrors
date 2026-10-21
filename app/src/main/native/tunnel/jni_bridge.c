@@ -10,6 +10,7 @@ extern char *camera_tunnel_call(char *operation, char *request_json);
 extern void camera_tunnel_free(char *value);
 extern int camera_tunnel_set_runtime_dir(char *path);
 extern void camera_tunnel_network_changed(void);
+extern void camera_tunnel_cancel(char *provider, char *instance_id);
 
 static JavaVM *g_vm;
 static jobject g_secret_store;
@@ -209,12 +210,23 @@ void camera_secret_clear(void *value, size_t length) {
     if (value != NULL) wipe(value, length);
 }
 
-void camera_tunnel_log_panic(const char *operation, const char *stage, const char *location) {
+void camera_tunnel_log_panic(const char *operation, const char *stage, const char *location, const char *detail) {
     __android_log_print(ANDROID_LOG_ERROR, "CameraTunnel",
             "native_panic operation=%s stage=%s at=%s",
             operation == NULL ? "unknown" : operation,
             stage == NULL ? "unknown" : stage,
             location == NULL ? "unknown" : location);
+    if (detail == NULL) return;
+    const size_t chunk_size = 900;
+    size_t length = strlen(detail);
+    for (size_t offset = 0, chunk = 0; offset < length; offset += chunk_size, ++chunk) {
+        size_t remaining = length - offset;
+        int count = (int)(remaining < chunk_size ? remaining : chunk_size);
+        __android_log_print(ANDROID_LOG_ERROR, "CameraTunnel",
+                "native_panic_detail operation=%s stage=%s part=%zu: %.*s",
+                operation == NULL ? "unknown" : operation,
+                stage == NULL ? "unknown" : stage, chunk, count, detail + offset);
+    }
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
@@ -272,6 +284,20 @@ Java_com_byd_extend_remote_tunnel_NativeTunnelBridge_nativeNetworkChanged(
     (void)env;
     (void)clazz;
     camera_tunnel_network_changed();
+}
+
+JNIEXPORT void JNICALL
+Java_com_byd_extend_remote_tunnel_NativeTunnelBridge_nativeCancel(
+    JNIEnv *env, jclass clazz, jstring provider, jstring instance_id) {
+    (void)clazz;
+    if (provider == NULL || instance_id == NULL) return;
+    const char *provider_text = (*env)->GetStringUTFChars(env, provider, NULL);
+    const char *instance_text = (*env)->GetStringUTFChars(env, instance_id, NULL);
+    if (provider_text != NULL && instance_text != NULL) {
+        camera_tunnel_cancel((char *)provider_text, (char *)instance_text);
+    }
+    if (instance_text != NULL) (*env)->ReleaseStringUTFChars(env, instance_id, instance_text);
+    if (provider_text != NULL) (*env)->ReleaseStringUTFChars(env, provider, provider_text);
 }
 
 JNIEXPORT jstring JNICALL

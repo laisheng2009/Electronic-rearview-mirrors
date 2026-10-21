@@ -1,7 +1,7 @@
 package com.byd.extend.remote.tunnel
 
 import android.content.Context
-import android.util.Log
+import com.byd.extend.remote.CameraViewingDiagnostics
 import com.byd.extend.remote.security.KeystoreSecretStore
 import com.byd.extend.remote.security.TunnelSecretStore
 import java.io.File
@@ -81,8 +81,15 @@ class CameraTunnelProvider(
             } else {
                 try {
                     executor.execute {
+                        if (isCloseRequested()) {
+                            runCatching { callback(cancelledResult()) }
+                            return@execute
+                        }
                         val result = try {
                             ensureNativeInitialized()
+                            if (isCloseRequested()) {
+                                cancelledResult()
+                            } else {
                             val request = JSONObject()
                                 .put("provider", kind)
                                 .put("instanceId", instanceId)
@@ -94,13 +101,15 @@ class CameraTunnelProvider(
                                 request.put("privateProxyCredential", privateProxyCredential)
                             }
                             parseResult(NativeTunnelBridge.nativeCall(operation, request.toString()))
+                            }
                         } catch (failure: UnsatisfiedLinkError) {
-                            logFailure(operation, failure)
+                            logFailure(operation, failure, credential, privateProxyCredential)
                             unavailableResult()
                         } catch (failure: Exception) {
-                            logFailure(operation, failure)
+                            logFailure(operation, failure, credential, privateProxyCredential)
                             unavailableResult()
                         }
+                        logNativeFailure(operation, result, credential, privateProxyCredential)
                         runCatching { callback(result) }
                     }
                     true
@@ -132,13 +141,25 @@ class CameraTunnelProvider(
         }
     }
 
+    private fun isCloseRequested(): Boolean = synchronized(lifecycleLock) { closeRequested }
+
     override fun close() = close { }
 
     fun close(callback: (CameraTunnelResult) -> Unit) {
-        var releaseNow = false
         synchronized(lifecycleLock) {
             if (closeRequested) return
             closeRequested = true
+        }
+        if (nativeConfiguration != null) {
+            try {
+                NativeTunnelBridge.nativeCancel(kind, instanceId)
+            } catch (failure: UnsatisfiedLinkError) {
+                logFailure("cancel", failure)
+            } catch (failure: Exception) {
+                logFailure("cancel", failure)
+            }
+        }
+        val queued = synchronized(lifecycleLock) {
             try {
                 executor.execute {
                     val result = try {
@@ -158,20 +179,30 @@ class CameraTunnelProvider(
                         logFailure("close", failure)
                         unavailableResult()
                     }
+                    logNativeFailure("close", result)
                     runCatching { callback(result) }
                 }
+                true
             } catch (_: RejectedExecutionException) {
-                releaseNow = true
+                false
             }
         }
-        if (releaseNow) {
+        if (!queued) {
             runCatching { callback(unavailableResult()) }
         }
     }
 
-    private fun logFailure(operation: String, failure: Throwable) {
-        Log.w("CameraViewing", "tunnel_$operation provider=$kind type=${failure.javaClass.simpleName}" +
-            " cause=${failure.cause?.javaClass?.simpleName ?: "none"}")
+    private fun logFailure(operation: String, failure: Throwable, vararg secrets: String?) {
+        val knownSecrets = secrets.filterNotNull().toTypedArray()
+        CameraViewingDiagnostics.failure("tunnel_$operation generation=$instanceId", kind, failure, *knownSecrets)
+    }
+
+    private fun logNativeFailure(operation: String, result: CameraTunnelResult, vararg secrets: String?) {
+        if (result.state != "error") return
+        val knownSecrets = (secrets.filterNotNull() + listOfNotNull(result.loginUrl)).toTypedArray()
+        val code = CameraViewingDiagnostics.safeText(result.errorCode ?: "missing", *knownSecrets)
+        val detail = CameraViewingDiagnostics.safeText(result.errorDetail ?: "native error without detail", *knownSecrets)
+        CameraViewingDiagnostics.detail("native_$operation generation=$instanceId", kind, "code=$code cause=$detail")
     }
 
     private data class NativeConfiguration(
@@ -213,7 +244,7 @@ class CameraTunnelProvider(
             if (nativeConfiguration == null) return
             runCatching { NativeTunnelBridge.nativeNetworkChanged() }
                 .onFailure { failure ->
-                    Log.w("CameraViewing", "tunnel_network_changed type=${failure.javaClass.simpleName}")
+                    CameraViewingDiagnostics.failure("tunnel_network_changed", "all", failure)
                 }
         }
 
@@ -233,6 +264,11 @@ class CameraTunnelProvider(
             state = "error",
             errorCode = "native_unavailable",
             errorDetail = "The secure tunnel runtime is unavailable on this device.",
+        )
+
+        private fun cancelledResult() = CameraTunnelResult(
+            state = "cancelled",
+            errorDetail = "The tunnel operation was cancelled because its provider was closed.",
         )
     }
 }

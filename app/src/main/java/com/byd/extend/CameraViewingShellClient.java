@@ -32,6 +32,7 @@ public final class CameraViewingShellClient implements AutoCloseable {
     private ShellCallback callback;
     private volatile Listener listener;
     private volatile int helperPid;
+    private long helperGeneration;
     private boolean closed;
 
     public CameraViewingShellClient(Context context) {
@@ -145,23 +146,39 @@ public final class CameraViewingShellClient implements AutoCloseable {
     }
 
     public void setListener(Listener next) throws Exception {
-        IBinder target = requireHelper();
-        ShellCallback nextCallback = next == null ? null : new ShellCallback();
-        IBinder previousCallback;
+        IBinder target;
+        ShellCallback previousCallback;
+        ShellCallback nextCallback;
         synchronized (lock) {
-            listener = next;
+            target = requireHelper();
             previousCallback = callback;
+            if (previousCallback != null) previousCallback.deactivate();
+            listener = next;
+            nextCallback = next == null ? null : new ShellCallback(target, helperGeneration, next);
             callback = nextCallback;
-            if (nextCallback != null) nextCallback.listener = next;
         }
-        if (previousCallback != null) detach(target, previousCallback);
-        if (nextCallback != null) observe(target, nextCallback);
+        if (previousCallback != null) detach(previousCallback.owner, previousCallback);
+        if (nextCallback == null) return;
+        try {
+            observe(target, nextCallback);
+        } catch (Throwable failure) {
+            synchronized (lock) {
+                if (callback == nextCallback) {
+                    callback = null;
+                    listener = null;
+                    nextCallback.deactivate();
+                }
+            }
+            if (failure instanceof Exception) throw (Exception) failure;
+            if (failure instanceof Error) throw (Error) failure;
+            throw new IllegalStateException("camera viewing observer registration failed", failure);
+        }
     }
 
     /** Detaches this client from the helper; it deliberately leaves the independent process running. */
     @Override public void close() {
         IBinder target;
-        IBinder oldCallback;
+        ShellCallback oldCallback;
         synchronized (lock) {
             if (closed) return;
             closed = true;
@@ -169,6 +186,7 @@ public final class CameraViewingShellClient implements AutoCloseable {
             oldCallback = callback;
             listener = null;
             callback = null;
+            if (oldCallback != null) oldCallback.deactivate();
             if (target != null && helperDeath != null) {
                 try { target.unlinkToDeath(helperDeath, 0); } catch (Throwable ignored) { }
             }
@@ -176,8 +194,7 @@ public final class CameraViewingShellClient implements AutoCloseable {
             helperDeath = null;
             helperPid = 0;
         }
-        if (target != null && oldCallback != null) detach(target, oldCallback);
-        if (oldCallback instanceof ShellCallback) ((ShellCallback) oldCallback).listener = null;
+        if (oldCallback != null) detach(oldCallback.owner, oldCallback);
     }
 
     /** The only process-terminating operation; ordinary close() only detaches. */
@@ -190,7 +207,7 @@ public final class CameraViewingShellClient implements AutoCloseable {
     private void adopt(IBinder candidate, int pid) throws RemoteException {
         if (helper == candidate && helperPid == pid) return;
         ShellCallback oldCallback = callback;
-        if (oldCallback != null) oldCallback.listener = null;
+        if (oldCallback != null) oldCallback.deactivate();
         if (helper != null && helperDeath != null) {
             try { helper.unlinkToDeath(helperDeath, 0); } catch (Throwable ignored) { }
         }
@@ -199,6 +216,7 @@ public final class CameraViewingShellClient implements AutoCloseable {
         helper = candidate;
         helperPid = pid;
         helperDeath = death;
+        helperGeneration++;
         callback = null;
     }
 
@@ -211,7 +229,8 @@ public final class CameraViewingShellClient implements AutoCloseable {
             helperDeath = null;
             ShellCallback oldCallback = callback;
             callback = null;
-            if (oldCallback != null) oldCallback.listener = null;
+            if (oldCallback != null) oldCallback.deactivate();
+            helperGeneration++;
             target = listener;
         }
         if (target != null) target.onHelperDied();
@@ -326,7 +345,28 @@ public final class CameraViewingShellClient implements AutoCloseable {
     }
 
     private final class ShellCallback extends Binder {
+        final IBinder owner;
+        final long generation;
         volatile Listener listener;
+        volatile boolean active = true;
+
+        ShellCallback(IBinder owner, long generation, Listener listener) {
+            this.owner = owner;
+            this.generation = generation;
+            this.listener = listener;
+        }
+
+        void deactivate() {
+            active = false;
+            listener = null;
+        }
+
+        private boolean isCurrent() {
+            synchronized (lock) {
+                return active && !closed && helper == owner && helperGeneration == generation
+                        && callback == this && owner.isBinderAlive();
+            }
+        }
 
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
@@ -335,7 +375,7 @@ public final class CameraViewingShellClient implements AutoCloseable {
                 return true;
             }
             if (code != CameraViewingShellProtocol.CB_SNAPSHOT) return false;
-            if (Binder.getCallingUid() != 2000 || Binder.getCallingPid() != helperPid)
+            if (Binder.getCallingUid() != 2000 || !isCurrent())
                 throw new SecurityException("camera viewing callback sender denied");
             data.enforceInterface(CameraViewingShellProtocol.CALLBACK_DESCRIPTOR);
             String json = data.readString();

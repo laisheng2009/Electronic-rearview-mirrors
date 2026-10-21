@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.SystemClock
-import android.util.Log
 import com.byd.extend.CameraChargePolicy
 import com.byd.extend.RemoteCameraPreparation
 import com.byd.extend.RemoteCameraSource
@@ -37,13 +36,28 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     @Volatile private var listener: Consumer<JSONObject>? = null
     private var chargeObservation: AutoCloseable? = null
     private var networkRegistered = false
+    private var activeNetwork: Network? = null
     @Volatile private var chargeState: CameraChargePolicy.State? = null
     private val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { CameraTunnelProvider.notifyNetworkChanged() }
-        override fun onLost(network: Network) { CameraTunnelProvider.notifyNetworkChanged() }
+        override fun onAvailable(network: Network) {
+            CameraTunnelProvider.notifyNetworkChanged()
+            execute {
+                if (activeNetwork != network) {
+                    activeNetwork = network
+                    profiles.values.forEach { it.run?.publisher?.networkChanged() }
+                }
+            }
+        }
+        override fun onLost(network: Network) {
+            CameraTunnelProvider.notifyNetworkChanged()
+            execute { if (activeNetwork == network) activeNetwork = null }
+        }
         override fun onLinkPropertiesChanged(network: Network, properties: android.net.LinkProperties) {
             CameraTunnelProvider.notifyNetworkChanged()
+            execute {
+                if (activeNetwork == network) profiles.values.forEach { it.run?.publisher?.networkChanged() }
+            }
         }
     }
 
@@ -84,7 +98,9 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             "authorize", "reconnect" -> {
                 val profile = profile(payload)
                 require(!profile.pendingRevoke) { "revocation_pending" }
-                require(profile.phase !in setOf("authorizing", "connecting")) { "authorization_in_progress" }
+                require(profile.phase !in setOf("authorizing", "starting", "approval_pending", "connecting")) {
+                    "authorization_in_progress"
+                }
                 if (!profile.authorized) {
                     require(operation == "authorize") { "not_authorized" }
                     val config = payload.getJSONObject("profile")
@@ -97,6 +113,10 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                 connect(profile, true)
             }
             "revoke" -> revoke(profile(payload))
+            "cancel" -> profile(payload).let { p ->
+                require(!p.pendingRevoke) { "revocation_pending" }
+                stop(p); p.error = null
+            }
             "reconfigured" -> {
                 observeCharge()
                 profiles.values.forEach { p -> p.run?.let { run ->
@@ -111,7 +131,24 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             }
             "shutdown" -> configure(false)
             else -> throw IllegalArgumentException("unsupported_operation")
-        } } finally { publish() }
+        } } catch (failure: Exception) {
+            val method = payload.optString("transport").takeIf { it in METHODS }
+            val config = payload.optJSONObject("profile") ?: method?.let { profiles[it]?.config }
+            val reference = SystemClock.elapsedRealtimeNanos().toString(36)
+            CameraViewingDiagnostics.failure("request_${operation}_$reference", method ?: "shared", failure,
+                config?.optString("password"), config?.optString("token"))
+            if (method != null && operation in setOf("authorize", "reconnect", "cancel", "revoke") &&
+                failure.message != "authorization_in_progress" && failure.message != "revocation_pending") {
+                profiles[method]?.let { failed(it, failure) }
+            }
+            // The source has the complete redacted chain; never send credential-bearing messages over IPC.
+            val message = "viewing request=$operation ref=$reference cause=${failure.javaClass.simpleName}"
+            throw when (failure) {
+                is SecurityException -> SecurityException(message)
+                is IllegalArgumentException -> IllegalArgumentException(message)
+                else -> IllegalStateException(message)
+            }
+        } finally { publish() }
         snapshot()
     }.get(30, TimeUnit.SECONDS)
     } catch (failure: ExecutionException) {
@@ -204,14 +241,16 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     }
 
     private fun providerResult(p: Profile, run: Run, result: CameraTunnelResult) {
-        result.errorCode?.let { throw RuntimeFailure(it) }
+        result.errorCode?.let { throw RuntimeFailure(it,
+            IllegalStateException(result.errorDetail ?: "native provider returned $it without detail")) }
         for (address in listOfNotNull(result.address, result.loginUrl)) {
             val uri = URI(address)
             require(uri.scheme == "https" && !uri.host.isNullOrBlank() && uri.userInfo == null)
         }
         when (result.state) {
-            "login_required" -> {
-                p.phase = "authorizing"; p.login = result.loginUrl
+            "login_required", "starting", "approval_pending" -> {
+                p.phase = if (result.state == "login_required") "authorizing" else result.state
+                p.login = result.loginUrl
                 if (run.interactive && p.login != null) {
                     p.authorizationRequest = SystemClock.elapsedRealtimeNanos(); run.interactive = false
                 }
@@ -276,24 +315,32 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             if (chargeObservation == null) observeCharge()
             RemoteCameraPreparation.readChargeState(context).also { chargeState = it }
         } catch (failure: Exception) {
-            val type = failure.javaClass.simpleName
-            if (run.preparationError != type) {
-                run.preparationError = type
-                Log.w("CameraViewing", "stage=charge_prepare provider=${p.method} type=$type")
+            val diagnostic = CameraViewingDiagnostics.describe(failure,
+                p.config.optString("password"), p.config.optString("token"))
+            if (run.preparationError != diagnostic) {
+                run.preparationError = diagnostic
+                CameraViewingDiagnostics.failure("charge_prepare", p.method, failure,
+                    p.config.optString("password"), p.config.optString("token"))
             }
-            if (SystemClock.elapsedRealtime() >= run.deadline) throw RuntimeFailure("camera_backend_unavailable")
+            if (SystemClock.elapsedRealtime() >= run.deadline) throw RuntimeFailure("camera_backend_unavailable", failure)
             retryPreparation(p, run); return
         }
         if (charge.isBlocked) { closeVideo(run); p.phase = "low_battery"; return }
         p.phase = "preparing"
-        val camera = run.source ?: RemoteCameraSource(context) {
-            execute(p, run) { throw RuntimeFailure("camera_unavailable") }
+        val camera = run.source ?: RemoteCameraSource(context) { reason ->
+            execute(p, run) { throw RuntimeFailure("camera_unavailable", IllegalStateException(reason)) }
         }.also { run.source = it }
-        val ready = try { camera.prepare() } catch (_: Exception) { false }
+        val ready = try { camera.prepare() } catch (failure: Exception) {
+            CameraViewingDiagnostics.failure("camera_prepare", p.method, failure)
+            if (SystemClock.elapsedRealtime() >= run.deadline) throw RuntimeFailure("camera_unavailable", failure)
+            false
+        }
         if (!ready) { retryPreparation(p, run); return }
-        val surface = try { run.publisher?.startVideo() ?: CameraHlsEncoder {
-            execute(p, run) { throw RuntimeFailure("encoder_unavailable") }
-        }.also { run.encoder = it }.start() } catch (_: Exception) { throw RuntimeFailure("encoder_unavailable") }
+        val surface = try { run.publisher?.startVideo() ?: CameraHlsEncoder { failure ->
+            execute(p, run) { throw RuntimeFailure("encoder_unavailable", failure) }
+        }.also { run.encoder = it }.start() } catch (failure: Exception) {
+            throw RuntimeFailure("encoder_unavailable", failure)
+        }
         camera.attach(surface, CameraHlsEncoder.WIDTH, CameraHlsEncoder.HEIGHT)
         run.video = true; p.phase = "connected"
     }
@@ -354,7 +401,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         val provider = CameraTunnelProvider(context, p.method, p.config.getString("name"), store,
             nativeDirectory, nativeLibrary).also { run.provider = it }
         provider.revoke { result -> execute(p, run) {
-            result.errorCode?.let { throw RuntimeFailure(it) }
+            result.errorCode?.let { throw RuntimeFailure(it, IllegalStateException(result.errorDetail ?: it)) }
             stop(p); clearProfile(p)
         } }
     }
@@ -394,9 +441,13 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         val code = ((failure as? RuntimeFailure)?.code ?: if (failure is SecurityException)
             "secure_store_error" else "connection_failed")
             .takeIf { it.matches(Regex("[a-z_]{1,64}")) } ?: "connection_failed"
-        Log.w("CameraViewing", "runtime provider=${p?.method ?: "shared"} error=$code type=${failure.javaClass.simpleName}")
+        CameraViewingDiagnostics.failure("runtime_$code", p?.method ?: "shared", failure,
+            p?.config?.optString("password"), p?.config?.optString("token"))
         if (p != null) {
-            runCatching { stop(p) }
+            try { stop(p) } catch (cleanup: Exception) {
+                CameraViewingDiagnostics.failure("cleanup_after_$code", p.method, cleanup,
+                    p.config.optString("password"), p.config.optString("token"))
+            }
             p.phase = if (p.pendingRevoke) "revoke_pending" else "error"
             p.error = code
         }
@@ -411,7 +462,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         }.get(30, TimeUnit.SECONDS)
         owner.shutdown()
     }
-    private class RuntimeFailure(val code: String) : Exception()
+    private class RuntimeFailure(val code: String, cause: Throwable? = null) : Exception(code, cause)
     companion object {
         private val METHODS = listOf("vdo", "tailscale", "zrok")
         private fun randomProof() = ByteArray(32).also(SecureRandom()::nextBytes)

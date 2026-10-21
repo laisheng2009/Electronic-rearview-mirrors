@@ -45,7 +45,6 @@ final class CameraGpuOutput extends Binder {
     interface FrameListener { void frame(long timestamp, long presentation, long mapping, long geometry); }
     private FrameListener frameListener;
     private Surface alternateSurface;
-    private boolean alternateSent;
     private boolean staging;
     private int outputSlot;
     private long presentationRevision;
@@ -143,8 +142,7 @@ final class CameraGpuOutput extends Binder {
     private void writePresentation(Parcel data) {
         data.writeLong(presentationRevision);
         data.writeInt(outputSlot);
-        data.writeTypedObject(alternateSent ? null : alternateSurface, 0);
-        if (alternateSurface != null) alternateSent = true;
+        data.writeTypedObject(alternateSurface, 0);
         writeMapping(data, request);
         data.writeLong(geometryRevision);
         data.writeFloatArray(geometry);
@@ -385,15 +383,21 @@ final class CameraGpuOutput extends Binder {
             int slot = parcel.readInt();
             Surface alternate = parcel.readTypedObject(Surface.CREATOR);
             try {
-                if (revision < 0 || slot < 0 || slot > 1)
+                if (revision < 0)
                     throw new IllegalArgumentException("invalid GPU presentation");
+                if (closed || revision <= presentationRevision) return;
+                if (slot < 0 || slot > 1)
+                    throw new IllegalArgumentException("invalid GPU presentation");
+                if (slot == 1 && alternate == null)
+                    throw new IllegalArgumentException("incomplete GPU presentation");
+                if (alternate != null && slot == 1 && !alternate.isValid())
+                    throw new IllegalArgumentException("invalid alternate surface");
                 CameraDewarpRenderer.MappingRequest next = readMapping(parcel);
                 long geometryVersion = parcel.readLong();
                 float[] matrix = parcel.createFloatArray();
                 validateGeometry(matrix);
-                if (geometryVersion < 0 || (slot == 1 && alternateSurface == null && alternate == null))
-                    throw new IllegalArgumentException("incomplete GPU presentation");
-                if (closed || revision < presentationRevision) return;
+                if (geometryVersion < 0)
+                    throw new IllegalArgumentException("invalid GPU presentation");
                 if (alternateSurface == null && alternate != null) {
                     if (!alternate.isValid()) throw new IllegalArgumentException("invalid alternate surface");
                     alternateSurface = alternate; alternate = null;

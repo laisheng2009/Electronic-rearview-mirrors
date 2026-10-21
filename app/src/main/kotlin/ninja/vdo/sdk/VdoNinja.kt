@@ -250,6 +250,22 @@ class VdoNinja @JvmOverloads constructor(
         }
     }
 
+    /** Extend's shell-safe network observer replaces WebRTC's app-only receiver. */
+    fun networkChanged() {
+        if (intentional) return
+        try {
+            worker.execute {
+                if (intentional) return@execute
+                val peers = synchronized(lock) { allConnections().filter { !it.closed } }
+                peers.forEach { peer ->
+                    if (!peer.recovering) recoverConnection(peer, "network_changed")
+                }
+            }
+        } catch (stopped: java.util.concurrent.RejectedExecutionException) {
+            if (!intentional) throw stopped
+        }
+    }
+
     /** Extend: stop video while leaving the authenticated data peer available for status. */
     fun removeTrack(track: MediaStreamTrack) {
         val peers = synchronized(lock) {
