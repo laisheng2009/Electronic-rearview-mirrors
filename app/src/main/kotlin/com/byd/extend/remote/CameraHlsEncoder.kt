@@ -14,7 +14,10 @@ import androidx.media3.muxer.FragmentedMp4Muxer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** A viewer owns this encoder. No files, audio, software fallback or network writes on its drain thread. */
-internal class CameraHlsEncoder(private val failed: (Throwable) -> Unit) : AutoCloseable {
+internal class CameraHlsEncoder(
+    private val diagnostics: (String, Long, Long) -> Unit,
+    private val failed: (Throwable) -> Unit,
+) : AutoCloseable {
     val window = FragmentedVideoWindow()
     private val stopped = AtomicBoolean()
     private var codec: MediaCodec? = null
@@ -25,6 +28,9 @@ internal class CameraHlsEncoder(private val failed: (Throwable) -> Unit) : AutoC
     private var firstPts = -1L
     private var fragmentStart = -1L
     private var lastPts = 0L
+    private var frames = 0L
+    private var bytes = 0L
+    private var lastStatisticsNs = 0L
 
     fun start(): Surface {
         check(codec == null)
@@ -92,6 +98,12 @@ internal class CameraHlsEncoder(private val failed: (Throwable) -> Unit) : AutoC
                                 lastPts = pts
                                 active.writeSampleData(track, output.slice(),
                                     BufferInfo(pts, info.size, if (key) C.BUFFER_FLAG_KEY_FRAME else 0))
+                                frames++; bytes += info.size
+                                val now = android.os.SystemClock.elapsedRealtimeNanos()
+                                if (frames == 1L || now - lastStatisticsNs >= 10_000_000_000L) {
+                                    lastStatisticsNs = now
+                                    diagnostics(if (frames == 1L) "first_encoded_frame" else "encoder_statistics", frames, bytes)
+                                }
                             }
                         } finally { encoder.releaseOutputBuffer(index, false) }
                     }

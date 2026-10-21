@@ -1,39 +1,18 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BYD Extend</title><style>
-body{margin:0;background:#101820;color:#eee;font:16px system-ui;text-align:center}main{max-width:1100px;margin:auto;padding:16px}
-button,input{padding:12px;margin:4px;border:1px solid #627384;border-radius:8px;background:#243545;color:white;font:inherit}
-button{cursor:pointer}canvas{width:100%;height:70vh;object-fit:contain;background:black}video{display:none}.hidden{display:none}
-</style></head><body><main><h2>BYD Extend</h2><p id="status"></p><p id="charge" style="color:#ffd54f"></p>
-<form id="login"><!--VIEWER_PASSWORD--><button id="connect"></button></form>
-<section id="viewer" class="hidden"><canvas id="canvas"></canvas><video id="video" muted playsinline autoplay></video>
-<nav id="views"></nav><button id="stop"></button></section></main>
-<script>
-const lang=(navigator.language||'en').slice(0,2), texts={
-en:['Password','Connect','Stop','Composition','Front','Rear','Left','Right','Preparing cameras…','Viewing','Low battery: viewing suspended','Session ended','Incorrect password','Another viewer is connected','Connection unavailable'],
-uk:['Пароль','Під’єднатись','Зупинити','Композиція','Перед','Зад','Ліво','Право','Підготовка камер…','Перегляд','Низький заряд: перегляд призупинено','Сеанс завершено','Неправильний пароль','Інший глядач уже під’єднаний','Підключення недоступне'],
-ru:['Пароль','Подключиться','Остановить','Композиция','Перед','Зад','Слева','Справа','Подготовка камер…','Просмотр','Низкий заряд: просмотр приостановлен','Сеанс завершён','Неверный пароль','Другой зритель уже подключён','Подключение недоступно'],
-zh:['密码','连接','停止','组合','前方','后方','左侧','右侧','正在准备摄像头…','正在观看','电量低：观看已暂停','会话已结束','密码错误','已有其他观看者连接','连接不可用']
-}, t=texts[lang]||texts.en;
-const chargeText={en:['12V battery','Unable to verify charge: ','Protection for these readings is unavailable. Continue camera use at your discretion.'],uk:['12В АКБ','Не вдалося перевірити заряд: ','Захист за цими показниками недоступний. Подальша робота камер — на ваш розсуд.'],ru:['12В АКБ','Не удалось проверить заряд: ','Защита по этим показателям недоступна. Дальнейшая работа камер — на ваше усмотрение.'],zh:['12V电池','无法检查电量：','这些指标的保护不可用。是否继续使用摄像头由您决定。']}[lang]||['12V battery','Unable to verify charge: ','Protection for these readings is unavailable. Continue camera use at your discretion.'];
-const $=id=>document.getElementById(id), video=$('video'),canvas=$('canvas'),ctx=canvas.getContext('2d');
-const password=$('password');if(password)password.placeholder=t[0];$('connect').textContent=t[1];$('stop').textContent=t[2];
-let active=false,view=-1,hls=null,poll=null,drawHandle=0,playing=false;
-for(let i=-1;i<4;i++){const b=document.createElement('button');b.textContent=t[i+4];b.onclick=()=>{view=i;draw()};$('views').append(b)}
-function draw(){cancelAnimationFrame(drawHandle);if(!active)return;
-const w=video.videoWidth,h=video.videoHeight;if(w&&h){let sx=0,sy=0,sw=w,sh=h;if(view>=0){sw=w/2;sh=h/2;sx=(view%2)*sw;sy=Math.floor(view/2)*sh}
-if(canvas.width!==sw)canvas.width=sw;if(canvas.height!==sh)canvas.height=sh;ctx.drawImage(video,sx,sy,sw,sh,0,0,sw,sh)}drawHandle=requestAnimationFrame(draw)}
-function status(value){$('status').textContent=({preparing:t[8],connected:t[9],low_battery:t[10],ended:t[11],unauthorized:t[12],busy:t[13],error:t[14]})[value]||t[8]}
-async function startVideo(){if(playing)return;const list=await fetch('/live.m3u8');if(!list.ok)return;
-playing=true;try{if(video.canPlayType('application/vnd.apple.mpegurl')){video.src='/live.m3u8';await video.play();return}
-if(!window.Hls){await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='/hls.js';s.onload=resolve;s.onerror=reject;document.head.append(s)})}
-if(!Hls.isSupported())throw Error('decoder unavailable');hls=new Hls({liveSyncDurationCount:2,maxBufferLength:8});hls.loadSource('/live.m3u8');hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>status('error')));hls.on(Hls.Events.ERROR,(_,data)=>{if(data.fatal){hls?.destroy();hls=null;playing=false;status('error')}})}catch(e){playing=false;throw e}}
-async function tick(){if(!active)return;try{const r=await fetch('/status');if(!r.ok){finish();status('ended');return}const data=await r.json();status(data.status);
-const missing=[];if(data.missingCharge&1)missing.push('SOC');if(data.missingCharge&2)missing.push(chargeText[0]);$('charge').textContent=missing.length?chargeText[1]+missing.join(' / ')+'. '+chargeText[2]:'';
-if(data.status==='connected')await startVideo();else if(data.status==='low_battery'){hls?.destroy();hls=null;video.removeAttribute('src');video.load();playing=false;ctx.clearRect(0,0,canvas.width,canvas.height)}}catch(e){status('error')}}
-$('login').onsubmit=async e=>{e.preventDefault();$('connect').disabled=true;try{const r=await fetch('/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password?.value||''})});
-const data=await r.json();status(data.status);if(!r.ok)return;if(password)password.value='';active=true;$('login').classList.add('hidden');$('viewer').classList.remove('hidden');draw();await tick();poll=setInterval(tick,2000)}catch(e){status('error')}finally{$('connect').disabled=false}};
-function finish(){active=false;clearInterval(poll);cancelAnimationFrame(drawHandle);hls?.destroy();hls=null;video.removeAttribute('src');video.load();playing=false;$('charge').textContent='';$('viewer').classList.add('hidden');$('login').classList.remove('hidden')}
-$('stop').onclick=async()=>{try{await fetch('/stop',{method:'POST'})}finally{finish();status('ended')}};
-addEventListener('pagehide',()=>{if(active)navigator.sendBeacon('/stop','')});
-</script></body></html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>BYD Extend · Cameras</title>
+  <link rel="stylesheet" href="/viewer.css">
+</head>
+<body>
+  <main id="app" aria-live="polite">
+    <noscript>JavaScript is required to view cameras.</noscript>
+    <div class="loading" aria-label="Loading"></div>
+  </main>
+  <script id="viewer-bootstrap" type="application/json"><!--VIEWER_BOOTSTRAP--></script>
+  <script src="/viewer.js" defer></script>
+</body>
+</html>

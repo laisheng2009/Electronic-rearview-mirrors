@@ -21,7 +21,8 @@ final class CameraRuntimeHost {
             MOTION_RECORD_ATTACH = 16, MOTION_RECORD_DETACH = 17,
             MOTION_OWN_WAKE = 18, MOTION_END_WAKE = 19, MOTION_BIND_WORKER = 20,
             MOTION_UNBIND_WORKER = 21;
-    static final int VIEW_ATTACH = 22, VIEW_DETACH = 23, VIEW_REGISTER_HELPER = 24;
+    static final int VIEW_ATTACH = 22, VIEW_DETACH = 23, VIEW_REGISTER_HELPER = 24,
+            VIEW_UPDATE_OUTPUT = 25;
     static final String CALLBACK = "com.byd.extend.ICameraRuntimeClient";
     static final int POWER_QUICKBOOT = 1, POWER_SCREEN_OFF = 2, POWER_SCREEN_ON = 3,
             POWER_USER_PRESENT = 4;
@@ -47,6 +48,8 @@ final class CameraRuntimeHost {
     private IBinder motionWorker;
     private IBinder.DeathRecipient motionDeath;
     private IBinder viewerOwner;
+    private String viewerSession;
+    private long viewerGeneration;
     private IBinder.DeathRecipient viewerDeath;
     private volatile IBinder viewingHelper;
     private IBinder.DeathRecipient viewingHelperDeath;
@@ -103,7 +106,8 @@ final class CameraRuntimeHost {
 
     int transact(Parcel data, Parcel reply) throws Exception {
         int operation = data.readInt();
-        if (operation == VIEW_ATTACH || operation == VIEW_DETACH || operation == VIEW_REGISTER_HELPER)
+        if (operation == VIEW_ATTACH || operation == VIEW_DETACH || operation == VIEW_REGISTER_HELPER
+                || operation == VIEW_UPDATE_OUTPUT)
             return transactViewing(operation, data, reply);
         if (operation >= MOTION_ATTACH && operation <= MOTION_UNBIND_WORKER)
             return transactMotion(operation, data, reply);
@@ -318,6 +322,34 @@ final class CameraRuntimeHost {
             throw new SecurityException("unregistered viewing helper caller");
         IBinder owner = data.readStrongBinder();
         String session = data.readString();
+        if (operation == VIEW_UPDATE_OUTPUT) {
+            long generation = data.readLong();
+            int direction = data.readInt();
+            android.view.Surface surface = data.readInt() == 0 ? null
+                    : android.view.Surface.CREATOR.createFromParcel(data);
+            java.util.concurrent.atomic.AtomicBoolean pending = new java.util.concurrent.atomic.AtomicBoolean(true);
+            try {
+                if (direction < -1 || direction > 3 || generation <= 0 || data.dataAvail() != 0
+                        || surface != null && !surface.isValid())
+                    throw new IllegalArgumentException("invalid viewer output update");
+                call(() -> {
+                    if (!pending.compareAndSet(true, false))
+                        throw new IllegalStateException("viewer output update expired before dispatch");
+                    if (viewerOwner != owner || !java.util.Objects.equals(viewerSession, session)
+                            || generation <= viewerGeneration) {
+                        if (surface != null) surface.release();
+                        throw new SecurityException("stale viewer output owner/generation");
+                    }
+                    viewerGeneration = generation;
+                    helper.updateViewingOutput(surface, direction);
+                    return null;
+                });
+                reply.writeNoException(); reply.writeInt(1);
+                return operation;
+            } finally {
+                if (pending.compareAndSet(true, false) && surface != null) surface.release();
+            }
+        }
         android.view.Surface[] surfaces = operation == VIEW_ATTACH
                 ? data.createTypedArray(android.view.Surface.CREATOR) : null;
         int requestId = operation == VIEW_ATTACH ? data.readInt() : 0;
@@ -341,6 +373,8 @@ final class CameraRuntimeHost {
                     if (viewerOwner != null) throw new IllegalStateException("camera viewer busy");
                     lifetime.start(this::initialize);
                     viewerOwner = owner;
+                    viewerSession = session;
+                    viewerGeneration = 0;
                     viewerDeath = () -> handler.post(() -> {
                         if (viewerOwner == owner) clearViewer();
                     });
@@ -350,7 +384,8 @@ final class CameraRuntimeHost {
                         helper.attachViewing(surfaces, requestId);
                     } catch (Exception error) { clearViewer(); throw error; }
                 } else {
-                    if (viewerOwner != null && viewerOwner != owner)
+                    if (viewerOwner != null && (viewerOwner != owner
+                            || !java.util.Objects.equals(viewerSession, session)))
                         throw new SecurityException("camera viewer owner changed");
                     clearViewer();
                 }
@@ -368,7 +403,7 @@ final class CameraRuntimeHost {
     private void clearViewer() {
         helper.detachViewing();
         if (viewerOwner != null && viewerDeath != null) viewerOwner.unlinkToDeath(viewerDeath, 0);
-        viewerOwner = null; viewerDeath = null;
+        viewerOwner = null; viewerDeath = null; viewerSession = null; viewerGeneration = 0;
     }
 
     private void clearViewingHelper() {

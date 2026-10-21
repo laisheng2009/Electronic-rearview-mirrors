@@ -87,7 +87,7 @@ class SignalingClient(
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (gen != generation.get()) return
-                log?.invoke("<- WS ${text.take(300)}")
+                log?.invoke("signaling message received (payload omitted)")
                 val obj = try { JSONObject(text) } catch (_: Exception) { return }
                 onMessage?.invoke(obj)
             }
@@ -96,7 +96,7 @@ class SignalingClient(
                 com.byd.extend.remote.CameraViewingDiagnostics.failure(
                     "signaling_websocket_http_${response?.code ?: 0}", "vdo", t)
                 error = t.message ?: t.toString()
-                log?.invoke("signaling error: $error")
+                log?.invoke("signaling error; see redacted diagnostic")
                 handleClosed(gen)
                 latch.countDown()
             }
@@ -179,7 +179,7 @@ class SignalingClient(
                     onReconnecting?.invoke(attempt)
                     val err = open(15_000, reconnect = true, expectedGeneration = gen)
                     if (err != null) {
-                        log?.invoke("reconnect attempt $attempt failed: $err")
+                        log?.invoke("reconnect attempt $attempt failed; see redacted diagnostic")
                         scheduleReconnect()
                     }
                 }, "vdoninja-reconnect").apply { isDaemon = true }.start()
@@ -193,7 +193,7 @@ class SignalingClient(
         if (!connected) return false
         if (clientId != null && !message.has("from")) message.put("from", clientId)
         val text = message.toString()
-        log?.invoke("-> WS ${text.take(300)}")
+        log?.invoke("signaling message sent (payload omitted)")
         return ws.send(text)
     }
 

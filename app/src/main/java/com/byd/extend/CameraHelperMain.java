@@ -1446,6 +1446,14 @@ final class CameraHelperMain {
             viewingOutput = output;
         }
 
+        synchronized void updateViewingOutput(Surface surface, int direction) throws Exception {
+            if (viewingOutput == null || !persistentSession.viewingGroup.has()) {
+                if (surface != null) surface.release();
+                throw new IllegalStateException("camera viewer not attached");
+            }
+            viewingOutput.updateViewingOutput(surface, direction);
+        }
+
         synchronized void detachViewing() {
             if (persistentSession.viewingGroup.has()) closePersistentGroup(
                     persistentSession.viewingGroup, "camera_viewing_stop",

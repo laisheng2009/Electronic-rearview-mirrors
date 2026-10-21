@@ -61,7 +61,9 @@ final class MotionGpuComposer implements AutoCloseable {
     private final int glVersion;
     private EGLDisplay display = EGL14.EGL_NO_DISPLAY;
     private EGLContext context = EGL14.EGL_NO_CONTEXT;
+    private EGLConfig config;
     private EGLSurface window = EGL14.EGL_NO_SURFACE;
+    private int selectedDirection = -1;
     private int program, iconProgram, position, uv, matrix, sampler;
     private int iconPosition, iconUv, iconSampler;
     private String renderedTimestamp;
@@ -243,7 +245,8 @@ final class MotionGpuComposer implements AutoCloseable {
                 EGL14.EGL_RED_SIZE,8,EGL14.EGL_GREEN_SIZE,8,EGL14.EGL_BLUE_SIZE,8,
                 EGL14.EGL_SURFACE_TYPE,EGL14.EGL_WINDOW_BIT,0x3142,1,EGL14.EGL_NONE},
                 0, configs, 0, 1, values, 0) && values[0] > 0, "recordable EGL config");
-        context = EGL14.eglCreateContext(display, configs[0], sharedContext,
+        config = configs[0];
+        context = EGL14.eglCreateContext(display, config, sharedContext,
                 new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION,glVersion,EGL14.EGL_NONE},0);
         window = EGL14.eglCreateWindowSurface(display, configs[0], encoder,
                 new int[]{EGL14.EGL_NONE},0);
@@ -314,19 +317,60 @@ final class MotionGpuComposer implements AutoCloseable {
         }
     }
 
+    /** Switch only the encoder queue; source consumers and retained camera snapshots stay alive. */
+    void updateViewingOutput(Surface encoder, int direction) throws Exception {
+        if (direction < -1 || direction > 3 || encoder != null && !encoder.isValid())
+            throw new IllegalArgumentException("invalid viewer output");
+        FutureTask<Void> task = new FutureTask<>(() -> {
+            if (closed || window == EGL14.EGL_NO_SURFACE)
+                throw new IllegalStateException("viewer composer unavailable");
+            if (encoder != null) {
+                EGLSurface next = EGL14.eglCreateWindowSurface(display, config, encoder,
+                        new int[]{EGL14.EGL_NONE}, 0);
+                require(next != EGL14.EGL_NO_SURFACE, "viewer replacement surface");
+                EGLSurface previous = window;
+                try {
+                    require(EGL14.eglMakeCurrent(display, previous, previous, context), "viewer previous current");
+                    GLES20.glFinish();
+                    require(EGL14.eglMakeCurrent(display, next, next, context), "viewer replacement current");
+                    require(EGL14.eglDestroySurface(display, previous), "viewer previous detach");
+                    window = next;
+                } catch (RuntimeException failure) {
+                    if (!EGL14.eglMakeCurrent(display, previous, previous, context))
+                        failure.addSuppressed(new IllegalStateException("viewer surface restore failed"));
+                    if (!EGL14.eglDestroySurface(display, next))
+                        failure.addSuppressed(new IllegalStateException("viewer replacement cleanup failed"));
+                    throw failure;
+                }
+            }
+            selectedDirection = direction;
+            timestampSecond = Long.MIN_VALUE;
+            renderedTimestamp = null;
+            frame(direction < 0 ? 0 : direction);
+            return null;
+        });
+        synchronized (lifecycleLock) {
+            if (closed || !handler.post(task)) throw new IllegalStateException("viewer composer closed");
+        }
+        await(task, "viewer output update");
+    }
+
     private void render() {
         queued=false;
         if(closed) return;
         try {
             require(EGL14.eglMakeCurrent(display,window,window,context),"EGL render current");
             // Start only once every direction has a real frame, not a synthetic black quadrant.
-            for(boolean available:seen) if(!available) return;
+            if (selectedDirection < 0) {
+                for(boolean available:seen) if(!available) return;
+            } else if (!seen[selectedDirection]) return;
             long presentationTimeNs=SystemClock.elapsedRealtimeNanos();
             updateTimestampTexture(presentationTimeNs/1_000_000L);
             GLES20.glClearColor(0,0,0,1); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-            for(int cell=0;cell<4;cell++) {
-                int direction=order[cell];
-                MotionCompositionLayout.Rect camera=cameraRects[cell];
+            for(int cell=0;cell<(selectedDirection < 0 ? 4 : 1);cell++) {
+                int direction=selectedDirection < 0 ? order[cell] : selectedDirection;
+                MotionCompositionLayout.Rect camera=selectedDirection < 0 ? cameraRects[cell]
+                        : MotionCompositionLayout.singleCameraRect(width, height);
                 GLES20.glViewport(camera.left,height-camera.bottom,
                         camera.width(),camera.height());
                 GLES20.glUseProgram(program);
@@ -382,14 +426,16 @@ final class MotionGpuComposer implements AutoCloseable {
     private Bitmap timestampBitmap(String value) {
         Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
         text.setColor(Color.WHITE);
-        text.setTextSize(Math.max(1f, cameraRects[0].width() * .025f));
+        int cameraWidth = selectedDirection < 0 ? cameraRects[0].width()
+                : MotionCompositionLayout.singleCameraRect(width, height).width();
+        text.setTextSize(Math.max(1f, cameraWidth * .025f));
         text.setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL));
         Paint.FontMetrics metrics = text.getFontMetrics();
         float padding = text.getTextSize() * .3f;
         float widest = text.measureText("00.00.0000 00:00:00+05:30");
         timestampWidth = (int) Math.ceil(widest + padding * 2);
         timestampHeight = (int) Math.ceil(metrics.descent - metrics.ascent + padding * 2);
-        timestampInset = Math.max(0, Math.round(cameraRects[0].width() * .0083f));
+        timestampInset = Math.max(0, Math.round(cameraWidth * .0083f));
 
         Bitmap bitmap = Bitmap.createBitmap(timestampWidth, timestampHeight, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);

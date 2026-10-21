@@ -400,6 +400,8 @@ public final class MotionStorage {
         if (!volume.mounted) throw new IOException("Motion volume is not mounted");
         if (!oemMediaPermissionGranted()) throw new IOException("Motion storage read permission is not granted");
         if (Build.VERSION.SDK_INT < 29) {
+            if (!"file".equals(uri.getScheme()) || uri.getPath() == null)
+                return MediaStoreOwnership.OTHER;
             if (!isOwnedMedia(volume, uri)) return MediaStoreOwnership.OTHER;
             File file = new File(uri.getPath());
             File directory = queryMotionDirectory(volume.publicRoot, Environment.DIRECTORY_MOVIES);
@@ -418,6 +420,33 @@ public final class MotionStorage {
                     ? MediaStoreOwnership.OWNED : MediaStoreOwnership.OTHER;
         } catch (RuntimeException failure) {
             throw new IOException("Cannot validate Motion MediaStore record", failure);
+        }
+    }
+
+    /** Strict final-record validation without enumerating the full Motion directory or store. */
+    MediaStoreOwnership inspectPlayableOwnership(Volume volume, Uri uri) throws IOException {
+        if (volume == null || uri == null) return MediaStoreOwnership.OTHER;
+        if (!volume.mounted) throw new IOException("Motion volume is not mounted");
+        if (!oemMediaPermissionGranted()) throw new IOException("Motion storage read permission is not granted");
+        if (Build.VERSION.SDK_INT < 29) {
+            if (!"file".equals(uri.getScheme()) || uri.getPath() == null)
+                return MediaStoreOwnership.OTHER;
+            if (!isOwnedMedia(volume, uri)) return MediaStoreOwnership.OTHER;
+            return new File(uri.getPath()).isFile()
+                    ? MediaStoreOwnership.OWNED : MediaStoreOwnership.ABSENT;
+        }
+        if (!isVolumeMediaUri(volume, uri)) return MediaStoreOwnership.OTHER;
+        String[] columns = {MediaStore.MediaColumns.OWNER_PACKAGE_NAME,
+                MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.IS_PENDING};
+        try (Cursor cursor = mediaProvider.query(uri, columns, null, null, null)) {
+            if (cursor == null) throw new IOException("Motion archive ownership query returned null");
+            if (!cursor.moveToFirst()) return MediaStoreOwnership.ABSENT;
+            return ownerPackage.equals(cursor.getString(0))
+                    && RELATIVE_PATH.equals(cursor.getString(1))
+                    && cursor.getInt(2) == 0
+                    ? MediaStoreOwnership.OWNED : MediaStoreOwnership.OTHER;
+        } catch (RuntimeException failure) {
+            throw new IOException("Cannot validate finalized Motion media ownership", failure);
         }
     }
 

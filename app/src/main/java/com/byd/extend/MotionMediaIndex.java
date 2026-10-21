@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -124,6 +125,8 @@ final class MotionMediaIndex {
     private final File file;
     private final ArrayList<Record> records = new ArrayList<>();
     private String legacyImportDigest;
+    private FileTime loadedModified;
+    private long loadedLength = -1;
 
     MotionMediaIndex(File file) throws IOException {
         this.file = file;
@@ -158,6 +161,30 @@ final class MotionMediaIndex {
                     && mediaStoreId(record.uri) == mediaStoreId) return record.copy();
         }
         return null;
+    }
+
+    /** Reloads an atomically replaced index written by the separate Motion helper process. */
+    synchronized void reloadIfChanged() throws IOException {
+        if (!file.isFile()) {
+            if (loadedModified == null) return;
+            throw new IOException("Motion index disappeared");
+        }
+        FileTime modified = Files.getLastModifiedTime(file.toPath());
+        long length = Files.size(file.toPath());
+        if (modified.equals(loadedModified) && length == loadedLength) return;
+
+        ArrayList<Record> previous = new ArrayList<>(records);
+        String previousDigest = legacyImportDigest;
+        records.clear();
+        legacyImportDigest = null;
+        try {
+            load();
+        } catch (IOException failure) {
+            records.clear();
+            records.addAll(previous);
+            legacyImportDigest = previousDigest;
+            throw failure;
+        }
     }
 
     synchronized void put(Record record) throws IOException {
@@ -330,13 +357,22 @@ final class MotionMediaIndex {
     }
 
     private void load() throws IOException {
-        if (!file.isFile()) return;
+        if (!file.isFile()) {
+            loadedModified = null;
+            loadedLength = -1;
+            return;
+        }
         try {
+            FileTime modified = Files.getLastModifiedTime(file.toPath());
+            long length = Files.size(file.toPath());
             JSONObject root = new JSONObject(new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
             if (root.getInt("version") != VERSION) throw new IOException("Unsupported Motion index version");
             legacyImportDigest = root.optString("legacyImportDigest", null);
             JSONArray rows = root.getJSONArray("records");
             for (int i = 0; i < rows.length(); i++) records.add(readRecord(rows.getJSONObject(i)));
+            // Keep the pre-read stamp so a concurrent atomic replacement forces another reload.
+            loadedModified = modified;
+            loadedLength = length;
         } catch (JSONException e) {
             throw new IOException("Invalid Motion index", e);
         }
@@ -369,6 +405,8 @@ final class MotionMediaIndex {
         } catch (AtomicMoveNotSupportedException e) {
             Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
         }
+        loadedModified = Files.getLastModifiedTime(file.toPath());
+        loadedLength = Files.size(file.toPath());
     }
 
     private static JSONObject writeRecord(Record record) throws JSONException {

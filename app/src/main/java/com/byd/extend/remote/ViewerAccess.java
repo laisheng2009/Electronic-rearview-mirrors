@@ -14,8 +14,10 @@ public final class ViewerAccess {
     private final byte[] passwordHash;
     private final String privateProxyProof;
     private String session;
+    private String pendingSession;
     private long lastSeen;
     private boolean revoked;
+    private final java.util.LinkedHashSet<String> replaced = new java.util.LinkedHashSet<>();
 
     public ViewerAccess(String password, String privateProxyProof) {
         random.nextBytes(salt);
@@ -32,18 +34,31 @@ public final class ViewerAccess {
                 && MessageDigest.isEqual(passwordHash, hash(password));
     }
 
-    /** Null means another viewer owns the stream. Call only after authentication. */
-    public synchronized String admit(String previousSession, long now) {
+    /** Prepare an authenticated candidate without revoking the current viewer. */
+    public synchronized String reserveAdmission(String previousSession) {
         if (revoked) return null;
-        if (session != null) {
-            if (!equal(session, previousSession)) return null;
-        } else {
-            byte[] bytes = new byte[32];
-            random.nextBytes(bytes);
-            session = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        if (equal(session, previousSession)) return session;
+        byte[] bytes = new byte[32];
+        random.nextBytes(bytes);
+        pendingSession = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        return pendingSession;
+    }
+
+    /** Called on the runtime owner thread at the point of global viewer takeover. */
+    public synchronized boolean commitAdmission(String candidate, long now) {
+        if (revoked) return false;
+        if (!equal(session, candidate)) {
+            if (!equal(pendingSession, candidate)) return false;
+            if (session != null) rememberReplacement(session);
+            session = pendingSession;
+            pendingSession = null;
         }
         lastSeen = now;
-        return session;
+        return true;
+    }
+
+    public synchronized void cancelAdmission(String candidate) {
+        if (equal(pendingSession, candidate)) pendingSession = null;
     }
 
     public synchronized boolean accepts(String candidate, long now) {
@@ -65,8 +80,20 @@ public final class ViewerAccess {
         return true;
     }
 
-    public synchronized void revoke() { revoked = true; session = null; }
+    public synchronized void revoke() { revoked = true; session = null; pendingSession = null; }
     public synchronized boolean occupied() { return session != null; }
+    public synchronized String current() { return session; }
+    public synchronized boolean isCurrent(String candidate) { return equal(session, candidate); }
+    public synchronized boolean wasReplaced(String candidate) { return replaced.contains(candidate); }
+    public synchronized void supersede(String candidate) {
+        if (equal(session, candidate)) { rememberReplacement(session); session = null; }
+    }
+
+    private void rememberReplacement(String token) {
+        replaced.add(token);
+        // Only recent revoked tokens need a human-readable reason; all older tokens remain denied.
+        if (replaced.size() > 128) replaced.remove(replaced.iterator().next());
+    }
 
     private byte[] hash(String password) {
         PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, 120_000, 256);

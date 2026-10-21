@@ -9,7 +9,7 @@ import android.view.Surface;
 import java.util.UUID;
 import java.util.function.Consumer;
 
-/** App-owned streaming consumer of the existing shell camera host. */
+/** Viewing-helper-owned streaming consumer of the existing shell camera host. */
 public final class RemoteCameraSource implements AutoCloseable {
     private final Context context;
     private final IBinder owner = new Binder();
@@ -19,6 +19,7 @@ public final class RemoteCameraSource implements AutoCloseable {
     private IBinder.DeathRecipient death;
     private boolean attached;
     private boolean preparationRequested;
+    private long outputGeneration;
     private final PowerManager.WakeLock wakeLock;
 
     public RemoteCameraSource(Context context, Consumer<String> failure) {
@@ -63,6 +64,23 @@ public final class RemoteCameraSource implements AutoCloseable {
             reply.readException();
             if (reply.readInt() != 1) throw new IllegalStateException("camera viewer not attached");
             attached = true;
+        } finally { data.recycle(); reply.recycle(); }
+    }
+
+    public void updateOutput(Surface encoder, int direction) throws Exception {
+        if (!attached || host == null) throw new IllegalStateException("viewer not attached");
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(TurnSignalShellProtocol.DESCRIPTOR);
+            data.writeInt(CameraRuntimeHost.VIEW_UPDATE_OUTPUT);
+            data.writeStrongBinder(owner); data.writeString(session);
+            data.writeLong(++outputGeneration); data.writeInt(direction);
+            data.writeInt(encoder == null ? 0 : 1);
+            if (encoder != null) encoder.writeToParcel(data, 0);
+            if (!host.transact(TurnSignalShellProtocol.TX_CAMERA_RUNTIME, data, reply, 0))
+                throw new IllegalStateException("viewer output update unavailable");
+            reply.readException();
+            if (reply.readInt() != 1) throw new IllegalStateException("viewer output update incomplete");
         } finally { data.recycle(); reply.recycle(); }
     }
 

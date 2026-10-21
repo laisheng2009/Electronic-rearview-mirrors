@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.byd.extend.CameraChargeSettings
+import com.byd.extend.AppLanguage
 import com.byd.extend.CameraViewingShellClient
 import com.byd.extend.MotionRuntime
 import com.byd.extend.R
@@ -29,6 +30,13 @@ data class CameraViewingState(val config: CameraViewingConfig, val phase: String
 /** UI/draft facade; providers and camera lifetimes belong to the independent shell process. */
 class CameraViewingController private constructor(private val context: Context) {
     private val preferences = context.getSharedPreferences("camera_viewing", Context.MODE_PRIVATE)
+    private val displaySettings = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    private val displayObserver = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == AppLanguage.KEY || key == "ui_dark_theme") execute("viewer_appearance") {
+            client?.let { accept(it.request("configure", presentationPayload()
+                .put("enabled", CameraChargeSettings.isRemoteViewingEnabled(context)))) }
+        }
+    }
     private val secrets by lazy { KeystoreSecretStore(context) }
     private val owner = Executors.newSingleThreadExecutor { Thread(it, "viewing-app-client") }
     private val backend = Executors.newSingleThreadExecutor { Thread(it, "viewing-backend-setup") }
@@ -40,7 +48,13 @@ class CameraViewingController private constructor(private val context: Context) 
     val state: StateFlow<CameraViewingState> = mutable.asStateFlow()
     private var client: CameraViewingShellClient? = null
     private val snapshots = linkedMapOf<String, JSONObject>()
-    init { execute("initial_state") { refresh() } }
+    init {
+        displaySettings.registerOnSharedPreferenceChangeListener(displayObserver)
+        execute("initial_state") { refresh() }
+    }
+
+    private fun presentationPayload() = JSONObject().put("locale", AppLanguage.read(displaySettings))
+        .put("theme", if (displaySettings.getBoolean("ui_dark_theme", true)) "dark" else "light")
 
     private fun selected() = preferences.getString("transport", "vdo")?.takeIf { it in METHODS } ?: "vdo"
     private fun draftName(method: String) = preferences.getString("draft_${method}_name",
@@ -104,11 +118,11 @@ class CameraViewingController private constructor(private val context: Context) 
         refresh()
         main.post(onSaved)
         if (enabled == true) {
-            accept(ensureClient().request("configure", JSONObject().put("enabled", true)))
+            accept(ensureClient().request("configure", presentationPayload().put("enabled", true)))
             client?.let { prepareBackend(it) }
         }
         else if (enabled == false && preferences.getBoolean("helper_provisioned", false))
-            accept(ensureClient(false).request("configure", JSONObject().put("enabled", false)))
+            accept(ensureClient(false).request("configure", presentationPayload().put("enabled", false)))
         if (authorize) {
             val payload = profilePayload(method)
             if (!wasLocked) {
@@ -164,7 +178,7 @@ class CameraViewingController private constructor(private val context: Context) 
                 } finally { key.fill(0); migration.values.forEach { it.fill(0) } }
             }
             client = connected
-            accept(connected.request("provision", JSONObject().put("profiles", profiles)
+            accept(connected.request("provision", presentationPayload().put("profiles", profiles)
                 .put("enabled", restoreEnabled)))
             check(preferences.edit().putBoolean("helper_provisioned", true).commit())
             if (restoreEnabled) prepareBackend(connected)

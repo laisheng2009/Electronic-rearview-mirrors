@@ -8,6 +8,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
+import android.util.Base64;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -15,6 +16,9 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -37,6 +41,7 @@ public final class MotionMediaLibrary {
     private final File leaseDirectory;
     private final Access access;
     private final MotionThumbnailStore thumbnailStore;
+    private final MotionShellMediaContext ownedShellMediaContext;
 
     /** Narrow app-side facade for the worker-owned index; implementations must not expose paths. */
     public interface Access {
@@ -55,6 +60,7 @@ public final class MotionMediaLibrary {
         this.leaseDirectory = new File(this.context.getFilesDir(), "motion/leases");
         this.access = null;
         this.thumbnailStore = null;
+        this.ownedShellMediaContext = null;
         try {
             this.index = MotionMediaIndex.shared(new File(this.context.getFilesDir(), "motion/media-index.json"));
         } catch (IOException e) {
@@ -63,15 +69,21 @@ public final class MotionMediaLibrary {
     }
 
     MotionMediaLibrary(MotionShellMediaContext shellContext) {
+        this(shellContext, false);
+    }
+
+    private MotionMediaLibrary(MotionShellMediaContext shellContext, boolean ownsShellContext) {
         this.context = shellContext.systemContext();
         this.storage = new MotionStorage(shellContext);
         this.leaseDirectory = new File(shellContext.privateDirectory(), "leases");
         this.access = null;
+        this.ownedShellMediaContext = ownsShellContext ? shellContext : null;
         MotionMediaIndex openedIndex;
         try {
             openedIndex = MotionMediaIndex.shared(new File(shellContext.privateDirectory(), "media-index.json"));
         } catch (IOException e) {
             storage.close();
+            if (ownsShellContext) shellContext.close();
             throw new IllegalStateException("Cannot open shell Motion media index", e);
         }
         this.index = openedIndex;
@@ -88,6 +100,20 @@ public final class MotionMediaLibrary {
         this.leaseDirectory = null;
         this.thumbnailStore = null;
         this.access = access;
+        this.ownedShellMediaContext = null;
+    }
+
+    /** Opens a read-only shell-UID view of the Motion helper's shared index and thumbnail cache. */
+    public static MotionMediaLibrary openShellArchive(Context shellRuntimeContext, int ownerUid)
+            throws Exception {
+        MotionShellMediaContext shellContext = new MotionShellMediaContext(shellRuntimeContext,
+                ownerUid, MotionShellMediaContext.OWNER_PACKAGE, MotionShellMediaContext.WORKER_ROOT);
+        try {
+            return new MotionMediaLibrary(shellContext, true);
+        } catch (RuntimeException failure) {
+            shellContext.close();
+            throw failure;
+        }
     }
 
     public boolean importLegacyIndex(ParcelFileDescriptor source) throws IOException {
@@ -105,6 +131,140 @@ public final class MotionMediaLibrary {
         if (access == null || entry == null || entry.mediaStoreId <= 0
                 || !MotionThumbnailKey.isValid(expectedKey)) return null;
         return access.openThumbnail(entry.volumeId, entry.mediaStoreId, expectedKey);
+    }
+
+    /** Returns only finalized, currently owned index rows for the remote archive. */
+    public List<ArchiveItem> queryArchiveIndex() throws IOException {
+        requireShellArchive();
+        index.reloadIfChanged();
+        Map<String, MotionStorage.Volume> volumes = new HashMap<>();
+        for (MotionStorage.Volume volume : storage.volumes()) volumes.put(volume.id, volume);
+        ArrayList<ArchiveItem> result = new ArrayList<>();
+        for (MotionMediaIndex.Record record : index.records()) {
+            if (!isFinalizedArchiveRecord(record)) continue;
+            MotionStorage.Volume volume = volumes.get(record.volumeId);
+            if (volume == null || !volume.mounted) continue;
+            Uri uri = Uri.parse(record.uri);
+            if (storage.inspectPlayableOwnership(volume, uri) != MotionStorage.MediaStoreOwnership.OWNED)
+                continue;
+            long mediaStoreId = storage.mediaStoreId(volume, uri);
+            Entry entry = archiveEntry(record, uri, mediaStoreId);
+            result.add(new ArchiveItem(archiveId(record), entry, volume.removable ? "sd" : "tablet"));
+        }
+        Comparator<ArchiveItem> order = Comparator.comparingLong(item -> item.entry.recordedAtMillis);
+        result.sort(order.reversed().thenComparing(item -> item.id));
+        return Collections.unmodifiableList(result);
+    }
+
+    /** Opens only an existing worker-cached cover for a currently indexed, owned record. */
+    public ParcelFileDescriptor openArchiveThumbnail(String id) throws IOException {
+        requireShellArchive();
+        MotionMediaIndex.Record record = resolveArchiveRecord(id);
+        if (record == null) return null;
+        MotionStorage.Volume volume = storage.findVolume(record.volumeId);
+        if (volume == null || !volume.mounted) return null;
+        Uri uri = Uri.parse(record.uri);
+        if (storage.inspectPlayableOwnership(volume, uri) != MotionStorage.MediaStoreOwnership.OWNED)
+            return null;
+        long mediaStoreId = storage.mediaStoreId(volume, uri);
+        if (mediaStoreId <= 0) return null;
+        return thumbnailStore.open(volume.id, mediaStoreId,
+                MotionThumbnailKey.forRecord(record, mediaStoreId), record);
+    }
+
+    /** Acquires the cross-process cleanup lease for one validated recording. */
+    public ArchivePlayback openArchiveVideo(String id) throws IOException {
+        requireShellArchive();
+        MotionMediaIndex.Record initial = resolveArchiveRecord(id);
+        if (initial == null) throw new java.io.FileNotFoundException("Motion archive item is unavailable");
+        MotionStorage.Volume volume = storage.findVolume(initial.volumeId);
+        if (volume == null || !volume.mounted)
+            throw new java.io.FileNotFoundException("Motion archive item is unavailable");
+        if (storage.inspectPlayableOwnership(volume, Uri.parse(initial.uri))
+                != MotionStorage.MediaStoreOwnership.OWNED)
+            throw new java.io.FileNotFoundException("Motion archive item is unavailable");
+
+        MotionMediaLease lease = MotionMediaLease.acquire(leaseDirectory, initial.uri);
+        try {
+            index.reloadIfChanged();
+            MotionMediaIndex.Record current = index.find(initial.uri);
+            volume = current == null ? null : storage.findVolume(current.volumeId);
+            if (current == null || !archiveId(current).equals(id) || !isFinalizedArchiveRecord(current)
+                    || volume == null || !volume.mounted
+                    || storage.inspectPlayableOwnership(volume, Uri.parse(current.uri))
+                    != MotionStorage.MediaStoreOwnership.OWNED)
+                throw new java.io.FileNotFoundException("Motion archive item is unavailable");
+            return new ArchivePlayback(this, current, lease);
+        } catch (IOException | RuntimeException failure) {
+            try { lease.close(); }
+            catch (IOException cleanupFailure) { failure.addSuppressed(cleanupFailure); }
+            throw failure;
+        }
+    }
+
+    private ParcelFileDescriptor openArchiveVideoDescriptor(String volumeId, String uriValue,
+            String segmentId) throws IOException {
+        index.reloadIfChanged();
+        MotionMediaIndex.Record current = index.find(uriValue);
+        if (current == null || !volumeId.equals(current.volumeId) || !segmentId.equals(current.segmentId)
+                || !isFinalizedArchiveRecord(current))
+            throw new java.io.FileNotFoundException("Motion archive item is unavailable");
+        MotionStorage.Volume volume = storage.findVolume(volumeId);
+        Uri uri = Uri.parse(uriValue);
+        if (volume == null || !volume.mounted
+                || storage.inspectPlayableOwnership(volume, uri)
+                != MotionStorage.MediaStoreOwnership.OWNED)
+            throw new java.io.FileNotFoundException("Motion archive item is unavailable");
+        ParcelFileDescriptor descriptor = storage.openMediaFileDescriptor(uri, "r");
+        if (descriptor == null) throw new IOException("Motion archive video could not be opened");
+        return descriptor;
+    }
+
+    private MotionMediaIndex.Record resolveArchiveRecord(String id) throws IOException {
+        if (id == null || !id.matches("[A-Za-z0-9_-]{43}")) return null;
+        index.reloadIfChanged();
+        for (MotionMediaIndex.Record record : index.records()) {
+            if (id.equals(archiveId(record)) && isFinalizedArchiveRecord(record)) return record;
+        }
+        return null;
+    }
+
+    private void requireShellArchive() {
+        if (access != null || thumbnailStore == null || storage == null || index == null)
+            throw new IllegalStateException("Shell-owned Motion archive access is unavailable");
+    }
+
+    private static boolean isFinalizedArchiveRecord(MotionMediaIndex.Record record) {
+        return record != null && (MotionMediaIndex.COMPLETE.equals(record.status)
+                || MotionMediaIndex.INTERRUPTED.equals(record.status));
+    }
+
+    private static Entry archiveEntry(MotionMediaIndex.Record record, Uri uri, long mediaStoreId) {
+        ArrayList<Marker> markers = new ArrayList<>();
+        for (MotionMediaIndex.Marker marker : record.markers) {
+            markers.add(new Marker(marker.eventId, marker.wallTimeMs, marker.elapsedRealtimeMs,
+                    marker.endWallTimeMs, marker.endElapsedRealtimeMs,
+                    marker.elapsedRealtimeMs - record.startElapsedRealtimeMs, marker.level));
+        }
+        return new Entry(uri, record.name, record.volumeId, mediaStoreId, record.segmentId,
+                record.recordedAtMs, record.durationMs, record.sizeBytes, status(record.status),
+                markers, true, record.protectedFile, record.cameraOrder);
+    }
+
+    private static String archiveId(MotionMediaIndex.Record record) {
+        String identity = record.volumeId + '\u0000' + record.uri + '\u0000' + record.segmentId;
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(identity.getBytes(StandardCharsets.UTF_8));
+            return Base64.encodeToString(digest, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
+    }
+
+    private static void closeFailedArchiveDescriptor(ParcelFileDescriptor descriptor, Throwable failure) {
+        try { descriptor.close(); }
+        catch (IOException cleanupFailure) { failure.addSuppressed(cleanupFailure); }
     }
 
     void prepareThumbnail(String uri) {
@@ -201,6 +361,129 @@ public final class MotionMediaLibrary {
             this.available = available;
             this.protectedFile = protectedFile;
             this.cameraOrder = MotionMediaIndex.copyCameraOrder(cameraOrder);
+        }
+    }
+
+    /** Metadata row for the helper-owned remote archive; the URI stays inside the helper. */
+    public static final class ArchiveItem {
+        public final String id;
+        public final Entry entry;
+        public final String storage;
+
+        private ArchiveItem(String id, Entry entry, String storage) {
+            this.id = id;
+            this.entry = entry;
+            this.storage = storage;
+        }
+    }
+
+    /** Seekable descriptor for one active range response, closed by the response or playback. */
+    public static final class ArchiveDescriptor implements java.io.Closeable {
+        public final ParcelFileDescriptor descriptor;
+        public final long contentLength;
+        private final ArchivePlayback playback;
+        private boolean closed;
+
+        private ArchiveDescriptor(ArchivePlayback playback, ParcelFileDescriptor descriptor,
+                long contentLength) {
+            this.playback = playback;
+            this.descriptor = descriptor;
+            this.contentLength = contentLength;
+        }
+
+        @Override public void close() throws IOException {
+            synchronized (this) {
+                if (closed) return;
+                closed = true;
+                playback.release(this);
+                descriptor.close();
+            }
+        }
+
+        private void closeFromPlayback() throws IOException {
+            synchronized (this) {
+                if (closed) return;
+                closed = true;
+                descriptor.close();
+            }
+        }
+    }
+
+    /** Cross-process Motion cleanup lease held for the whole selected playback, across Range requests. */
+    public static final class ArchivePlayback implements java.io.Closeable {
+        private final MotionMediaLibrary library;
+        private final String volumeId;
+        private final String uri;
+        private final String segmentId;
+        private final long indexedSize;
+        private final MotionMediaLease lease;
+        private final Set<ArchiveDescriptor> descriptors = new HashSet<>();
+        private boolean closed;
+
+        private ArchivePlayback(MotionMediaLibrary library, MotionMediaIndex.Record record,
+                MotionMediaLease lease) {
+            this.library = library;
+            this.volumeId = record.volumeId;
+            this.uri = record.uri;
+            this.segmentId = record.segmentId;
+            this.indexedSize = record.sizeBytes;
+            this.lease = lease;
+        }
+
+        public ArchiveDescriptor openDescriptor() throws IOException {
+            synchronized (this) {
+                if (closed) throw new IOException("Motion archive playback is closed");
+            }
+            ParcelFileDescriptor descriptor = library.openArchiveVideoDescriptor(volumeId, uri, segmentId);
+            try {
+                long statSize = descriptor.getStatSize();
+                if (statSize == 0) throw new IOException("Motion archive video is empty");
+                long contentLength = statSize > 0 ? statSize : indexedSize;
+                if (contentLength <= 0) throw new IOException("Motion archive video length is unavailable");
+                ArchiveDescriptor range = new ArchiveDescriptor(this, descriptor, contentLength);
+                synchronized (this) {
+                    if (closed) throw new IOException("Motion archive playback is closed");
+                    descriptors.add(range);
+                }
+                return range;
+            } catch (IOException failure) {
+                closeFailedArchiveDescriptor(descriptor, failure);
+                throw failure;
+            } catch (RuntimeException failure) {
+                closeFailedArchiveDescriptor(descriptor, failure);
+                throw failure;
+            } catch (Error failure) {
+                closeFailedArchiveDescriptor(descriptor, failure);
+                throw failure;
+            }
+        }
+
+        private void release(ArchiveDescriptor descriptor) {
+            synchronized (this) { descriptors.remove(descriptor); }
+        }
+
+        @Override public void close() throws IOException {
+            ArrayList<ArchiveDescriptor> active;
+            synchronized (this) {
+                if (closed) return;
+                closed = true;
+                active = new ArrayList<>(descriptors);
+                descriptors.clear();
+            }
+            IOException failure = null;
+            for (ArchiveDescriptor descriptor : active) {
+                try { descriptor.closeFromPlayback(); }
+                catch (IOException cleanupFailure) {
+                    if (failure == null) failure = cleanupFailure;
+                    else failure.addSuppressed(cleanupFailure);
+                }
+            }
+            try { lease.close(); }
+            catch (IOException cleanupFailure) {
+                if (failure == null) failure = cleanupFailure;
+                else failure.addSuppressed(cleanupFailure);
+            }
+            if (failure != null) throw failure;
         }
     }
 
@@ -706,6 +989,7 @@ public final class MotionMediaLibrary {
         if (storage != null) {
             if (thumbnailStore != null) thumbnailStore.close();
             storage.close();
+            if (ownedShellMediaContext != null) ownedShellMediaContext.close();
         } else if (access instanceof AutoCloseable) {
             try { ((AutoCloseable) access).close(); }
             catch (Exception ignored) { }

@@ -1,23 +1,56 @@
 package com.byd.extend.remote;
 
-import java.io.*;
-import java.net.*;
+import android.os.ParcelFileDescriptor;
+import android.system.ErrnoException;
+import android.system.Os;
+
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+import org.json.JSONException;
 import org.json.JSONObject;
 
 /** Loopback-only HTTP endpoint behind the authenticated native tunnel. */
 public final class CameraViewerServer implements AutoCloseable {
+    private static final int MAX_HEADERS = 16_384;
+    private static final int MAX_BODY = 4_096;
+    private static final int VIDEO_CHUNK = 64 * 1024;
+
     public interface Stream {
-        boolean acquire();
-        void connected();
-        void disconnected();
-        String status();
-        int unavailableChargeMask();
+        boolean admitted(String session);
+        boolean current(String session);
+        void disconnected(String session);
+        void live(String session, int direction);
+        void archive(String session, boolean leave);
+        JSONObject status();
+        JSONObject presentation();
+        void firstFrame(String session, String mode);
         FragmentedVideoWindow video();
+        CameraViewerArchive recordings() throws Exception;
         byte[] resource(String name) throws IOException;
     }
+
     private final ViewerAccess access;
     private final boolean passwordRequired;
     private final Stream stream;
@@ -26,13 +59,18 @@ public final class CameraViewerServer implements AutoCloseable {
     private final ThreadPoolExecutor requests = new ThreadPoolExecutor(2, 4, 30,
             TimeUnit.SECONDS, new ArrayBlockingQueue<>(8), r -> new Thread(r, "camera-view-http"));
     private final Thread listener;
+    private final Object playbackLock = new Object();
+    private final Map<String, SessionPlayback> playbacks = new HashMap<>();
+    private final Object sessionSocketLock = new Object();
+    private final Map<String, Set<Socket>> sessionSockets = new HashMap<>();
+    private final Map<Socket, String> socketSessions = new HashMap<>();
     private volatile boolean closed;
     private long lastAuthenticationNs = System.nanoTime() - 1_000_000_000L;
 
     public CameraViewerServer(String password, String privateProxyProof, Stream stream) throws IOException {
         this.access = new ViewerAccess(password, privateProxyProof);
         this.passwordRequired = privateProxyProof == null;
-        this.stream = stream;
+        this.stream = Objects.requireNonNull(stream, "stream");
         server = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
         server.setSoTimeout(1000);
         listener = new Thread(this::listen, "camera-view-listen");
@@ -40,6 +78,18 @@ public final class CameraViewerServer implements AutoCloseable {
     }
 
     public int port() { return server.getLocalPort(); }
+
+    /** Called by the runtime when another authenticated viewer takes the shared camera lease. */
+    public void supersede(String session) {
+        if (session == null) return;
+        supersede(session, null);
+    }
+
+    /** Commit only the still-pending authenticated candidate after runtime validation. */
+    public boolean commitAdmission(String session) {
+        return !closed && access.commitAdmission(session, now());
+    }
+
     private static long now() { return System.nanoTime() / 1_000_000; }
 
     private void listen() {
@@ -49,155 +99,772 @@ public final class CameraViewerServer implements AutoCloseable {
                     Socket socket = server.accept();
                     sockets.add(socket);
                     try { requests.execute(() -> serve(socket)); }
-                    catch (RejectedExecutionException busy) { sockets.remove(socket); socket.close(); }
-                } catch (SocketTimeoutException ignored) { /* Bounded abandoned-viewer cleanup. */ }
-                synchronized (access) {
-                    if (access.expire(now())) stream.disconnected();
+                    catch (RejectedExecutionException busy) {
+                        sockets.remove(socket);
+                        socket.close();
+                    }
+                } catch (SocketTimeoutException ignored) {
+                    // Check abandoned sessions at a bounded interval.
                 }
+                expireSession();
             }
-        } catch (IOException ignored) {
-            if (!closed) stream.disconnected();
+        } catch (IOException failure) {
+            if (!closed) CameraViewingDiagnostics.failure("viewer_listener", "shared", failure);
+        }
+    }
+
+    private void expireSession() {
+        String expired = null;
+        synchronized (access) {
+            String current = access.current();
+            if (current != null && access.expire(now())) expired = current;
+        }
+        if (expired == null) return;
+        closePlayback(expired);
+        closeSessionSockets(expired, null);
+        try { stream.disconnected(expired); }
+        catch (RuntimeException failure) {
+            CameraViewingDiagnostics.failure("viewer_expired_cleanup", "shared", failure);
         }
     }
 
     private void serve(Socket socket) {
+        Reply reply = new Reply();
+        String operation = "request";
         try (socket) {
-            socket.setSoTimeout(5_000);
-            BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
-            ByteArrayOutputStream headers = new ByteArrayOutputStream();
-            int matched = 0;
-            while (matched < 4 && headers.size() < 16_384) {
-                int value = input.read();
-                if (value < 0) return;
-                headers.write(value);
-                matched = value == (matched % 2 == 0 ? '\r' : '\n') ? matched + 1 : 0;
-            }
-            if (matched != 4) { respond(socket, 431, "text/plain", new byte[0], null); return; }
-            String[] lines = headers.toString(StandardCharsets.US_ASCII.name()).split("\r\n");
-            String[] first = lines[0].split(" ");
-            if (first.length != 3 || !(first[0].equals("GET") || first[0].equals("POST"))) {
-                respond(socket, 405, "text/plain", new byte[0], null); return;
-            }
-            Map<String, String> fields = new HashMap<>();
-            for (int i = 1; i < lines.length; i++) {
-                int colon = lines[i].indexOf(':');
-                if (colon <= 0) throw new IOException("Malformed HTTP field");
-                String key = lines[i].substring(0, colon).toLowerCase(Locale.ROOT);
-                if (fields.put(key, lines[i].substring(colon + 1).trim()) != null)
-                    throw new IOException("Duplicate HTTP field");
-            }
-            if (fields.containsKey("transfer-encoding")) throw new IOException("Chunked requests unsupported");
-            int length = Integer.parseInt(fields.getOrDefault("content-length", "0"));
-            if (length < 0 || length > 4096) throw new IOException("Request body too large");
-            byte[] body = new byte[length];
-            new DataInputStream(input).readFully(body);
-            String path = first[1];
-            if (!path.startsWith("/") || path.contains("?") || path.contains("%") || path.contains(".."))
-                throw new IOException("Invalid viewer path");
-            String session = cookie(fields.get("cookie"));
-            String origin = fields.get("origin");
-            if (first[0].equals("POST") && !Objects.equals(origin, "https://" + fields.get("host"))) {
-                respond(socket, 403, "text/plain", new byte[0], null); return;
-            }
-            if (path.equals("/session") && first[0].equals("POST")) {
-                boolean admitted;
-                synchronized (this) {
-                    long nano = System.nanoTime();
-                    admitted = nano - lastAuthenticationNs >= 1_000_000_000L;
-                    if (admitted) lastAuthenticationNs = nano;
+            try {
+                socket.setSoTimeout(5_000);
+                Request request = readRequest(socket);
+                reply.head = request.method.equals("HEAD");
+                operation = operationName(request.path);
+                route(socket, request, reply);
+            } catch (Exception failure) {
+                if (!isExpectedDisconnect(failure, reply.started, operation)) {
+                    if (failure instanceof HttpFailure
+                            && "invalid_json".equals(((HttpFailure) failure).bodyStatus)) {
+                        CameraViewingDiagnostics.detail("viewer_http_invalid_json", "shared",
+                                parserFailureWithoutPayload(failure.getCause()));
+                    } else {
+                        CameraViewingDiagnostics.failure("viewer_http_" + operation, "shared", failure);
+                    }
                 }
-                if (!admitted) { json(socket, 429, "retry", null); return; }
-                String password = new JSONObject(new String(body, StandardCharsets.UTF_8)).optString("password", "");
-                if (!access.authenticate(password, fields.get("x-byd-extend-proxy-token"))) {
-                    json(socket, 401, "unauthorized", null); return;
+                if (!reply.started && !socket.isClosed()) {
+                    try {
+                        if (failure instanceof HttpFailure) {
+                            HttpFailure http = (HttpFailure) failure;
+                            json(socket, reply, http.status, http.bodyStatus, null, http.extraHeaders);
+                        } else if ("request".equals(operation)) {
+                            json(socket, reply, 400, "bad_request", null);
+                        } else if (failure instanceof IllegalArgumentException) {
+                            json(socket, reply, 400, "invalid_request", null);
+                        } else {
+                            json(socket, reply, 500, "unavailable", null);
+                        }
+                    } catch (IOException responseFailure) {
+                        if (!isExpectedDisconnect(responseFailure, reply.started, operation))
+                            CameraViewingDiagnostics.failure("viewer_http_response_" + operation,
+                                    "shared", responseFailure);
+                    }
                 }
-                String key;
-                synchronized (access) {
-                    boolean wasOccupied = access.occupied();
-                    if (!wasOccupied && !stream.acquire()) { json(socket, 409, "busy", null); return; }
-                    key = access.admit(session, now());
-                    if (key != null && !wasOccupied) stream.connected();
-                    else if (key == null && !wasOccupied) stream.disconnected();
-                }
-                if (key == null) { json(socket, 409, "busy", null); return; }
-                json(socket, 200, "preparing", "viewer=" + key + "; Path=/; Secure; HttpOnly; SameSite=Strict");
-                return;
             }
-            if (path.equals("/") && first[0].equals("GET")) {
-                // This resource contains only the login shell. Video/assets/control require its session.
-                String page = new String(stream.resource("index.html"), StandardCharsets.UTF_8)
-                        .replace("<!--VIEWER_PASSWORD-->", passwordRequired
-                                ? "<input id=\"password\" type=\"password\" maxlength=\"1024\" autocomplete=\"current-password\">"
-                                : "");
-                respond(socket, 200, "text/html; charset=utf-8", page.getBytes(StandardCharsets.UTF_8), null);
-                return;
-            }
-            if (!access.accepts(session, now())) { json(socket, 401, "unauthorized", null); return; }
-            if (path.equals("/stop") && first[0].equals("POST")) {
-                synchronized (access) {
-                    if (access.release(session)) stream.disconnected();
-                }
-                json(socket, 200, "ended", "viewer=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0");
-            } else if (path.equals("/status")) {
-                byte[] status = new JSONObject().put("status", stream.status())
-                        .put("missingCharge", stream.unavailableChargeMask())
-                        .toString().getBytes(StandardCharsets.UTF_8);
-                respond(socket, 200, "application/json", status, null);
-            } else if (path.equals("/hls.js")) {
-                respond(socket, 200, "application/javascript", stream.resource("hls.js"), null);
-            } else {
-                FragmentedVideoWindow window = stream.video();
-                byte[] data = null;
-                String mime = "video/mp4";
-                if (window != null) {
-                    if (path.equals("/live.m3u8")) {
-                        String playlist = window.playlist();
-                        data = playlist == null ? null : playlist.getBytes(StandardCharsets.UTF_8);
-                        mime = "application/vnd.apple.mpegurl";
-                    } else if (path.equals("/init.mp4")) data = window.initialization();
-                    else if (path.startsWith("/segment/") && path.endsWith(".m4s"))
-                        data = window.segment(Long.parseLong(path.substring(9, path.length() - 4)));
-                }
-                respond(socket, data == null ? 404 : 200, mime, data == null ? new byte[0] : data, null);
-            }
-        } catch (Exception ignored) {
-            // Malformed peers affect only their request. Never log passwords, cookies or provider URLs.
-        } finally { sockets.remove(socket); }
+        } catch (IOException closeFailure) {
+            CameraViewingDiagnostics.failure("viewer_http_close", "shared", closeFailure);
+        } finally {
+            unregisterSessionSocket(socket);
+            sockets.remove(socket);
+        }
     }
+
+    private Request readRequest(Socket socket) throws IOException {
+        BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
+        ByteArrayOutputStream headers = new ByteArrayOutputStream();
+        int matched = 0;
+        while (matched < 4 && headers.size() < MAX_HEADERS) {
+            int value = input.read();
+            if (value < 0) throw new EOFException("HTTP headers ended before terminator");
+            headers.write(value);
+            matched = value == (matched % 2 == 0 ? '\r' : '\n') ? matched + 1 : 0;
+        }
+        if (matched != 4) throw new HttpFailure(431, "headers_too_large", null);
+
+        String[] lines = headers.toString(StandardCharsets.US_ASCII.name()).split("\r\n");
+        String[] first = lines[0].split(" ");
+        if (first.length != 3) throw new IOException("Malformed HTTP request line");
+        String method = first[0];
+        if (!(method.equals("GET") || method.equals("HEAD") || method.equals("POST")))
+            throw new HttpFailure(405, "method_not_allowed", "Allow: GET, HEAD, POST");
+        String path = first[1];
+        if (!path.startsWith("/") || path.contains("?") || path.contains("%")
+                || path.contains("..") || path.indexOf('\\') >= 0 || path.indexOf('#') >= 0)
+            throw new IOException("Invalid viewer path");
+
+        Map<String, String> fields = new HashMap<>();
+        for (int i = 1; i < lines.length; i++) {
+            int colon = lines[i].indexOf(':');
+            if (colon <= 0) throw new IOException("Malformed HTTP field");
+            String key = lines[i].substring(0, colon).toLowerCase(Locale.ROOT);
+            if (fields.put(key, lines[i].substring(colon + 1).trim()) != null)
+                throw new IOException("Duplicate HTTP field");
+        }
+        if (fields.containsKey("transfer-encoding")) throw new IOException("Chunked requests unsupported");
+        int length;
+        try { length = Integer.parseInt(fields.getOrDefault("content-length", "0")); }
+        catch (NumberFormatException malformed) { throw new IOException("Invalid request length", malformed); }
+        if (length < 0) throw new IOException("Invalid request length");
+        if (length > MAX_BODY) throw new HttpFailure(413, "request_too_large", null);
+        byte[] body = new byte[length];
+        new DataInputStream(input).readFully(body);
+        return new Request(method, path, fields, body, cookie(fields.get("cookie")));
+    }
+
+    private void route(Socket socket, Request request, Reply reply) throws Exception {
+        if (request.method.equals("POST") && !Objects.equals(request.fields.get("origin"),
+                "https://" + request.fields.get("host"))) {
+            json(socket, reply, 403, "forbidden", null);
+            return;
+        }
+
+        if (request.path.equals("/session") && request.method.equals("POST")) {
+            admit(socket, request, reply);
+            return;
+        }
+        if (request.path.equals("/") && isRead(request.method)) {
+            servePage(socket, request.method.equals("HEAD"), reply);
+            return;
+        }
+        if ((request.path.equals("/viewer.css") || request.path.equals("/viewer.js"))
+                && isRead(request.method)) {
+            String name = request.path.equals("/viewer.css") ? "viewer.css" : "viewer.js";
+            serveBytes(socket, request.method.equals("HEAD"), reply,
+                    request.path.endsWith(".css") ? "text/css; charset=utf-8" : "application/javascript; charset=utf-8",
+                    stream.resource(name), null);
+            return;
+        }
+
+        if (!authorized(request.session, socket, reply)) return;
+        switch (request.path) {
+            case "/stop":
+                if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
+                stop(request.session, socket);
+                json(socket, reply, 200, "ended", expiredCookie());
+                return;
+            case "/status":
+                if (!isRead(request.method)) { methodNotAllowed(socket, reply); return; }
+                serveJson(socket, request.method.equals("HEAD"), reply, stream.status());
+                return;
+            case "/viewer.css":
+            case "/viewer.js":
+                if (!isRead(request.method)) { methodNotAllowed(socket, reply); return; }
+                serveBytes(socket, request.method.equals("HEAD"), reply,
+                        request.path.endsWith(".css") ? "text/css; charset=utf-8" : "application/javascript; charset=utf-8",
+                        stream.resource(request.path.endsWith(".css") ? "viewer.css" : "viewer.js"), null);
+                return;
+            case "/hls.js":
+                if (!isRead(request.method)) { methodNotAllowed(socket, reply); return; }
+                serveBytes(socket, request.method.equals("HEAD"), reply,
+                        "application/javascript; charset=utf-8", stream.resource("hls.js"), null);
+                return;
+            case "/archive":
+                if (!isRead(request.method)) { methodNotAllowed(socket, reply); return; }
+                serveText(socket, request.method.equals("HEAD"), reply, "application/json; charset=utf-8",
+                        stream.recordings().catalog());
+                return;
+            case "/archive/open":
+                if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
+                closePlayback(request.session);
+                stream.archive(request.session, false);
+                serveJson(socket, false, reply, stream.status());
+                return;
+            case "/archive/close":
+                if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
+                closePlayback(request.session);
+                if (bodyObject(request.body).optBoolean("leave")) stream.archive(request.session, true);
+                serveJson(socket, false, reply, stream.status());
+                return;
+            case "/live":
+                if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
+                int direction = direction(bodyObject(request.body).optString("view", "composition"));
+                closePlayback(request.session);
+                stream.live(request.session, direction);
+                serveJson(socket, false, reply, stream.status());
+                return;
+            case "/diagnostic":
+                if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
+                JSONObject diagnostic = bodyObject(request.body);
+                String event = diagnostic.optString("event", "");
+                String mode = diagnostic.optString("mode", "");
+                if (!"first_frame".equals(event) || !("live".equals(mode) || "archive".equals(mode))) {
+                    json(socket, reply, 400, "invalid_event", null);
+                    return;
+                }
+                stream.firstFrame(request.session, mode);
+                json(socket, reply, 200, "ok", null);
+                return;
+            default:
+                break;
+        }
+
+        if (request.path.startsWith("/archive/thumbnail/")) {
+            if (!isRead(request.method)) { methodNotAllowed(socket, reply); return; }
+            String id = archiveId(request.path, "/archive/thumbnail/");
+            if (id == null) { json(socket, reply, 404, "not_found", null); return; }
+            serveThumbnail(socket, request.method.equals("HEAD"), request.session, id, reply);
+            return;
+        }
+        if (request.path.startsWith("/archive/video/")) {
+            if (!isRead(request.method)) { methodNotAllowed(socket, reply); return; }
+            String id = archiveId(request.path, "/archive/video/");
+            if (id == null) { json(socket, reply, 404, "not_found", null); return; }
+            serveVideo(socket, request, id, reply);
+            return;
+        }
+
+        FragmentedVideoWindow window = stream.video();
+        if (window != null) {
+            if (request.path.equals("/live.m3u8") && isRead(request.method)) {
+                String playlist = window.playlist();
+                if (playlist == null) json(socket, reply, 404, "not_found", null);
+                else serveText(socket, request.method.equals("HEAD"), reply,
+                        "application/vnd.apple.mpegurl", playlist);
+                return;
+            }
+            if (request.path.equals("/init.mp4") && isRead(request.method)) {
+                byte[] bytes = window.initialization();
+                if (bytes == null) json(socket, reply, 404, "not_found", null);
+                else serveBytes(socket, request.method.equals("HEAD"), reply, "video/mp4", bytes, null);
+                return;
+            }
+            if (request.path.startsWith("/segment/") && request.path.endsWith(".m4s")
+                    && isRead(request.method)) {
+                String number = request.path.substring(9, request.path.length() - 4);
+                try {
+                    byte[] bytes = window.segment(Long.parseLong(number));
+                    if (bytes == null) json(socket, reply, 404, "not_found", null);
+                    else serveBytes(socket, request.method.equals("HEAD"), reply, "video/iso.segment", bytes, null);
+                } catch (NumberFormatException malformed) {
+                    json(socket, reply, 404, "not_found", null);
+                }
+                return;
+            }
+        }
+        json(socket, reply, 404, "not_found", null);
+    }
+
+    private void admit(Socket socket, Request request, Reply reply) throws IOException {
+        long attempt = System.nanoTime();
+        synchronized (this) {
+            if (attempt - lastAuthenticationNs < 1_000_000_000L) {
+                json(socket, reply, 429, "retry", null);
+                return;
+            }
+            lastAuthenticationNs = attempt;
+        }
+
+        JSONObject credentials = bodyObject(request.body);
+        String password = credentials.optString("password", "");
+        if (!access.authenticate(password, request.fields.get("x-byd-extend-proxy-token"))) {
+            json(socket, reply, 401, "unauthorized", null);
+            return;
+        }
+
+        String previous = access.current();
+        String session = access.reserveAdmission(request.session);
+        if (session == null) {
+            json(socket, reply, 401, "unauthorized", null);
+            return;
+        }
+        // This callback is intentionally outside the access and playback locks. The runtime may
+        // fence a previous helper by calling back into server.supersede synchronously.
+        boolean accepted = false;
+        try {
+            accepted = stream.admitted(session) && access.isCurrent(session);
+            if (!accepted) {
+                json(socket, reply, 409, "busy", null);
+                return;
+            }
+            json(socket, reply, 200, "ready", "viewer=" + session + "; Path=/; Secure; HttpOnly; SameSite=Strict");
+        } finally {
+            access.cancelAdmission(session);
+            // A timeout before commit leaves the old viewer untouched. If commit already ran,
+            // release the unacknowledged new owner instead of leaking its live source.
+            if (!accepted && !Objects.equals(previous, session)) {
+                try { stop(session, socket); }
+                catch (RuntimeException cleanupFailure) {
+                    CameraViewingDiagnostics.failure("viewer_admission_cleanup", "shared", cleanupFailure);
+                }
+            }
+        }
+    }
+
+    private void servePage(Socket socket, boolean head, Reply reply) throws IOException {
+        String page = new String(stream.resource("index.html"), StandardCharsets.UTF_8);
+        JSONObject bootstrap = stream.presentation();
+        try {
+            bootstrap = new JSONObject(bootstrap.toString());
+            bootstrap.put("passwordRequired", passwordRequired);
+        } catch (JSONException failure) {
+            throw new IOException("Cannot encode camera viewer presentation", failure);
+        }
+        page = page.replace("<!--VIEWER_BOOTSTRAP-->", jsonForHtml(bootstrap.toString()));
+        serveText(socket, head, reply, "text/html; charset=utf-8", page);
+    }
+
+    private boolean authorized(String session, Socket socket, Reply reply) throws IOException {
+        if (!access.accepts(session, now())) {
+            json(socket, reply, 401, access.wasReplaced(session) ? "replaced" : "unauthorized", null);
+            return false;
+        }
+        if (!registerSessionSocket(session, socket)) {
+            json(socket, reply, 401, access.wasReplaced(session) ? "replaced" : "unauthorized", null);
+            return false;
+        }
+        final boolean current;
+        try { current = stream.current(session); }
+        catch (RuntimeException failure) { throw failure; }
+        if (!current) {
+            supersede(session, socket);
+            json(socket, reply, 401, "replaced", null);
+            return false;
+        }
+        return true;
+    }
+
+    private void stop(String session, Socket responseSocket) {
+        closePlayback(session);
+        if (access.release(session)) {
+            closeSessionSockets(session, responseSocket);
+            stream.disconnected(session);
+        }
+    }
+
+    private void serveThumbnail(Socket socket, boolean head, String session, String id, Reply reply)
+            throws Exception {
+        if (!transferCurrent(session, socket)) { json(socket, reply, 401, "replaced", null); return; }
+        ParcelFileDescriptor descriptor = stream.recordings().openThumbnail(id);
+        if (descriptor == null) { json(socket, reply, 404, "not_found", null); return; }
+        try (ParcelFileDescriptor closeable = descriptor) {
+            long length = closeable.getStatSize();
+            if (length < 0) throw new IOException("Cached Motion thumbnail length is unavailable");
+            writeHeaders(socket, reply, 200, "image/png", length, null, null);
+            if (head) return;
+            byte[] buffer = new byte[16 * 1024];
+            long offset = 0;
+            while (offset < length) {
+                if (!transferCurrent(session)) throw new SocketException("Viewer session is no longer current");
+                int count = (int) Math.min(buffer.length, length - offset);
+                int read;
+                try { read = Os.pread(closeable.getFileDescriptor(), buffer, 0, count, offset); }
+                catch (ErrnoException failure) {
+                    if (socket.isClosed() || !transferCurrent(session))
+                        throw cancelledTransfer(failure);
+                    throw new IOException("Cannot read cached Motion thumbnail", failure);
+                }
+                if (read <= 0) throw new EOFException("Cached Motion thumbnail ended before its indexed size");
+                socket.getOutputStream().write(buffer, 0, read);
+                offset += read;
+            }
+            socket.getOutputStream().flush();
+        }
+    }
+
+    private void serveVideo(Socket socket, Request request, String id, Reply reply) throws Exception {
+        SessionPlayback playback;
+        try { playback = playbackFor(request.session, id, socket); }
+        catch (java.io.FileNotFoundException missing) { json(socket, reply, 404, "not_found", null); return; }
+        catch (HttpFailure expired) { json(socket, reply, expired.status, expired.bodyStatus, null); return; }
+        CameraViewerArchive.RangeFile rangeFile;
+        try { rangeFile = playback.playback.openDescriptor(); }
+        catch (java.io.FileNotFoundException missing) { json(socket, reply, 404, "not_found", null); return; }
+        try (CameraViewerArchive.RangeFile closeable = rangeFile) {
+            if (!transferCurrent(request.session, socket) || !registerTransfer(request.session, playback, socket)) {
+                json(socket, reply, 401, "replaced", null);
+                return;
+            }
+            HttpByteRange range;
+            try { range = HttpByteRange.parse(request.fields.get("range"), closeable.contentLength); }
+            catch (IllegalArgumentException invalid) {
+                writeHeaders(socket, reply, 416, "video/mp4", 0,
+                        "Accept-Ranges: bytes\r\nContent-Range: bytes */" + closeable.contentLength + "\r\n", null);
+                return;
+            }
+            int status = range.partial ? 206 : 200;
+            String extra = "Accept-Ranges: bytes\r\n" + (range.partial
+                    ? "Content-Range: " + range.contentRange() + "\r\n" : "");
+            writeHeaders(socket, reply, status, "video/mp4", range.length(), extra, null);
+            if (request.method.equals("HEAD")) return;
+
+            byte[] buffer = new byte[VIDEO_CHUNK];
+            long offset = range.start;
+            long remaining = range.length();
+            while (remaining > 0) {
+                if (!transferCurrent(request.session) || !isTransferRegistered(request.session, playback, socket))
+                    throw new SocketException("Viewer session or recording was superseded");
+                int requested = (int) Math.min(buffer.length, remaining);
+                int read;
+                try {
+                    read = Os.pread(closeable.descriptor.getFileDescriptor(), buffer,
+                            0, requested, offset);
+                } catch (ErrnoException failure) {
+                    if (socket.isClosed() || !isTransferRegistered(request.session, playback, socket))
+                        throw cancelledTransfer(failure);
+                    throw new IOException("Cannot read original Motion recording range", failure);
+                }
+                if (read <= 0) throw new EOFException("Motion recording ended before the requested range");
+                socket.getOutputStream().write(buffer, 0, read);
+                offset += read;
+                remaining -= read;
+            }
+            socket.getOutputStream().flush();
+        } finally {
+            unregisterTransfer(request.session, playback, socket);
+        }
+    }
+
+    private SessionPlayback playbackFor(String session, String id, Socket requestSocket) throws Exception {
+        if (!transferCurrent(session, requestSocket))
+            throw new HttpFailure(401, "replaced", null);
+        CameraViewerArchive archive = stream.recordings();
+        synchronized (playbackLock) {
+            if (closed || !access.isCurrent(session))
+                throw new java.io.FileNotFoundException("Viewer session is no longer current");
+            SessionPlayback current = playbacks.get(session);
+            if (current != null && current.id.equals(id)) return current;
+            if (current != null) {
+                playbacks.remove(session);
+                closePlayback(current);
+            }
+            CameraViewerArchive.Playback selected = archive.openVideo(id);
+            SessionPlayback opened = new SessionPlayback(id, selected);
+            playbacks.put(session, opened);
+            return opened;
+        }
+    }
+
+    private void closePlayback(String session) {
+        synchronized (playbackLock) {
+            closePlayback(playbacks.remove(session));
+        }
+    }
+
+    private void supersede(String session, Socket except) {
+        access.supersede(session);
+        closePlayback(session);
+        closeSessionSockets(session, except);
+    }
+
+    private boolean registerSessionSocket(String session, Socket socket) {
+        synchronized (sessionSocketLock) {
+            if (closed || !access.isCurrent(session)) return false;
+            sessionSockets.computeIfAbsent(session, ignored -> new HashSet<>()).add(socket);
+            socketSessions.put(socket, session);
+            return true;
+        }
+    }
+
+    private void unregisterSessionSocket(Socket socket) {
+        synchronized (sessionSocketLock) {
+            String session = socketSessions.remove(socket);
+            if (session == null) return;
+            Set<Socket> active = sessionSockets.get(session);
+            if (active == null) return;
+            active.remove(socket);
+            if (active.isEmpty()) sessionSockets.remove(session);
+        }
+    }
+
+    private void closeSessionSockets(String session, Socket except) {
+        ArrayList<Socket> active;
+        synchronized (sessionSocketLock) {
+            Set<Socket> current = sessionSockets.get(session);
+            if (current == null) return;
+            active = new ArrayList<>(current);
+        }
+        for (Socket socket : active) {
+            if (socket == except) continue;
+            try { socket.close(); }
+            catch (IOException failure) {
+                CameraViewingDiagnostics.failure("viewer_session_socket_close", "shared", failure);
+            }
+        }
+    }
+
+    private static void closePlayback(SessionPlayback playback) {
+        if (playback == null) return;
+        for (Socket socket : new ArrayList<>(playback.transfers)) {
+            try { socket.close(); }
+            catch (IOException failure) {
+                CameraViewingDiagnostics.failure("viewer_archive_transfer_close", "shared", failure);
+            }
+        }
+        try { playback.playback.close(); }
+        catch (IOException failure) {
+            CameraViewingDiagnostics.failure("viewer_archive_lease_close", "shared", failure);
+        }
+    }
+
+    private boolean registerTransfer(String session, SessionPlayback playback, Socket socket) {
+        synchronized (playbackLock) {
+            if (closed || playbacks.get(session) != playback || !access.isCurrent(session)) return false;
+            playback.transfers.add(socket);
+            return true;
+        }
+    }
+
+    private boolean isTransferRegistered(String session, SessionPlayback playback, Socket socket) {
+        synchronized (playbackLock) {
+            return !closed && playbacks.get(session) == playback && playback.transfers.contains(socket);
+        }
+    }
+
+    private void unregisterTransfer(String session, SessionPlayback playback, Socket socket) {
+        synchronized (playbackLock) {
+            if (playbacks.get(session) == playback) playback.transfers.remove(socket);
+        }
+    }
+
+    private boolean transferCurrent(String session) {
+        return transferCurrent(session, null);
+    }
+
+    private boolean transferCurrent(String session, Socket except) {
+        if (!access.accepts(session, now())) return false;
+        if (stream.current(session)) return true;
+        supersede(session, except);
+        return false;
+    }
+
+    private static JSONObject bodyObject(byte[] body) throws IOException {
+        try { return new JSONObject(new String(body, StandardCharsets.UTF_8)); }
+        catch (JSONException malformed) { throw new HttpFailure(400, "invalid_json", null, malformed); }
+    }
+
+    private static int direction(String view) throws IOException {
+        switch (view) {
+            case "composition": return -1;
+            case "front": return 0;
+            case "rear": return 1;
+            case "left": return 2;
+            case "right": return 3;
+            default: throw new HttpFailure(400, "invalid_view", null);
+        }
+    }
+
+    private static String archiveId(String path, String prefix) {
+        if (!path.startsWith(prefix)) return null;
+        String id = path.substring(prefix.length());
+        return id.matches("[A-Za-z0-9_-]{43}") ? id : null;
+    }
+
+    private static boolean isRead(String method) { return method.equals("GET") || method.equals("HEAD"); }
 
     private static String cookie(String header) {
         if (header == null) return null;
+        String found = null;
         for (String item : header.split(";")) {
             String value = item.trim();
-            if (value.startsWith("viewer=")) return value.substring(7);
+            if (!value.startsWith("viewer=")) continue;
+            if (found != null) return null;
+            found = value.substring(7);
         }
-        return null;
+        return found;
     }
 
-    private static void json(Socket socket, int status, String phase, String cookie) throws IOException {
-        byte[] bytes;
-        try { bytes = new JSONObject().put("status", phase).toString().getBytes(StandardCharsets.UTF_8); }
-        catch (org.json.JSONException invalid) { throw new IOException(invalid); }
-        respond(socket, status, "application/json", bytes, cookie);
+    private static String jsonForHtml(String value) {
+        return value.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e");
     }
 
-    private static void respond(Socket socket, int status, String mime, byte[] body, String cookie) throws IOException {
-        OutputStream out = socket.getOutputStream();
-        String headers = "HTTP/1.1 " + status + " Response\r\nContent-Type: " + mime
-                + "\r\nContent-Length: " + body.length
-                + "\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff"
-                + "\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; "
-                + "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-                + "media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'"
-                + (cookie == null ? "" : "\r\nSet-Cookie: " + cookie) + "\r\n\r\n";
-        out.write(headers.getBytes(StandardCharsets.US_ASCII)); out.write(body); out.flush();
+    private static String expiredCookie() {
+        return "viewer=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0";
+    }
+
+    private static String operationName(String path) {
+        if (path.equals("/session")) return "session";
+        if (path.equals("/live")) return "live";
+        if (path.startsWith("/archive/video/")) return "archive_video";
+        if (path.startsWith("/archive/thumbnail/")) return "archive_thumbnail";
+        if (path.startsWith("/archive")) return "archive";
+        if (path.equals("/status")) return "status";
+        if (path.equals("/stop")) return "stop";
+        if (path.equals("/diagnostic")) return "diagnostic";
+        return "resource";
+    }
+
+    private static boolean isExpectedDisconnect(Exception failure, boolean replyStarted,
+            String operation) {
+        return failure instanceof SocketException
+                || (failure instanceof EOFException && !replyStarted && "request".equals(operation));
+    }
+
+    private static SocketException cancelledTransfer(Throwable cause) {
+        SocketException cancelled = new SocketException("Viewer transfer was cancelled");
+        cancelled.initCause(cause);
+        return cancelled;
+    }
+
+    /** Parser errors can include their entire input; keep the cause classes and stacks, not payload. */
+    private static String parserFailureWithoutPayload(Throwable failure) {
+        StringBuilder detail = new StringBuilder(
+                "Malformed JSON request body; parser messages omitted because they may contain payload data\n");
+        Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        Throwable current = failure;
+        while (current != null && seen.add(current)) {
+            detail.append(current.getClass().getName()).append('\n');
+            for (StackTraceElement frame : current.getStackTrace())
+                detail.append("  at ").append(frame).append('\n');
+            current = current.getCause();
+        }
+        return detail.toString();
+    }
+
+    private static void serveJson(Socket socket, boolean head, Reply reply, JSONObject data) throws IOException {
+        serveText(socket, head, reply, "application/json; charset=utf-8", data.toString());
+    }
+
+    private static void serveText(Socket socket, boolean head, Reply reply, String mime, String value)
+            throws IOException {
+        serveBytes(socket, head, reply, mime, value.getBytes(StandardCharsets.UTF_8), null);
+    }
+
+    private static void serveBytes(Socket socket, boolean head, Reply reply, String mime, byte[] body,
+            String extraHeaders) throws IOException {
+        writeHeaders(socket, reply, 200, mime, body.length, extraHeaders, null);
+        if (!head) {
+            socket.getOutputStream().write(body);
+            socket.getOutputStream().flush();
+        }
+    }
+
+    private static void json(Socket socket, Reply reply, int status, String phase, String cookie)
+            throws IOException {
+        json(socket, reply, status, phase, cookie, null);
+    }
+
+    private static void json(Socket socket, Reply reply, int status, String phase, String cookie,
+            String extraHeaders)
+            throws IOException {
+        String value;
+        try { value = new JSONObject().put("status", phase).toString(); }
+        catch (JSONException impossible) { throw new IOException("Cannot encode viewer response", impossible); }
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        writeHeaders(socket, reply, status, "application/json; charset=utf-8", bytes.length, extraHeaders, cookie);
+        if (!reply.head) socket.getOutputStream().write(bytes);
+        socket.getOutputStream().flush();
+    }
+
+    private static void methodNotAllowed(Socket socket, Reply reply) throws IOException {
+        json(socket, reply, 405, "method_not_allowed", null, "Allow: GET, HEAD, POST\r\n");
+    }
+
+    private static void writeHeaders(Socket socket, Reply reply, int status, String mime, long length,
+            String extraHeaders, String cookie) throws IOException {
+        if (length < 0) throw new IOException("Invalid response length");
+        String headers = "HTTP/1.1 " + status + " " + reason(status) + "\r\n"
+                + "Content-Type: " + mime + "\r\n"
+                + "Content-Length: " + length + "\r\n"
+                + "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+                + "Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n"
+                + "Content-Security-Policy: default-src 'self'; script-src 'self'; "
+                + "style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; "
+                + "worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'\r\n"
+                + (extraHeaders == null ? "" : extraHeaders)
+                + (cookie == null ? "" : "Set-Cookie: " + cookie + "\r\n") + "\r\n";
+        reply.started = true;
+        socket.getOutputStream().write(headers.getBytes(StandardCharsets.US_ASCII));
+        socket.getOutputStream().flush();
+    }
+
+    private static String reason(int status) {
+        switch (status) {
+            case 200: return "OK";
+            case 206: return "Partial Content";
+            case 400: return "Bad Request";
+            case 401: return "Unauthorized";
+            case 403: return "Forbidden";
+            case 404: return "Not Found";
+            case 405: return "Method Not Allowed";
+            case 413: return "Payload Too Large";
+            case 416: return "Range Not Satisfiable";
+            case 429: return "Too Many Requests";
+            case 431: return "Request Header Fields Too Large";
+            case 500: return "Internal Server Error";
+            case 409: return "Conflict";
+            default: return "Error";
+        }
     }
 
     @Override public void close() {
-        closed = true; access.revoke();
-        try { server.close(); } catch (IOException ignored) { }
-        for (Socket socket : sockets) try { socket.close(); } catch (IOException ignored) { }
+        closed = true;
+        String current = access.current();
+        boolean released = current != null && access.release(current);
+        access.revoke();
+        try { server.close(); }
+        catch (IOException failure) {
+            CameraViewingDiagnostics.failure("viewer_listener_close", "shared", failure);
+        }
+        for (Socket socket : sockets) {
+            try { socket.close(); }
+            catch (IOException failure) {
+                CameraViewingDiagnostics.failure("viewer_request_socket_close", "shared", failure);
+            }
+        }
+        ArrayList<SessionPlayback> active;
+        synchronized (playbackLock) {
+            active = new ArrayList<>(playbacks.values());
+            playbacks.clear();
+        }
+        for (SessionPlayback playback : active) closePlayback(playback);
         requests.shutdownNow();
-        stream.disconnected();
+        if (released) {
+            try { stream.disconnected(current); }
+            catch (RuntimeException failure) {
+                CameraViewingDiagnostics.failure("viewer_shutdown_cleanup", "shared", failure);
+            }
+        }
+    }
+
+    private static final class Request {
+        final String method;
+        final String path;
+        final Map<String, String> fields;
+        final byte[] body;
+        final String session;
+
+        Request(String method, String path, Map<String, String> fields, byte[] body, String session) {
+            this.method = method;
+            this.path = path;
+            this.fields = fields;
+            this.body = body;
+            this.session = session;
+        }
+    }
+
+    private static final class Reply { boolean started; boolean head; }
+
+    private static final class HttpFailure extends IOException {
+        final int status;
+        final String bodyStatus;
+        final String extraHeaders;
+
+        HttpFailure(int status, String bodyStatus, String extraHeaders) {
+            this(status, bodyStatus, extraHeaders, null);
+        }
+
+        HttpFailure(int status, String bodyStatus, String extraHeaders, Throwable cause) {
+            super(bodyStatus, cause);
+            this.status = status;
+            this.bodyStatus = bodyStatus;
+            this.extraHeaders = extraHeaders;
+        }
+    }
+
+    private static final class SessionPlayback {
+        final String id;
+        final CameraViewerArchive.Playback playback;
+        final Set<Socket> transfers = ConcurrentHashMap.newKeySet();
+
+        SessionPlayback(String id, CameraViewerArchive.Playback playback) {
+            this.id = id;
+            this.playback = playback;
+        }
     }
 }

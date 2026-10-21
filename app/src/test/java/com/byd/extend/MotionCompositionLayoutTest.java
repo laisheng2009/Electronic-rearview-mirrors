@@ -6,6 +6,12 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 
 public class MotionCompositionLayoutTest {
+    @Test public void selectedLiveCameraUsesFullOutputWithoutStretchOrCrop() {
+        assertRect(MotionCompositionLayout.singleCameraRect(1280, 720), 108, 0, 1171, 720);
+        assertRect(MotionCompositionLayout.singleCameraRect(720, 1280), 0, 396, 720, 883);
+        assertNull(MotionCompositionLayout.singleCameraRect(0, 720));
+    }
+
     @Test public void canonicalCellsAreCenteredAdjacentAndPreserveCameraAspect() {
         MotionCompositionLayout.Rect topLeft = MotionCompositionLayout.cameraRectForCell(0);
         MotionCompositionLayout.Rect topRight = MotionCompositionLayout.cameraRectForCell(1);

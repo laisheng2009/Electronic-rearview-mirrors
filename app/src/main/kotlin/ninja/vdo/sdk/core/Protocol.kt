@@ -65,18 +65,25 @@ class PasswordContext(rawPassword: String?, val salt: String = Protocol.DEFAULT_
 
     /** Decodes a field that is either an encrypted hex string (with `vector`) or an inline JSON value. */
     fun decodeField(msg: JSONObject, key: String): Any? {
+        return try {
+            decodeFieldOrThrow(msg, key)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Decodes a protected field while retaining decryption/parse failures for session diagnostics. */
+    fun decodeFieldOrThrow(msg: JSONObject, key: String): Any? {
         val v = msg.opt(key) ?: return null
         if (v is String) {
             val iv = msg.optString("vector", "")
-            if (!enabled || iv.isEmpty()) return null
-            return try {
-                parseJson(Crypto.decryptMessage(v, iv, phrase))
-            } catch (_: Exception) {
-                null
-            }
+            if (!enabled) throw SecurityException("encrypted field received while password is disabled")
+            if (iv.isEmpty()) throw IllegalArgumentException("encrypted field is missing its vector")
+            return parseJson(Crypto.decryptMessage(v, iv, phrase))
         }
         // Extend requires proof of the configured password before accepting peer SDP/ICE.
-        return if (enabled) null else v
+        if (enabled) throw SecurityException("plaintext field rejected while password is enabled")
+        return v
     }
 
     companion object {

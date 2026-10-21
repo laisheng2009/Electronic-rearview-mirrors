@@ -22,6 +22,7 @@ object VdoEvents {
     const val PEER_CONNECTED = "peerConnected"
     const val PEER_DISCONNECTED = "peerDisconnected"
     const val CONNECTION_FAILED = "connectionFailed"
+    const val SESSION_DIAGNOSTIC = "sessionDiagnostic"
     const val ICE_RESTART = "iceRestart"
     const val DATA_CHANNEL_OPEN = "dataChannelOpen"
     const val DATA_CHANNEL_CLOSE = "dataChannelClose"
@@ -45,12 +46,17 @@ object VdoEvents {
 class VdoEvent(
     val type: String,
     val uuid: String? = null,
+    /** VDO signaling generation for this peer, when applicable. */
+    val sessionId: String? = null,
     val streamId: String? = null,
     /** "publisher" or "viewer". */
     val connectionType: String? = null,
     /** Decoded JSON payload: JSONObject, JSONArray, String, Number, Boolean or null. */
     val data: Any? = null,
     val message: String? = null,
+    /** Failed SDK operation and original peer-scoped cause, when applicable. */
+    val stage: String? = null,
+    val failure: Throwable? = null,
     /** Pub/sub channel or data channel label. */
     val channel: String? = null,
     val latencyMs: Long? = null,

@@ -6,6 +6,18 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class CameraViewerLeaseTest {
+    @Test public void replacementKeepsNewOwnerWhenOldCleanupArrives() {
+        CameraViewerLease lease = new CameraViewerLease();
+        Object previous = new Object(), next = new Object();
+        lease.replace(previous);
+        org.junit.Assert.assertSame(previous, lease.replace(next));
+        lease.release(previous);
+        assertTrue(lease.owns(next));
+        assertFalse(lease.owns(previous));
+        lease.release(next);
+        assertFalse(lease.owns(next));
+    }
+
     @Test
     public void leaseIsExclusiveAndWrongOwnerCannotReleaseIt() {
         CameraViewerLease lease = new CameraViewerLease();

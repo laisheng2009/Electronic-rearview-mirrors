@@ -24,12 +24,23 @@ import java.util.function.Consumer
 
 /** Independent shell-process owner. Only the local app IPC can change profiles. */
 class CameraViewingRuntime(private val context: Context, directory: File, ownerUid: Int) : AutoCloseable {
-    private val owner = Executors.newSingleThreadScheduledExecutor { Thread(it, "viewing-owner") }
+    @Volatile private var ownerThread: Thread? = null
+    private val owner = Executors.newSingleThreadScheduledExecutor {
+        Thread(it, "viewing-owner").also { thread -> ownerThread = thread }
+    }
     private val store = EncryptedFileSecretStore(File(directory, "profiles"), "com.byd.extend.$ownerUid")
     private val nativeDirectory = File(directory, "native")
     private val nativeLibrary = File(context.applicationInfo.nativeLibraryDir, "libcamera_tunnel.so")
     private val profiles = linkedMapOf<String, Profile>()
     private val lease = CameraViewerLease()
+    @Volatile private var viewer: Viewer? = null
+    private var source: RemoteCameraSource? = null
+    private var sourceRun: Run? = null
+    private var sourceAttached = false
+    private val archiveDelegate = lazy { CameraViewerArchive.create(context, ownerUid) }
+    private val archive by archiveDelegate
+    @Volatile private var locale = "en"
+    @Volatile private var theme = "dark"
     private var enabled = false
     @Volatile private var closed = false
     @Volatile private var latest = "{}"
@@ -62,7 +73,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     }
 
     private class Profile(val method: String, var config: JSONObject) {
-        var phase = "idle"
+        @Volatile var phase = "idle"
         var error: String? = null
         var url: String? = null
         var login: String? = null
@@ -73,11 +84,9 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         val pendingRevoke get() = config.optBoolean("revocationPending")
     }
     private class Run(val generation: Long) {
-        val lease = Any()
         var provider: CameraTunnelProvider? = null
         var publisher: VdoCameraPublisher? = null
         var server: CameraViewerServer? = null
-        var source: RemoteCameraSource? = null
         @Volatile var encoder: CameraHlsEncoder? = null
         var viewer = false
         var video = false
@@ -85,6 +94,12 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         var deadline = 0L
         var interactive = false
         var preparationError: String? = null
+    }
+    private class Viewer(val profile: Profile, val run: Run, val session: String) {
+        @Volatile var mode = "pending"
+        @Volatile var direction = -1
+        var firstLiveFrame = false
+        var firstArchiveFrame = false
     }
 
     fun setListener(value: Consumer<JSONObject>?) { listener = value; value?.accept(snapshot()) }
@@ -94,7 +109,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         check(!closed)
         try { when (operation) {
             "provision" -> provision(payload)
-            "configure" -> configure(payload.getBoolean("enabled"))
+            "configure" -> { presentation(payload); configure(payload.getBoolean("enabled")) }
             "authorize", "reconnect" -> {
                 val profile = profile(payload)
                 require(!profile.pendingRevoke) { "revocation_pending" }
@@ -107,6 +122,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                     validate(profile.method, config)
                     profile.config = JSONObject(config.toString()).put("authorized", false)
                         .put("revocationPending", false)
+                        .put("viewerLocale", locale).put("viewerTheme", theme)
                         .put("revocationEpoch", profile.config.optLong("revocationEpoch"))
                     save(profile)
                 }
@@ -121,7 +137,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                 observeCharge()
                 profiles.values.forEach { p -> p.run?.let { run ->
                 if (run.viewer && payload.optBoolean("restartVideo", true)) {
-                    closeVideo(run); run.deadline = SystemClock.elapsedRealtime() + 30_000; prepare(p, run)
+                    closeVideo(); run.deadline = SystemClock.elapsedRealtime() + 30_000; prepare(p, run)
                 }
                 } }
             }
@@ -190,7 +206,22 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             connectivity.registerDefaultNetworkCallback(networkCallback)
             networkRegistered = true
         }
+        presentation(payload)
         configure(payload.getBoolean("enabled"))
+    }
+
+    private fun presentation(payload: JSONObject) {
+        locale = com.byd.extend.AppLanguage.normalize(payload.optString("locale",
+            profiles.values.firstOrNull()?.config?.optString("viewerLocale", "en") ?: "en")).let {
+            if (it == "zh-CN") "zh" else it
+        }
+        theme = if (payload.optString("theme",
+                profiles.values.firstOrNull()?.config?.optString("viewerTheme", "dark") ?: "dark") == "light") "light" else "dark"
+        profiles.values.forEach { p ->
+            if (p.config.optString("viewerLocale") != locale || p.config.optString("viewerTheme") != theme) {
+                p.config.put("viewerLocale", locale).put("viewerTheme", theme); save(p)
+            }
+        }
     }
 
     private fun observeCharge() {
@@ -278,20 +309,54 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                         p.config.put("authorized", true); save(p)
                         p.url = viewerUrl; p.phase = "ready"
                     }
-                    override fun onViewerConnected() = execute(p, run) { connected(p, run) }
-                    override fun onViewerDisconnected() = execute(p, run) { disconnected(p, run) }
+                    override fun onViewerConnected(sessionId: String) = execute(p, run) {
+                        if (current(run, sessionId)) live(p, run, sessionId, -1)
+                    }
+                    override fun onViewerDisconnected(sessionId: String) = execute(p, run) {
+                        disconnected(p, run, sessionId)
+                    }
+                    override fun onSessionError(sessionId: String, stage: String, failure: Throwable) = execute(p, run) {
+                        CameraViewingDiagnostics.failure("vdo_session_$stage", p.method, failure,
+                            p.config.optString("password"))
+                        disconnected(p, run, sessionId)
+                    }
                     override fun onError(encoderUnavailable: Boolean) = execute(p, run) {
                         throw RuntimeFailure(if (encoderUnavailable) "encoder_unavailable" else "connection_failed")
                     }
-                }, { lease.acquire(run.lease) }, { lease.release(run.lease) }).also { it.start() }
+                }, { id -> serialized { admit(p, run, id) } }, { id ->
+                    execute(p, run) { disconnected(p, run, id) }
+                }).also { it.start() }
         } else {
             val privateProof = if (p.method == "tailscale" && !p.config.optBoolean("public")) randomProof() else null
             val server = CameraViewerServer(p.config.optString("password"), privateProof, object : CameraViewerServer.Stream {
-                override fun acquire() = lease.acquire(run.lease)
-                override fun connected() = execute(p, run) { connected(p, run) }
-                override fun disconnected() = execute(p, run) { disconnected(p, run) }
-                override fun status() = p.phase
-                override fun unavailableChargeMask(): Int = chargeState?.missingMetrics() ?: 3
+                override fun admitted(session: String) = serialized { admit(p, run, session) }
+                override fun current(session: String) = current(run, session)
+                override fun disconnected(session: String) = execute(p, run) { disconnected(p, run, session) }
+                override fun live(session: String, direction: Int) = execute(p, run) {
+                    if (current(run, session)) live(p, run, session, direction)
+                }
+                override fun archive(session: String, leave: Boolean) = execute(p, run) {
+                    if (current(run, session)) {
+                        viewer!!.mode = if (leave) "pending" else "archive"
+                        closeVideo(); p.phase = "ready"
+                    }
+                }
+                override fun status(): JSONObject {
+                    val active = viewer?.takeIf { it.run === run }
+                    return JSONObject().put("status", p.phase)
+                        .put("missingCharge", chargeState?.missingMetrics() ?: 3)
+                        .put("mode", active?.mode ?: "pending")
+                        .put("view", VIEWS[(active?.direction ?: -1) + 1])
+                }
+                override fun presentation() = JSONObject().put("locale", locale).put("theme", theme).put("provider", p.method)
+                override fun firstFrame(session: String, mode: String) = execute(p, run) {
+                    val active = viewer?.takeIf { current(run, session) } ?: return@execute
+                    if (mode == "live" && !active.firstLiveFrame || mode == "archive" && !active.firstArchiveFrame) {
+                        if (mode == "live") active.firstLiveFrame = true else active.firstArchiveFrame = true
+                        sessionEvent("first_displayed_frame", active, "mode=$mode")
+                    }
+                }
+                override fun recordings() = archive
                 override fun video() = run.encoder?.window
                 override fun resource(name: String) = context.assets.open("camera-view/$name").use { it.readBytes() }
             })
@@ -302,14 +367,49 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         }
     }
 
-    private fun connected(p: Profile, run: Run) {
-        if (run.viewer) return
-        run.viewer = true
+    private fun current(run: Run, id: String): Boolean {
+        val active = viewer ?: return false
+        return active.run === run && active.session == id && lease.owns(active)
+    }
+
+    /** Only called after HTTP credentials or VDO's protected SDP + connection succeed. */
+    private fun admit(p: Profile, run: Run, id: String): Boolean {
+        if (!enabled || p.run !== run || p.generation != run.generation
+            || run.publisher?.canAdmitSession(id) == false
+            || run.server?.commitAdmission(id) == false) return false
+        if (current(run, id)) return true
+        val next = Viewer(p, run, id)
+        val previous = lease.replace(next) as? Viewer
+        viewer = next
+        if (previous != null) {
+            previous.run.viewer = false
+            previous.run.preparing = false
+            previous.run.server?.supersede(previous.session)
+            previous.run.publisher?.endSession(previous.session)
+            previous.profile.phase = "ready"
+            sessionEvent("replaced", previous, "next_provider=${p.method}")
+        }
+        run.viewer = true; run.deadline = SystemClock.elapsedRealtime() + 30_000
+        p.phase = "ready"
+        sessionEvent("admitted", next)
+        publish()
+        return true
+    }
+
+    private fun live(p: Profile, run: Run, id: String, direction: Int) {
+        val active = viewer?.takeIf { current(run, id) } ?: return
+        require(direction in -1..3)
+        active.mode = "live"; active.direction = direction
         run.deadline = SystemClock.elapsedRealtime() + 30_000
         prepare(p, run)
     }
     private fun prepare(p: Profile, run: Run) {
-        if (p.run !== run || !enabled || !run.viewer || run.video) return
+        try { prepareVideo(p, run) }
+        catch (failure: Exception) { streamFailure(p, run, failure) }
+    }
+    private fun prepareVideo(p: Profile, run: Run) {
+        val active = viewer?.takeIf { it.run === run && it.mode == "live" && lease.owns(it) } ?: return
+        if (p.run !== run || !enabled || !run.viewer) return
         run.preparing = false
         val charge = try {
             if (chargeObservation == null) observeCharge()
@@ -325,24 +425,66 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             if (SystemClock.elapsedRealtime() >= run.deadline) throw RuntimeFailure("camera_backend_unavailable", failure)
             retryPreparation(p, run); return
         }
-        if (charge.isBlocked) { closeVideo(run); p.phase = "low_battery"; return }
+        if (charge.isBlocked) { closeVideo(); p.phase = "low_battery"; return }
         p.phase = "preparing"
-        val camera = run.source ?: RemoteCameraSource(context) { reason ->
-            execute(p, run) { throw RuntimeFailure("camera_unavailable", IllegalStateException(reason)) }
-        }.also { run.source = it }
-        val ready = try { camera.prepare() } catch (failure: Exception) {
+        val camera = source ?: newSource().also { source = it }
+        val ready = try { sourceAttached || camera.prepare() } catch (failure: Exception) {
             CameraViewingDiagnostics.failure("camera_prepare", p.method, failure)
             if (SystemClock.elapsedRealtime() >= run.deadline) throw RuntimeFailure("camera_unavailable", failure)
             false
         }
         if (!ready) { retryPreparation(p, run); return }
-        val surface = try { run.publisher?.startVideo() ?: CameraHlsEncoder { failure ->
-            execute(p, run) { throw RuntimeFailure("encoder_unavailable", failure) }
-        }.also { run.encoder = it }.start() } catch (failure: Exception) {
+        if (run.video && sourceRun === run && sourceAttached) {
+            camera.updateOutput(null, active.direction)
+            p.phase = "connected"
+            return
+        }
+        val previous = sourceRun
+        try {
+            val surface = run.publisher?.startVideo() ?: CameraHlsEncoder({ event, frames, bytes ->
+                execute(p, run) { viewer?.takeIf { it.run === run }?.let {
+                    sessionEvent(event, it, "frames=$frames bytes=$bytes")
+                } }
+            }) { failure ->
+                execute(p, run) { streamFailure(p, run, failure) }
+            }.also { run.encoder = it }.start()
+            if (sourceAttached) camera.updateOutput(surface, active.direction)
+            else {
+                camera.attach(surface, CameraHlsEncoder.WIDTH, CameraHlsEncoder.HEIGHT)
+                sourceAttached = true
+                if (active.direction >= 0) camera.updateOutput(null, active.direction)
+            }
+            sourceRun = run
+            if (previous != null && previous !== run) closeEncoder(previous)
+            run.video = true; p.phase = "connected"
+            sessionEvent("source_ready", active, "view=${VIEWS[active.direction + 1]}")
+        } catch (failure: Exception) {
+            // A timed-out GL change may still be queued. Detach before releasing either encoder.
+            try { closeVideo(); if (run !== previous) closeEncoder(run) }
+            catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
             throw RuntimeFailure("encoder_unavailable", failure)
         }
-        camera.attach(surface, CameraHlsEncoder.WIDTH, CameraHlsEncoder.HEIGHT)
-        run.video = true; p.phase = "connected"
+    }
+
+    private fun newSource(): RemoteCameraSource {
+        lateinit var created: RemoteCameraSource
+        created = RemoteCameraSource(context) { reason -> execute {
+            if (source === created) viewer?.let { streamFailure(it.profile, it.run, IllegalStateException(reason)) }
+        } }
+        return created
+    }
+
+    private fun streamFailure(p: Profile, run: Run, failure: Throwable) {
+        CameraViewingDiagnostics.failure("viewer_stream", p.method, failure,
+            p.config.optString("password"), p.config.optString("token"))
+        if (viewer?.run !== run) return
+        try { closeVideo() }
+        catch (cleanup: Exception) {
+            failure.addSuppressed(cleanup)
+            CameraViewingDiagnostics.failure("viewer_stream_cleanup", p.method, cleanup)
+        }
+        p.phase = "error"; p.error = "camera_unavailable"
+        viewer?.let { run.publisher?.endSession(it.session) }
     }
     private fun retryPreparation(p: Profile, run: Run) {
         if (SystemClock.elapsedRealtime() >= run.deadline) throw RuntimeFailure("camera_unavailable")
@@ -354,39 +496,50 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     private fun chargeChanged(charge: CameraChargePolicy.State) {
         for (p in profiles.values) p.run?.let { run ->
             if (run.viewer) {
-                if (charge.isBlocked) { closeVideo(run); p.phase = "low_battery" }
+                if (charge.isBlocked && viewer?.mode == "live") { closeVideo(); p.phase = "low_battery" }
                 else if (p.phase == "low_battery") { run.deadline = SystemClock.elapsedRealtime() + 30_000; prepare(p, run) }
             }
         }
     }
-    private fun disconnected(p: Profile, run: Run) {
+    private fun disconnected(p: Profile, run: Run, id: String) {
+        val active = viewer?.takeIf { current(run, id) } ?: return
+        sessionEvent("ended", active)
         run.viewer = false
-        closeVideo(run)
-        lease.release(run.lease)
+        closeVideo()
+        lease.release(active); viewer = null
         p.phase = "ready"
     }
-    private fun closeVideo(run: Run) {
-        run.preparing = false
-        val source = run.source
-        try { source?.close(); run.source = null }
+    private fun closeVideo() {
+        val camera = source
+        try { camera?.close(); source = null; sourceAttached = false }
         finally {
-            if (source == null || source.isVideoDetached) {
-                run.publisher?.stopVideo(); run.encoder?.close(); run.encoder = null; run.video = false
+            if (camera == null || camera.isVideoDetached) {
+                val previous = sourceRun
+                sourceRun = null
+                if (previous != null) closeEncoder(previous)
             }
         }
+    }
+    private fun closeEncoder(run: Run) {
+        run.preparing = false
+        run.publisher?.stopVideo(); run.encoder?.close(); run.encoder = null; run.video = false
     }
     private fun stop(p: Profile) {
         val run = p.run
         p.generation++
         if (run != null) {
+            val active = viewer
+            if (active?.run === run || sourceRun === run) {
+                closeVideo()
+                if (active?.run === run) { lease.release(active); viewer = null }
+            }
             run.publisher?.stopAccess()
             run.server?.close(); run.server = null
             run.provider?.close(); run.provider = null
             // Retain ownership on failed detach; admitting another camera owner would hide a leak.
-            closeVideo(run)
+            closeEncoder(run)
             p.run = null
             run.publisher?.close()
-            lease.release(run.lease)
         }
         p.phase = "idle"; p.url = null; p.login = null; p.authorizationRequest = 0
     }
@@ -437,6 +590,28 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             publish()
         }
     }
+
+    private fun <T> serialized(action: () -> T): T {
+        if (Thread.currentThread() === ownerThread) return action()
+        val pending = owner.submit<T> { action() }
+        return try { pending.get(30, TimeUnit.SECONDS) }
+        catch (failure: ExecutionException) { throw (failure.cause ?: failure) }
+        catch (failure: TimeoutException) {
+            pending.cancel(false)
+            throw failure
+        } catch (failure: InterruptedException) {
+            pending.cancel(false)
+            Thread.currentThread().interrupt()
+            throw failure
+        }
+    }
+
+    private fun sessionEvent(event: String, active: Viewer, extra: String = "") {
+        // The authentication token is never logged; this digest correlates only diagnostics.
+        val reference = java.security.MessageDigest.getInstance("SHA-256").digest(active.session.toByteArray())
+            .take(6).joinToString("") { "%02x".format(it.toInt() and 255) }
+        android.util.Log.i("CameraViewing", "event=$event provider=${active.profile.method} session=$reference $extra")
+    }
     private fun failed(p: Profile?, failure: Exception) {
         val code = ((failure as? RuntimeFailure)?.code ?: if (failure is SecurityException)
             "secure_store_error" else "connection_failed")
@@ -457,6 +632,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         owner.submit {
             configure(false)
             chargeObservation?.close(); chargeObservation = null
+            if (archiveDelegate.isInitialized()) archive.close()
             if (networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
             networkRegistered = false; closed = true
         }.get(30, TimeUnit.SECONDS)
@@ -465,6 +641,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     private class RuntimeFailure(val code: String, cause: Throwable? = null) : Exception(code, cause)
     companion object {
         private val METHODS = listOf("vdo", "tailscale", "zrok")
+        private val VIEWS = listOf("composition", "front", "rear", "left", "right")
         private fun randomProof() = ByteArray(32).also(SecureRandom()::nextBytes)
             .joinToString("") { "%02x".format(it.toInt() and 255) }
     }

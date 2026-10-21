@@ -26,6 +26,14 @@ public final class MotionCompositionLayout {
 
     private MotionCompositionLayout() { }
 
+    public static Rect singleCameraRect(int width, int height) {
+        if (width < 2 || height < 2) return null;
+        int imageWidth = (int) Math.min(width, (long) height * CAMERA_WIDTH / CAMERA_HEIGHT);
+        int imageHeight = (int) Math.min(height, (long) width * CAMERA_HEIGHT / CAMERA_WIDTH);
+        int left = (width - imageWidth) / 2, top = (height - imageHeight) / 2;
+        return new Rect(left, top, left + imageWidth, top + imageHeight);
+    }
+
     public static Rect cameraRectForCell(int cell) {
         return cameraRectForCell(cell, VIDEO_WIDTH, VIDEO_HEIGHT);
     }

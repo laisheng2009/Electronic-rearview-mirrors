@@ -7,6 +7,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import ninja.vdo.sdk.PublisherPeerAdmission
 import ninja.vdo.sdk.VdoNinja
+import ninja.vdo.sdk.core.Crypto
 import ninja.vdo.sdk.core.Protocol
 import ninja.vdo.sdk.core.TurnMode
 import ninja.vdo.sdk.core.VdoEvent
@@ -32,13 +33,14 @@ internal class VdoCameraPublisher(
     private val streamId: String,
     private val password: String,
     private val listener: Listener,
-    private val acquireViewer: () -> Boolean = { true },
-    private val releaseCandidate: () -> Unit = {},
+    private val acquireViewer: (sessionId: String) -> Boolean = { true },
+    private val releaseViewer: (sessionId: String) -> Unit = {},
 ) : AutoCloseable {
     interface Listener {
         fun onReady(viewerUrl: String)
-        fun onViewerConnected()
-        fun onViewerDisconnected()
+        fun onViewerConnected(sessionId: String)
+        fun onViewerDisconnected(sessionId: String)
+        fun onSessionError(sessionId: String, stage: String, failure: Throwable)
         fun onError(encoderUnavailable: Boolean)
     }
 
@@ -76,31 +78,73 @@ internal class VdoCameraPublisher(
     private var opening = false
     private var ready = false
     private var readyCallbackPending = false
-    private var viewerNotified = false
-    private var awaitingViewerCleanup = false
-    private var candidatePeerId: String? = null
-    private var acceptedPeerId: String? = null
+    private var candidateSessionId: String? = null
+    private var acceptedSessionId: String? = null
+    private val authenticatedSessions = LinkedHashSet<String>()
+    private val connectedPending = LinkedHashSet<String>()
+    private val connectedNotified = HashSet<String>()
     private var resources: Resources? = null
     private var video: VideoSession? = null
     private var sdkDisposedByClose = false
 
     private val publisherAdmission = object : PublisherPeerAdmission {
-        override fun tryAdmit(uuid: String): Boolean = synchronized(lock) {
-            if (closed || accessStopped) return@synchronized false
-            if (candidatePeerId == null && acceptedPeerId == null) {
-                if (!acquireViewer()) return@synchronized false
-                candidatePeerId = uuid
-                true
-            } else false
+        override fun tryReserve(uuid: String, sessionId: String): Boolean = synchronized(lock) {
+            if (closed || accessStopped || candidateSessionId != null) return@synchronized false
+            candidateSessionId = sessionId
+            true
         }
 
-        override fun release(uuid: String) {
-            synchronized(lock) {
-                if (candidatePeerId == uuid) {
-                    candidatePeerId = null
-                    if (acceptedPeerId == null) releaseCandidate()
+        override fun authenticate(sessionId: String): Boolean {
+            val isCandidate = synchronized(lock) {
+                !closed && !accessStopped && candidateSessionId == sessionId
+            }
+            if (!isCandidate) return false
+
+            val acquired = try { acquireViewer(sessionId) } catch (failure: Throwable) {
+                CameraViewingDiagnostics.failure("viewer_admission", "vdo", failure, password)
+                throw failure
+            }
+            if (!acquired) return false
+
+            var previous: String? = null
+            val committed = synchronized(lock) {
+                if (closed || accessStopped || candidateSessionId != sessionId) false
+                else {
+                    previous = acceptedSessionId
+                    candidateSessionId = null
+                    acceptedSessionId = sessionId
+                    authenticatedSessions.add(sessionId)
+                    true
                 }
             }
+            if (!committed) {
+                releaseViewer(sessionId)
+                return false
+            }
+
+            CameraViewingDiagnostics.detail(
+                "vdo_owner_admission", "vdo",
+                "session=${sessionHash(sessionId)} outcome=admitted replaced_session=${previous?.let(::sessionHash) ?: "none"}",
+                password,
+            )
+
+            // The app callback can also schedule this exact-session close during lease transfer;
+            // repeating it is harmless and cannot touch a newer peer generation.
+            previous?.takeIf { it != sessionId }?.let { old ->
+                resources?.sdk?.disconnectPublisherSession(old)
+            }
+            return true
+        }
+
+        override fun release(sessionId: String) {
+            val shouldRelease = synchronized(lock) {
+                val wasCandidate = candidateSessionId == sessionId
+                if (wasCandidate) {
+                    candidateSessionId = null
+                }
+                wasCandidate || sessionId in authenticatedSessions
+            }
+            if (shouldRelease) releaseViewer(sessionId)
         }
     }
 
@@ -123,7 +167,7 @@ internal class VdoCameraPublisher(
     /** Returns the WebRTC input surface for the existing camera/GPU composer. */
     fun startVideo(): Surface = synchronized(lock) {
         check(!closed && !accessStopped && ready) { "VDO publisher is not ready" }
-        check(acceptedPeerId != null) { "No authenticated viewer" }
+        check(acceptedSessionId != null) { "No authenticated viewer" }
         check(video == null) { "VDO video is already running" }
         val active = checkNotNull(resources) { "VDO publisher is unavailable" }
 
@@ -149,20 +193,27 @@ internal class VdoCameraPublisher(
             surface = captureSurface
             active.sdk.addTrack(videoTrack)
             VideoSession(helper, videoSource, videoTrack, captureSurface).also { video = it }
+            CameraViewingDiagnostics.detail(
+                "vdo_video_source_attached", "vdo",
+                "session=${sessionHash(checkNotNull(acceptedSessionId))} track=video",
+                password,
+            )
             captureSurface
         } catch (failure: Throwable) {
-            if (started) runCatching { source?.capturerObserver?.onCapturerStopped() }
-            runCatching { track?.let(active.sdk::removeTrack) }
-            runCatching { helper.stopListening() }
-            runCatching { surface?.release() }
-            runCatching { track?.dispose() }
-            runCatching { source?.dispose() }
-            runCatching { helper.dispose() }
+            cleanupAfterFailure(failure, "start_video_capturer_stop") {
+                if (started) source?.capturerObserver?.onCapturerStopped()
+            }
+            cleanupAfterFailure(failure, "start_video_remove_track") { track?.let(active.sdk::removeTrack) }
+            cleanupAfterFailure(failure, "start_video_helper_stop") { helper.stopListening() }
+            cleanupAfterFailure(failure, "start_video_surface_release") { surface?.release() }
+            cleanupAfterFailure(failure, "start_video_track_dispose") { track?.dispose() }
+            cleanupAfterFailure(failure, "start_video_source_dispose") { source?.dispose() }
+            cleanupAfterFailure(failure, "start_video_helper_dispose") { helper.dispose() }
             throw failure
         }
     }
 
-    /** Removes only the video track and capture resources; the authenticated data peer stays connected. */
+    /** Removes only the video track and capture resources; authenticated data peers stay connected. */
     fun stopVideo() {
         synchronized(lock) { stopVideoLocked() }
     }
@@ -170,28 +221,52 @@ internal class VdoCameraPublisher(
     private fun stopVideoLocked() {
         video?.let { current ->
             video = null
-            resources?.sdk?.let { sdk -> runCatching { sdk.removeTrack(current.track) } }
-            runCatching { current.source.capturerObserver.onCapturerStopped() }
-            runCatching { current.helper.stopListening() }
-            runCatching { current.surface.release() }
-            runCatching { current.track.dispose() }
-            runCatching { current.source.dispose() }
-            runCatching { current.helper.dispose() }
-        }
-        // Keep the next peer out until the owner has stopped its camera source and removed the track.
-        if (awaitingViewerCleanup) {
-            acceptedPeerId = null
-            awaitingViewerCleanup = false
+            cleanup("stop_video_remove_track") { resources?.sdk?.removeTrack(current.track) }
+            cleanup("stop_video_capturer_stop") { current.source.capturerObserver.onCapturerStopped() }
+            cleanup("stop_video_helper_stop") { current.helper.stopListening() }
+            cleanup("stop_video_surface_release") { current.surface.release() }
+            cleanup("stop_video_track_dispose") { current.track.dispose() }
+            cleanup("stop_video_source_dispose") { current.source.dispose() }
+            cleanup("stop_video_helper_dispose") { current.helper.dispose() }
         }
     }
 
     /** Cut off viewers before detaching the camera, without releasing its still-attached Surface. */
-    fun stopAccess() = synchronized(lock) {
-        accessStopped = true
-        try { video?.track?.setEnabled(false) }
-        finally {
-            listOfNotNull(candidatePeerId, acceptedPeerId).distinct().forEach { resources?.sdk?.disconnectPeer(it) }
+    fun stopAccess() {
+        var trackFailure: Throwable? = null
+        val active = synchronized(lock) {
+            accessStopped = true
+            try { video?.track?.setEnabled(false) } catch (failure: Throwable) { trackFailure = failure }
+            Triple(resources?.sdk, candidateSessionId, acceptedSessionId)
         }
+        val (sdk, candidate, accepted) = active
+        try {
+            eventExecutor.execute {
+                candidate?.let { sdk?.cancelPublisherSession(it) }
+                accepted?.let { sdk?.disconnectPublisherSession(it) }
+            }
+        } catch (_: RejectedExecutionException) {
+            // The publisher is already closing; close() disposes all remaining SDK sessions.
+        }
+        trackFailure?.let { throw it }
+    }
+
+    /** Schedules termination of the exact authenticated peer; the shared source remains untouched. */
+    fun endSession(sessionId: String): Boolean {
+        val sdk = synchronized(lock) {
+            if (closed || sessionId !in authenticatedSessions) null else resources?.sdk
+        } ?: return false
+        return try {
+            eventExecutor.execute { sdk.disconnectPublisherSession(sessionId) }
+            true
+        } catch (_: RejectedExecutionException) {
+            false
+        }
+    }
+
+    /** Runtime rechecks this on its owner thread immediately before replacing the viewer lease. */
+    fun canAdmitSession(sessionId: String): Boolean = synchronized(lock) {
+        !closed && !accessStopped && candidateSessionId == sessionId
     }
 
     override fun close() {
@@ -199,10 +274,11 @@ internal class VdoCameraPublisher(
             if (closed) return
             closed = true
             stopVideoLocked()
-            candidatePeerId = null
-            acceptedPeerId = null
-            viewerNotified = false
-            awaitingViewerCleanup = false
+            candidateSessionId = null
+            acceptedSessionId = null
+            authenticatedSessions.clear()
+            connectedPending.clear()
+            connectedNotified.clear()
             ready = false
             readyCallbackPending = false
 
@@ -223,9 +299,9 @@ internal class VdoCameraPublisher(
         }
         opener.shutdownNow()
         eventExecutor.shutdownNow()
-        runCatching { toClose.sdk?.dispose() }
-        runCatching { toClose.factory?.dispose() }
-        runCatching { toClose.egl?.release() }
+        cleanup("publisher_close_sdk_dispose") { toClose.sdk?.dispose() }
+        cleanup("publisher_close_factory_dispose") { toClose.factory?.dispose() }
+        cleanup("publisher_close_egl_release") { toClose.egl?.release() }
     }
 
     private fun open() {
@@ -287,14 +363,14 @@ internal class VdoCameraPublisher(
                 readyCallbackPending = true
             }
             notifyReadyUnlessClosed(viewerUrl)
-            synchronized(lock) {
+            val connected = synchronized(lock) {
                 readyCallbackPending = false
-                if (!closed && acceptedPeerId != null && !viewerNotified) {
-                    viewerNotified = true
-                    // Enqueue connected before a concurrently received disconnect callback.
-                    notifyViewerConnectedUnlessClosed()
+                if (closed) emptyList() else connectedPending.toList().also {
+                    connectedPending.clear()
+                    connectedNotified.addAll(it)
                 }
             }
+            connected.forEach(::notifyViewerConnectedUnlessClosed)
             completed = true
         } catch (failure: HardwareEncoderUnavailable) {
             CameraViewingDiagnostics.failure("publisher_open", "vdo", failure, password)
@@ -323,11 +399,11 @@ internal class VdoCameraPublisher(
                 }
             }
             disposeSdk?.let { sdk ->
-                sdk.removeListener(sdkListener)
-                runCatching { sdk.dispose() }
+                cleanup("publisher_open_sdk_remove_listener") { sdk.removeListener(sdkListener) }
+                cleanup("publisher_open_sdk_dispose") { sdk.dispose() }
             }
-            runCatching { disposeFactory?.dispose() }
-            runCatching { disposeEgl?.release() }
+            cleanup("publisher_open_factory_dispose") { disposeFactory?.dispose() }
+            cleanup("publisher_open_egl_release") { disposeEgl?.release() }
         }
     }
 
@@ -345,42 +421,60 @@ internal class VdoCameraPublisher(
         when (event.type) {
             VdoEvents.PEER_CONNECTED -> {
                 if (event.connectionType != "publisher") return
-                val peerId = event.uuid?.takeIf(String::isNotBlank) ?: return
-                var rejectPeer = false
+                val sessionId = event.sessionId?.takeIf(String::isNotBlank) ?: return
                 val notifyViewer = synchronized(lock) {
-                    if (closed) return
-                    val accepted = acceptedPeerId
-                    if (candidatePeerId != peerId || accepted != null && accepted != peerId) {
-                        rejectPeer = true
-                        false
+                    if (closed || sessionId !in authenticatedSessions || sessionId in connectedNotified) return@synchronized false
+                    if (ready && !readyCallbackPending) {
+                        connectedNotified.add(sessionId)
+                        true
                     } else {
-                        acceptedPeerId = peerId
-                        if (ready && !readyCallbackPending && !viewerNotified) {
-                            viewerNotified = true
-                            true
-                        } else false
+                        connectedPending.add(sessionId)
+                        false
                     }
                 }
-                if (rejectPeer) resources?.sdk?.disconnectPeer(peerId)
-                else if (notifyViewer) notifyViewerConnectedUnlessClosed()
+                if (notifyViewer) notifyViewerConnectedUnlessClosed(sessionId)
             }
             VdoEvents.PEER_DISCONNECTED -> {
-                val peerId = event.uuid ?: return
+                val sessionId = event.sessionId?.takeIf(String::isNotBlank) ?: return
                 val notifyViewer = synchronized(lock) {
-                    if (closed || acceptedPeerId != peerId) false
-                    else {
-                        val wasNotified = viewerNotified
-                        viewerNotified = false
-                        // The controller's disconnect callback calls stopVideo after releasing its camera lease.
-                        awaitingViewerCleanup = wasNotified
-                        if (!wasNotified) {
-                            acceptedPeerId = null
-                            releaseCandidate()
-                        }
-                        wasNotified
-                    }
+                    val wasAuthenticated = authenticatedSessions.remove(sessionId)
+                    connectedPending.remove(sessionId)
+                    connectedNotified.remove(sessionId)
+                    if (acceptedSessionId == sessionId) acceptedSessionId = null
+                    wasAuthenticated
                 }
-                if (notifyViewer) notifyViewerDisconnectedUnlessClosed()
+                if (notifyViewer) notifyViewerDisconnectedUnlessClosed(sessionId)
+            }
+            VdoEvents.CONNECTION_FAILED -> {
+                if (event.connectionType != "publisher") return
+                val sessionId = event.sessionId?.takeIf(String::isNotBlank) ?: return
+                val stage = event.stage?.takeIf(String::isNotBlank) ?: "connection_failed"
+                val failure = event.failure ?: IllegalStateException(event.message ?: "publisher session failed")
+                CameraViewingDiagnostics.failure("vdo_${stage}_${sessionHash(sessionId)}", "vdo", failure, password)
+                runCatching { listener.onSessionError(sessionId, stage, failure) }
+            }
+            VdoEvents.SESSION_DIAGNOSTIC -> {
+                if (event.connectionType != "publisher") return
+                val sessionId = event.sessionId?.takeIf(String::isNotBlank) ?: return
+                val stage = event.stage?.takeIf(String::isNotBlank) ?: "session_diagnostic"
+                val diagnosticStage = "vdo_${stage}_${sessionHash(sessionId)}"
+                if (event.failure != null) {
+                    CameraViewingDiagnostics.failure(diagnosticStage, "vdo", event.failure, password)
+                } else {
+                    CameraViewingDiagnostics.detail(diagnosticStage, "vdo", "session=${sessionHash(sessionId)} ${event.message.orEmpty()}", password)
+                }
+            }
+            VdoEvents.DATA_CHANNEL_OPEN, VdoEvents.DATA_CHANNEL_CLOSE -> {
+                if (event.connectionType != "publisher") return
+                val sessionId = event.sessionId?.takeIf(String::isNotBlank) ?: return
+                val stage = if (event.type == VdoEvents.DATA_CHANNEL_OPEN) {
+                    "control_data_channel_open"
+                } else {
+                    "control_data_channel_closed"
+                }
+                CameraViewingDiagnostics.detail(
+                    "vdo_${stage}_${sessionHash(sessionId)}", "vdo", "session=${sessionHash(sessionId)}", password,
+                )
             }
             VdoEvents.RECONNECT_FAILED -> {
                 CameraViewingDiagnostics.failure("signaling_reconnect", "vdo",
@@ -402,16 +496,35 @@ internal class VdoCameraPublisher(
         if (!closed) runCatching { listener.onReady(url) }
     }
 
-    private fun notifyViewerConnectedUnlessClosed() {
-        if (!closed) runCatching { listener.onViewerConnected() }
+    private fun notifyViewerConnectedUnlessClosed(sessionId: String) {
+        if (!closed) runCatching { listener.onViewerConnected(sessionId) }
     }
 
-    private fun notifyViewerDisconnectedUnlessClosed() {
-        if (!closed) runCatching { listener.onViewerDisconnected() }
+    private fun notifyViewerDisconnectedUnlessClosed(sessionId: String) {
+        if (!closed) runCatching { listener.onViewerDisconnected(sessionId) }
     }
 
     private fun notifyErrorUnlessClosed(encoderUnavailable: Boolean) {
         if (!closed) runCatching { listener.onError(encoderUnavailable) }
+    }
+
+    private fun sessionHash(sessionId: String): String = Crypto.generateHash(sessionId, 16)
+
+    private fun cleanupAfterFailure(primary: Throwable, stage: String, action: () -> Unit) {
+        try {
+            action()
+        } catch (cleanupFailure: Throwable) {
+            if (cleanupFailure !== primary) primary.addSuppressed(cleanupFailure)
+            CameraViewingDiagnostics.failure("vdo_$stage", "vdo", cleanupFailure, password)
+        }
+    }
+
+    private fun cleanup(stage: String, action: () -> Unit) {
+        try {
+            action()
+        } catch (failure: Throwable) {
+            CameraViewingDiagnostics.failure("vdo_$stage", "vdo", failure, password)
+        }
     }
 
     private class HardwareH264EncoderFactory(

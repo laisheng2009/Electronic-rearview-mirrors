@@ -23,6 +23,8 @@ final class MotionRecordingOutput {
     private MotionGpuComposer composer;
     private int attached;
     private MotionSharedSource localSource;
+    private final java.util.ArrayList<Surface> viewingEncoders = new java.util.ArrayList<>();
+    private int viewingDirection = -1;
 
     MotionRecordingOutput(int width, int height, int[] order, String session,
             MotionFrameTimestamp clock, Consumer<String> errors) {
@@ -94,7 +96,25 @@ final class MotionRecordingOutput {
         if (composer != null) return;
         composer = new MotionGpuComposer(context, width, height, order, session, clock,
                 sharedContext, glVersion, this::failed);
-        composer.initialize(surfaces[0]);
+        composer.initialize(viewingEncoders.isEmpty() ? surfaces[0]
+                : viewingEncoders.get(viewingEncoders.size() - 1));
+        if (viewingDirection >= 0) composer.updateViewingOutput(null, viewingDirection);
+    }
+
+    /** Takes ownership even on timeout: the queued GL operation may still use this Surface. */
+    synchronized void updateViewingOutput(Surface encoder, int direction) throws Exception {
+        if (encoder != null) viewingEncoders.add(encoder);
+        if (composer != null) composer.updateViewingOutput(encoder, direction);
+        viewingDirection = direction;
+        if (encoder != null) {
+            for (int i = viewingEncoders.size() - 2; i >= 0; i--)
+                viewingEncoders.remove(i).release();
+        }
+    }
+
+    private void releaseViewingEncoders() {
+        for (Surface surface : viewingEncoders) surface.release();
+        viewingEncoders.clear();
     }
 
     synchronized void retain() { attached++; }
@@ -105,6 +125,7 @@ final class MotionRecordingOutput {
         if (--attached == 0) {
             composer.close();
             composer = null;
+            releaseViewingEncoders();
         }
     }
 
@@ -113,7 +134,9 @@ final class MotionRecordingOutput {
     }
 
     synchronized void closeUnused() {
-        if (attached == 0 && composer != null) { composer.close(); composer = null; }
+        if (attached == 0 && composer != null) {
+            composer.close(); composer = null; releaseViewingEncoders();
+        }
     }
 
     void startLocal(Context context, MotionSharedSource source) throws Exception {

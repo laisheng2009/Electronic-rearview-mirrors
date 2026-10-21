@@ -42,6 +42,9 @@ import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
 import org.webrtc.RtpSender
 import org.webrtc.RtpTransceiver
+import org.webrtc.RTCStats
+import org.webrtc.RTCStatsCollectorCallback
+import org.webrtc.RTCStatsReport
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription as RtcSessionDescription
 import java.nio.ByteBuffer
@@ -56,6 +59,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** One WebRTC connection in one direction: `publisher` (we send) or `viewer` (we receive). */
 class VdoConnection internal constructor(
@@ -74,16 +78,29 @@ class VdoConnection internal constructor(
     internal val reservedChannels = CopyOnWriteArrayList<DataChannel>()
     @Volatile internal var controlOpen = false
     @Volatile internal var closed = false
+    @Volatile internal var authenticated = false
+    @Volatile internal var authenticating = false
+    internal var admissionCommitInProgress = false
+    internal var trackSetInvalidated = false
+    @Volatile internal var remoteAnswerApplied = false
     private var disposed = false
-    internal var connectedOnce = false
+    @Volatile internal var connectedOnce = false
+    @Volatile internal var connectedEventEmitted = false
+    @Volatile internal var disconnectedEventEmitted = false
     internal var remoteSet = false
     internal var recovering = false
+    internal var statsTask: ScheduledFuture<*>? = null
+    internal val statsRequestInFlight = AtomicBoolean(false)
+    internal var firstSenderFrameEmitted = false
+    internal var lastIceState: PeerConnection.IceConnectionState? = null
     val info = JSONObject()
     val obsState = JSONObject()
     internal var viewOptions = ViewOptions()
     internal var allowAudio = true
     internal var allowVideo = true
     internal val iceBundle = ArrayList<IceCandidate>()
+    internal var deferLocalIceCandidates = false
+    internal val deferredLocalIceCandidates = ArrayList<IceCandidate>()
     internal var iceTask: ScheduledFuture<*>? = null
     internal var iceDelayMs = 70L
     internal var connectTask: ScheduledFuture<*>? = null
@@ -114,6 +131,7 @@ class VdoConnection internal constructor(
         connectTask?.cancel(false)
         graceTask?.cancel(false)
         pingTask?.cancel(false)
+        statsTask?.cancel(false)
         controlOpen = false
         try { control?.close() } catch (_: Exception) {}
         try { pc.close() } catch (_: Exception) {}
@@ -143,10 +161,12 @@ class VdoConnection internal constructor(
 /** A stream seen in listings or room notifications. */
 class StreamInfo(val streamId: String, var uuid: String?, var state: String = "available")
 
-/** Admission and release callbacks for SDK users that allow one publisher peer at a time. */
+/** Admission and release callbacks for SDK users that gate publisher media on an authenticated peer. */
 interface PublisherPeerAdmission {
-    fun tryAdmit(uuid: String): Boolean
-    fun release(uuid: String)
+    fun tryReserve(uuid: String, sessionId: String): Boolean
+    /** Called only after a password-verified answer is applied and the peer is connected. */
+    fun authenticate(sessionId: String): Boolean
+    fun release(sessionId: String)
 }
 
 /**
@@ -186,7 +206,7 @@ class VdoNinja @JvmOverloads constructor(
 
     private class Pair2 { var publisher: VdoConnection? = null; var viewer: VdoConnection? = null }
     private val connections = LinkedHashMap<String, Pair2>()
-    private val publisherOffersInProgress = HashSet<String>()
+    private val publisherOffersInProgress = HashMap<String, String>()
     private val pendingViews = HashMap<String, ViewOptions>()
     private val viewIntent = HashMap<String, ViewOptions>()
     private val stoppedViews = HashSet<String>()
@@ -240,14 +260,44 @@ class VdoNinja @JvmOverloads constructor(
     fun addListener(listener: VdoEventListener) { listeners.add(listener) }
     fun removeListener(listener: VdoEventListener) { listeners.remove(listener) }
 
-    /** Extend: refuse a second viewer without replacing the accepted peer. */
+    /** Disconnects current peers for a UUID; stale connection objects are never signaled or removed. */
     fun disconnectPeer(uuid: String) {
         val peers = synchronized(lock) { allConnections().filter { it.uuid == uuid } }
         for (peer in peers) {
+            val removed = synchronized(lock) {
+                if (connection(peer.uuid, peer.type) !== peer) false
+                else { removeConnection(peer); true }
+            }
+            if (!removed) continue
             sendBye(peer)
-            synchronized(lock) { removeConnection(peer) }
             peer.close()
+            emitPeerDisconnected(peer)
         }
+    }
+
+    /** Closes one publisher generation without affecting a replacement peer or the published stream. */
+    fun disconnectPublisherSession(sessionId: String): Boolean {
+        return closePublisherSession(sessionId, authenticatedOnly = true)
+    }
+
+    /** Closes one provisional publisher generation when its publisher is being stopped. */
+    fun cancelPublisherSession(sessionId: String): Boolean =
+        closePublisherSession(sessionId, authenticatedOnly = false)
+
+    private fun closePublisherSession(sessionId: String, authenticatedOnly: Boolean): Boolean {
+        val peer = synchronized(lock) {
+            allConnections().firstOrNull { it.type == "publisher" && it.session == sessionId }
+        } ?: return false
+        if (authenticatedOnly && !peer.authenticated) return false
+        val removed = synchronized(lock) {
+            if (connection(peer.uuid, "publisher") !== peer) false
+            else { removeConnection(peer); true }
+        }
+        if (!removed) return false
+        sendBye(peer)
+        peer.close()
+        emitPeerDisconnected(peer)
+        return true
     }
 
     /** Extend's shell-safe network observer replaces WebRTC's app-only receiver. */
@@ -268,14 +318,17 @@ class VdoNinja @JvmOverloads constructor(
 
     /** Extend: stop video while leaving the authenticated data peer available for status. */
     fun removeTrack(track: MediaStreamTrack) {
-        val peers = synchronized(lock) {
-            localTracks.remove(track)
-            allConnections().filter { it.type == "publisher" }
+        val (peers, stagedCandidates) = synchronized(lock) {
+            val removed = localTracks.remove(track)
+            val staged = if (removed) invalidateStagedPublisherCandidatesLocked() else emptyList()
+            allConnections().filter { it.type == "publisher" && it.authenticated } to staged
         }
+        cancelStagedPublisherCandidates(stagedCandidates)
         for (peer in peers) {
             val removed = synchronized(lock) { peer.senders.filter { it.first.track() == track } }
             for ((sender, _) in removed) peer.pc.removeTrack(sender)
             synchronized(lock) { peer.senders.removeAll(removed.toSet()) }
+            if (removed.any { it.second == "video" }) stopPublisherStatsIfVideoDetached(peer)
             renegotiate(peer, false)
         }
     }
@@ -290,6 +343,202 @@ class VdoNinja @JvmOverloads constructor(
     private fun emit(e: VdoEvent) {
         for (l in listeners) {
             try { l.onEvent(e) } catch (t: Throwable) { log("listener threw: $t") }
+        }
+    }
+
+    private fun emitPeerDisconnected(c: VdoConnection) {
+        val shouldEmit = synchronized(lock) {
+            if (c.disconnectedEventEmitted) false
+            else { c.disconnectedEventEmitted = true; true }
+        }
+        if (shouldEmit) {
+            if (c.type == "publisher") emitPublisherDiagnostic(c.session, "session_ended", "authenticated=${c.authenticated}")
+            emit(VdoEvent(
+                VdoEvents.PEER_DISCONNECTED,
+                uuid = c.uuid,
+                sessionId = c.session,
+                streamId = c.streamId,
+                connectionType = c.type,
+            ))
+        }
+    }
+
+    private fun emitPeerConnectedIfReady(c: VdoConnection) {
+        val shouldEmit = synchronized(lock) {
+            if (connection(c.uuid, c.type) !== c || c.closed || !c.connectedOnce ||
+                c.type == "publisher" && !c.authenticated || c.connectedEventEmitted) false
+            else { c.connectedEventEmitted = true; true }
+        }
+        if (shouldEmit) {
+            setStreamState(c.streamId, "connected")
+            emit(VdoEvent(
+                VdoEvents.PEER_CONNECTED,
+                uuid = c.uuid,
+                sessionId = c.session,
+                streamId = c.streamId,
+                connectionType = c.type,
+            ))
+        }
+    }
+
+    private fun emitPublisherSessionFailure(uuid: String, sessionId: String, stage: String, failure: Throwable) {
+        emit(VdoEvent(
+            VdoEvents.CONNECTION_FAILED,
+            uuid = uuid,
+            sessionId = sessionId,
+            streamId = streamId,
+            connectionType = "publisher",
+            stage = stage,
+            failure = failure,
+        ))
+    }
+
+    private fun emitPublisherDiagnostic(sessionId: String, stage: String, detail: String? = null, failure: Throwable? = null) {
+        emit(VdoEvent(
+            VdoEvents.SESSION_DIAGNOSTIC,
+            sessionId = sessionId,
+            connectionType = "publisher",
+            stage = stage,
+            message = detail,
+            failure = failure,
+        ))
+    }
+
+    private fun isActiveVideoPublisher(c: VdoConnection): Boolean = synchronized(lock) {
+        connection(c.uuid, "publisher") === c && !c.closed && c.authenticated &&
+            c.senders.any { (sender, kind) -> kind == "video" && sender.track() != null }
+    }
+
+    private fun startPublisherStats(c: VdoConnection) {
+        var failure: Throwable? = null
+        synchronized(lock) {
+            if (connection(c.uuid, "publisher") !== c || c.closed || !c.authenticated || c.statsTask != null ||
+                c.senders.none { (sender, kind) -> kind == "video" && sender.track() != null }) return
+            try {
+                c.statsTask = scheduler.scheduleAtFixedRate({ collectPublisherStats(c) }, 0, 10, TimeUnit.SECONDS)
+            } catch (caught: Throwable) {
+                failure = caught
+            }
+        }
+        failure?.let { emitPublisherDiagnostic(c.session, "stats_schedule_failed", failure = it) }
+    }
+
+    private fun stopPublisherStatsIfVideoDetached(c: VdoConnection) {
+        val task = synchronized(lock) {
+            if (c.senders.any { (sender, kind) -> kind == "video" && sender.track() != null }) null
+            else c.statsTask.also { c.statsTask = null }
+        }
+        task?.cancel(false)
+    }
+
+    private fun collectPublisherStats(c: VdoConnection) {
+        if (!c.statsRequestInFlight.compareAndSet(false, true)) return
+        if (!isActiveVideoPublisher(c)) {
+            c.statsRequestInFlight.set(false)
+            return
+        }
+        try {
+            c.pc.getStats(object : RTCStatsCollectorCallback {
+                override fun onStatsDelivered(report: RTCStatsReport) {
+                    try {
+                        if (!isActiveVideoPublisher(c)) return
+                        val stats = report.statsMap.values
+                        val outboundVideo = stats.filter { stat ->
+                            if (stat.type != "outbound-rtp") return@filter false
+                            val mediaKind = stat.members["kind"] as? String ?: stat.members["mediaType"] as? String
+                            mediaKind.equals("video", ignoreCase = true)
+                        }
+                        val framesSent = sumStat(outboundVideo, "framesSent")
+                        val bytesSent = sumStat(outboundVideo, "bytesSent")
+                        val iceState = c.pc.iceConnectionState().name.lowercase()
+                        val route = selectedCandidateTypes(stats)
+                        val detail = "ice=$iceState outbound_video_frames_total=${framesSent ?: "unavailable"} " +
+                            "outbound_video_bytes_total=${bytesSent ?: "unavailable"} " +
+                            "selected_local_candidate_type=${route.first} selected_remote_candidate_type=${route.second}"
+                        emitPublisherDiagnostic(c.session, "rtc_stats", detail)
+                        val firstFrame = synchronized(lock) {
+                            if (framesSent != null && framesSent > 0 && !c.firstSenderFrameEmitted &&
+                                connection(c.uuid, "publisher") === c && !c.closed && c.authenticated) {
+                                c.firstSenderFrameEmitted = true
+                                true
+                            } else false
+                        }
+                        if (firstFrame) emitPublisherDiagnostic(c.session, "first_sender_frame",
+                            "outbound_video_frames_total=$framesSent outbound_video_bytes_total=${bytesSent ?: "unavailable"}")
+                    } catch (failure: Throwable) {
+                        if (isActiveVideoPublisher(c)) emitPublisherDiagnostic(c.session, "stats_read_failed", failure = failure)
+                    } finally {
+                        c.statsRequestInFlight.set(false)
+                    }
+                }
+            })
+        } catch (failure: Throwable) {
+            c.statsRequestInFlight.set(false)
+            if (isActiveVideoPublisher(c)) emitPublisherDiagnostic(c.session, "stats_request_failed", failure = failure)
+        }
+    }
+
+    private fun sumStat(stats: List<RTCStats>, key: String): Long? {
+        val values = stats.mapNotNull { (it.members[key] as? Number)?.toLong() }
+        return values.takeIf { it.isNotEmpty() }?.sum()
+    }
+
+    private fun selectedCandidateTypes(stats: Collection<RTCStats>): Pair<String, String> {
+        val byId = stats.associateBy { it.id }
+        val selectedId = stats.asSequence().filter { it.type == "transport" }
+            .mapNotNull { it.members["selectedCandidatePairId"] as? String }.firstOrNull()
+        val pair = selectedId?.let(byId::get) ?: stats.firstOrNull { stat ->
+            stat.type == "candidate-pair" && (
+                stat.members["selected"] == true ||
+                    stat.members["nominated"] == true && stat.members["state"] == "succeeded"
+                )
+        }
+        fun candidateType(idField: String): String {
+            val id = pair?.members?.get(idField) as? String ?: return "unknown"
+            val raw = byId[id]?.members?.get("candidateType") as? String ?: return "unknown"
+            return raw.lowercase().takeIf { it in setOf("host", "srflx", "prflx", "relay") } ?: "unknown"
+        }
+        return candidateType("localCandidateId") to candidateType("remoteCandidateId")
+    }
+
+    private fun failPublisherConnection(
+        c: VdoConnection,
+        stage: String,
+        failure: Throwable,
+        skipIfAdmissionCommitInProgress: Boolean = false,
+    ) {
+        if (c.type != "publisher") return
+        val removed = synchronized(lock) {
+            if (connection(c.uuid, "publisher") !== c ||
+                (skipIfAdmissionCommitInProgress && c.admissionCommitInProgress)) false
+            else { removeConnection(c); true }
+        }
+        if (!removed) return
+        emitPeerDisconnected(c)
+        try { c.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+        emitPublisherSessionFailure(c.uuid, c.session, stage, failure)
+    }
+
+    private fun failPublisherSession(uuid: String, sessionId: String, stage: String, failure: Throwable) {
+        val c = synchronized(lock) {
+            connections[uuid]?.publisher?.takeIf { it.session == sessionId }
+        }
+        if (c != null) failPublisherConnection(c, stage, failure)
+        else emitPublisherSessionFailure(uuid, sessionId, stage, failure)
+    }
+
+    /** Caller holds the SDK lock; mark before callbacks so queued admission cannot commit stale tracks. */
+    private fun invalidateStagedPublisherCandidatesLocked(): List<VdoConnection> =
+        allConnections().filter {
+            it.type == "publisher" && it.authenticating && !it.authenticated && !it.trackSetInvalidated
+        }.onEach { it.trackSetInvalidated = true }
+
+    private fun cancelStagedPublisherCandidates(candidates: List<VdoConnection>) {
+        for (candidate in candidates) {
+            val failure = IllegalStateException("published track set changed during candidate admission")
+            try { publisherAdmission?.release(candidate.session) }
+            catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+            failPublisherConnection(candidate, "published_tracks_changed", failure)
         }
     }
 
@@ -329,7 +578,7 @@ class VdoNinja @JvmOverloads constructor(
             viewRetries.clear()
             publishing = false
             conns = allConnections()
-            pendingPublishers = publisherOffersInProgress.toList()
+            pendingPublishers = publisherOffersInProgress.values.toList()
             publisherOffersInProgress.clear()
         }
         pendingPublishers.forEach { publisherAdmission?.release(it) }
@@ -435,26 +684,29 @@ class VdoNinja @JvmOverloads constructor(
     /** Adds a track to the published stream and renegotiates every viewer. */
     fun addTrack(track: MediaStreamTrack) {
         check(publishing) { "not publishing" }
-        val conns: List<VdoConnection>
-        synchronized(lock) {
+        val (conns, stagedCandidates) = synchronized(lock) {
             localTracks.add(track)
-            conns = allConnections().filter { it.type == "publisher" }
+            val staged = invalidateStagedPublisherCandidatesLocked()
+            allConnections().filter { it.type == "publisher" && it.authenticated } to staged
         }
+        cancelStagedPublisherCandidates(stagedCandidates)
         for (c in conns) {
             val sender = c.pc.addTrack(track, listOf("vdoninja"))
             synchronized(lock) { c.senders.add(sender to track.kind()) }
+            if (track.kind() == "video") startPublisherStats(c)
             renegotiate(c, false)
         }
     }
 
     /** Replaces the published track of the same kind on every viewer (camera/mic switching), no renegotiation. */
     fun replaceTrack(newTrack: MediaStreamTrack) {
-        val conns: List<VdoConnection>
-        synchronized(lock) {
+        val (conns, stagedCandidates) = synchronized(lock) {
             localTracks.removeAll { it.kind() == newTrack.kind() }
             localTracks.add(newTrack)
-            conns = allConnections().filter { it.type == "publisher" }
+            val staged = invalidateStagedPublisherCandidatesLocked()
+            allConnections().filter { it.type == "publisher" && it.authenticated } to staged
         }
+        cancelStagedPublisherCandidates(stagedCandidates)
         for (c in conns) {
             for ((sender, kind) in c.senders.toList()) {
                 val allowed = if (kind == "video") c.allowVideo else c.allowAudio
@@ -469,7 +721,7 @@ class VdoNinja @JvmOverloads constructor(
         val sid: String?
         synchronized(lock) {
             conns = allConnections().filter { it.type == "publisher" }
-            pendingPublishers = publisherOffersInProgress.toList()
+            pendingPublishers = publisherOffersInProgress.values.toList()
             publisherOffersInProgress.clear()
             sid = streamId
             publishing = false
@@ -632,7 +884,7 @@ class VdoNinja @JvmOverloads constructor(
             val dc = c.control ?: return false
             return try {
                 val ok = dc.send(DataChannel.Buffer(ByteBuffer.wrap(buf), false))
-                if (ok) log("-> DC(${c.uuid}/${c.type}) ${text.take(300)}")
+                if (ok) log("control data-channel message sent (payload omitted)")
                 ok
             } catch (_: Exception) { false }
         }
@@ -759,7 +1011,7 @@ class VdoNinja @JvmOverloads constructor(
         }
     }
 
-    private fun createConnection(uuid: String, type: String): VdoConnection {
+    private fun createConnection(uuid: String, type: String, sessionId: String? = null): VdoConnection {
         if (type == "publisher" && !publishing) throw IllegalStateException("not publishing")
         val config = PeerConnection.RTCConfiguration(iceServerList()).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
@@ -768,7 +1020,7 @@ class VdoNinja @JvmOverloads constructor(
         lateinit var conn: VdoConnection
         val observer = object : PeerConnection.Observer {
             override fun onSignalingChange(state: PeerConnection.SignalingState) {}
-            override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {}
+            override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) { handleIceConnectionState(conn, state) }
             override fun onIceConnectionReceivingChange(receiving: Boolean) {}
             override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
             override fun onIceCandidate(candidate: org.webrtc.IceCandidate) { handleLocalCandidate(conn, candidate) }
@@ -788,8 +1040,8 @@ class VdoNinja @JvmOverloads constructor(
         }
         val pc = factory.createPeerConnection(config, observer) ?: throw IllegalStateException("createPeerConnection failed")
         conn = VdoConnection(uuid, type, pc, worker) {
-            if (type == "publisher") publisherAdmission?.release(uuid)
-        }
+            if (type == "publisher") publisherAdmission?.release(conn.session)
+        }.apply { if (sessionId != null) session = sessionId }
         val old: VdoConnection?
         var publishingStopped = false
         synchronized(lock) {
@@ -809,17 +1061,135 @@ class VdoNinja @JvmOverloads constructor(
         }
         old?.close()
         conn.connectTask = scheduler.schedule({
-            if (!conn.closed && !conn.connectedOnce) recoverConnection(conn, "timeout")
+            if (conn.closed) return@schedule
+            if (conn.type == "publisher" && conn.connectedOnce && !conn.authenticated) {
+                failPublisherConnection(
+                    conn,
+                    "connection_timeout",
+                    TimeoutException("publisher answer was not authenticated before connection timeout"),
+                    skipIfAdmissionCommitInProgress = true,
+                )
+            } else if (!conn.connectedOnce) {
+                recoverConnection(conn, "timeout")
+            }
         }, options.connectionTimeoutMs, TimeUnit.MILLISECONDS)
         return conn
     }
 
-    private fun addLocalTracks(c: VdoConnection) {
-        val tracks = synchronized(lock) { localTracks.toList() }
+    private fun addLocalTracks(c: VdoConnection, tracks: List<MediaStreamTrack>) {
         for (t in tracks) {
             val sender = c.pc.addTrack(t, listOf("vdoninja"))
             synchronized(lock) { c.senders.add(sender to t.kind()) }
         }
+    }
+
+    /**
+     * Prepares existing tracks before admission, then commits only after protected SDP and ICE.
+     * A data-only peer may connect before its answer callback runs, so both transitions retry here.
+     */
+    private fun completePublisherAuthentication(c: VdoConnection) {
+        if (c.type != "publisher") return
+        val shouldAdmit = synchronized(lock) {
+            if (connection(c.uuid, "publisher") !== c || c.closed || c.authenticated || c.authenticating ||
+                !c.remoteAnswerApplied || !c.connectedOnce) false
+            else { c.authenticating = true; true }
+        }
+        if (!shouldAdmit) return
+
+        val tracks = synchronized(lock) { localTracks.toList() }
+        if (tracks.isEmpty()) {
+            admitPublisherCandidate(c, null)
+            return
+        }
+
+        synchronized(lock) {
+            if (connection(c.uuid, "publisher") !== c || c.closed) return
+            // Keep candidates from this replacement offer local until owner admission commits.
+            c.deferLocalIceCandidates = true
+        }
+        try {
+            addLocalTracks(c, tracks)
+        } catch (failure: Throwable) {
+            failPublisherConnection(c, "attach_local_tracks", failure)
+            return
+        }
+        try {
+            c.pc.createOffer(sdpObserver(createOffer@{ offer ->
+                if (offer == null) {
+                    failPublisherConnection(c, "create_offer", IllegalStateException("createOffer returned no description"))
+                    return@createOffer
+                }
+                if (!isCurrentPublisherConnection(c)) return@createOffer
+                emitPublisherDiagnostic(c.session, "local_offer_created")
+                try {
+                    c.pc.setLocalDescription(sdpObserver(setLocal@{
+                        if (!isCurrentPublisherConnection(c)) return@setLocal
+                        emitPublisherDiagnostic(c.session, "local_sdp_applied")
+                        admitPublisherCandidate(c, offer)
+                    }, { error ->
+                        failPublisherConnection(c, "set_local_description", IllegalStateException(error))
+                    }), offer)
+                } catch (failure: Throwable) {
+                    failPublisherConnection(c, "set_local_description", failure)
+                }
+            }, { error ->
+                failPublisherConnection(c, "create_offer", IllegalStateException(error))
+            }), MediaConstraints())
+        } catch (failure: Throwable) {
+            failPublisherConnection(c, "create_offer", failure)
+        }
+    }
+
+    private fun admitPublisherCandidate(c: VdoConnection, preparedOffer: RtcSessionDescription?) {
+        val commitStarted = synchronized(lock) {
+            if (connection(c.uuid, "publisher") !== c || c.closed || c.authenticated || !c.authenticating ||
+                c.trackSetInvalidated) false
+            else { c.admissionCommitInProgress = true; true }
+        }
+        if (!commitStarted) return
+        val admissionAccepted = try {
+            publisherAdmission?.authenticate(c.session) != false
+        } catch (failure: Throwable) {
+            failPublisherConnection(c, "viewer_admission", failure)
+            return
+        }
+        if (!admissionAccepted) {
+            failPublisherConnection(c, "viewer_admission", SecurityException("authenticated viewer was not admitted"))
+            return
+        }
+        val admitted = synchronized(lock) {
+            if (connection(c.uuid, "publisher") !== c || c.closed || c.trackSetInvalidated) {
+                c.authenticating = false
+                c.admissionCommitInProgress = false
+                false
+            } else {
+                c.authenticating = false
+                c.authenticated = true
+                c.admissionCommitInProgress = false
+                true
+            }
+        }
+        if (!admitted) {
+            publisherAdmission?.release(c.session)
+            return
+        }
+        c.connectTask?.cancel(false)
+        emitPublisherDiagnostic(c.session, "viewer_admitted", "ice=connected password_protected_sdp=applied")
+        if (preparedOffer != null) {
+            try {
+                sendDescription(c, preparedOffer)
+                flushDeferredLocalIceCandidates(c)
+            } catch (failure: Throwable) {
+                failPublisherConnection(c, "send_local_description", failure)
+                return
+            }
+        }
+        startPublisherStats(c)
+        emitPeerConnectedIfReady(c)
+    }
+
+    private fun isCurrentPublisherConnection(c: VdoConnection): Boolean = synchronized(lock) {
+        connection(c.uuid, "publisher") === c && !c.closed
     }
 
     private fun sdpObserver(onSuccess: (RtcSessionDescription?) -> Unit, onFailure: (String) -> Unit) = object : SdpObserver {
@@ -834,28 +1204,71 @@ class VdoNinja @JvmOverloads constructor(
         val sid = c.streamId
         if (includeStreamId && sid != null) msg.put("streamID", pw.hashStreamId(sid))
         pw.encryptInto(msg, "description", SessionDescription(desc.type.canonicalForm(), desc.description).toJson())
+        sendPreparedDescription(c, msg)
+    }
+
+    private fun sendPreparedDescription(c: VdoConnection, msg: JSONObject) {
         if (c.controlOpen) {
             val dcMsg = JSONObject().put("description", msg.get("description")).put("session", c.session)
             if (msg.has("vector")) dcMsg.put("vector", msg.get("vector"))
-            if (c.sendControl(dcMsg)) return
+            if (c.sendControl(dcMsg)) {
+                if (c.type == "publisher") emitPublisherDiagnostic(c.session, "local_sdp_send", "transport=data_channel queued=true")
+                return
+            }
         }
-        signal.send(msg)
+        val queued = signal.send(msg)
+        if (c.type == "publisher") emitPublisherDiagnostic(c.session, "local_sdp_send", "transport=signaling queued=$queued")
     }
 
     private fun renegotiate(c: VdoConnection, iceRestart: Boolean) {
+        if (c.type == "publisher" && c.authenticating && !c.authenticated) {
+            failPublisherConnection(c, "renegotiate_during_admission",
+                IllegalStateException("publisher renegotiation requested while candidate SDP is being prepared"))
+            return
+        }
         if (iceRestart) c.pc.restartIce()
         val constraints = MediaConstraints().apply {
             if (iceRestart) mandatory.add(MediaConstraints.KeyValuePair("IceRestart", "true"))
         }
         c.pc.createOffer(sdpObserver({ offer ->
             if (offer == null) return@sdpObserver
-            c.pc.setLocalDescription(sdpObserver({ sendDescription(c, offer) }, { log("setLocalDescription failed: $it") }), offer)
-        }, { log("createOffer failed: $it") }), constraints)
+            if (c.closed) return@sdpObserver
+            c.pc.setLocalDescription(sdpObserver({
+                if (!c.closed) sendDescription(c, offer)
+            }, { error -> failNegotiation(c, "set_local_description", error) }), offer)
+        }, { error -> failNegotiation(c, "create_offer", error) }), constraints)
+    }
+
+    private fun failNegotiation(c: VdoConnection, stage: String, error: String) {
+        val failure = IllegalStateException(error)
+        if (c.type == "publisher") failPublisherConnection(c, stage, failure)
+        else log("$stage failed for ${c.uuid}/${c.type}: $error")
     }
 
     private fun handleLocalCandidate(c: VdoConnection, cand: org.webrtc.IceCandidate) {
         if (c.closed || cand.sdp.isNullOrEmpty()) return
         val ic = IceCandidate(cand.sdp, cand.sdpMid, cand.sdpMLineIndex)
+        val sendNow = synchronized(lock) {
+            if (connection(c.uuid, c.type) !== c || c.closed) return
+            if (c.deferLocalIceCandidates) {
+                c.deferredLocalIceCandidates.add(ic)
+                false
+            } else true
+        }
+        if (!sendNow) return
+        sendLocalCandidate(c, ic)
+    }
+
+    private fun flushDeferredLocalIceCandidates(c: VdoConnection) {
+        val candidates = synchronized(lock) {
+            c.deferLocalIceCandidates = false
+            c.deferredLocalIceCandidates.toList().also { c.deferredLocalIceCandidates.clear() }
+        }
+        candidates.forEach { sendLocalCandidate(c, it) }
+    }
+
+    private fun sendLocalCandidate(c: VdoConnection, ic: IceCandidate) {
+        if (c.closed) return
         val msgType = Protocol.candidateTypeFor(c.type)
         if (c.controlOpen) {
             val msg = JSONObject().put("type", msgType).put("UUID", c.uuid).put("session", c.session)
@@ -887,14 +1300,13 @@ class VdoNinja @JvmOverloads constructor(
         log("peer state ${c.uuid}/${c.type}: $state")
         when (state) {
             PeerConnection.PeerConnectionState.CONNECTED -> {
-                c.connectTask?.cancel(false)
+                if (c.type != "publisher" || c.authenticated) c.connectTask?.cancel(false)
                 c.graceTask?.cancel(false)
                 c.graceTask = null
                 c.recovering = false
-                val first = !c.connectedOnce
                 c.connectedOnce = true
-                setStreamState(c.streamId, "connected")
-                if (first) emit(VdoEvent(VdoEvents.PEER_CONNECTED, uuid = c.uuid, streamId = c.streamId, connectionType = c.type))
+                if (c.type == "publisher") completePublisherAuthentication(c)
+                else emitPeerConnectedIfReady(c)
             }
             PeerConnection.PeerConnectionState.DISCONNECTED -> {
                 setStreamState(c.streamId, "disconnected")
@@ -909,10 +1321,24 @@ class VdoNinja @JvmOverloads constructor(
                 setStreamState(c.streamId, "failed")
                 recoverConnection(c, "failed")
             }
-            PeerConnection.PeerConnectionState.CLOSED ->
-                emit(VdoEvent(VdoEvents.PEER_DISCONNECTED, uuid = c.uuid, streamId = c.streamId, connectionType = c.type))
+            PeerConnection.PeerConnectionState.CLOSED -> {
+                if (c.type == "publisher") {
+                    failPublisherConnection(c, "peer_closed", IllegalStateException("publisher peer connection closed"))
+                } else {
+                    emitPeerDisconnected(c)
+                }
+            }
             else -> {}
         }
+    }
+
+    private fun handleIceConnectionState(c: VdoConnection, state: PeerConnection.IceConnectionState) {
+        if (c.type != "publisher") return
+        val changed = synchronized(lock) {
+            if (connection(c.uuid, "publisher") !== c || c.closed || c.lastIceState == state) false
+            else { c.lastIceState = state; true }
+        }
+        if (changed) emitPublisherDiagnostic(c.session, "ice_state", state.name.lowercase())
     }
 
     private fun setStreamState(sid: String?, state: String) {
@@ -925,7 +1351,7 @@ class VdoNinja @JvmOverloads constructor(
         if (!c.recovering && (c.type == "publisher" || c.controlOpen)) {
             c.recovering = true
             log("ICE restart for ${c.uuid}/${c.type} ($reason)")
-            emit(VdoEvent(VdoEvents.ICE_RESTART, uuid = c.uuid, streamId = c.streamId, connectionType = c.type, message = reason))
+            emit(VdoEvent(VdoEvents.ICE_RESTART, uuid = c.uuid, sessionId = c.session, streamId = c.streamId, connectionType = c.type, message = reason))
             if (c.type == "publisher") renegotiate(c, true) else c.sendControl(JSONObject().put("iceRestartRequest", true))
             c.connectTask?.cancel(false)
             c.connectTask = scheduler.schedule({ if (!c.closed) recoverConnection(c, "restart_timeout") }, options.connectionTimeoutMs, TimeUnit.MILLISECONDS)
@@ -934,22 +1360,34 @@ class VdoNinja @JvmOverloads constructor(
         // Recovery is exhausted (or impossible): tear the connection down. `connectionFailed`
         // marks the final failure only, preceded by `peerDisconnected` like any other teardown.
         val sid = c.streamId
-        synchronized(lock) { removeConnection(c) }
-        c.close()
-        emit(VdoEvent(VdoEvents.PEER_DISCONNECTED, uuid = c.uuid, streamId = sid, connectionType = c.type))
-        emit(VdoEvent(VdoEvents.CONNECTION_FAILED, uuid = c.uuid, streamId = sid, connectionType = c.type, message = reason))
-        if (c.type == "viewer" && sid != null && synchronized(lock) { sid !in stoppedViews }) scheduleViewRetry(sid, 2000)
+        if (c.type == "publisher") {
+            failPublisherConnection(c, "ice_recovery", IllegalStateException("ICE recovery ended: $reason"))
+        } else {
+            val removed = synchronized(lock) {
+                if (connection(c.uuid, c.type) !== c) false
+                else { removeConnection(c); true }
+            }
+            if (!removed) return
+            emitPeerDisconnected(c)
+            c.close()
+            emit(VdoEvent(VdoEvents.CONNECTION_FAILED, uuid = c.uuid, sessionId = c.session,
+                streamId = sid, connectionType = c.type, stage = "ice_recovery",
+                failure = IllegalStateException("ICE recovery ended: $reason"), message = reason))
+            if (sid != null && synchronized(lock) { sid !in stoppedViews }) scheduleViewRetry(sid, 2000)
+        }
     }
 
     private fun sendBye(c: VdoConnection) {
-        if (!c.sendControl(JSONObject().put("bye", true))) signal.send(JSONObject().put("bye", true).put("UUID", c.uuid))
+        if (!c.sendControl(JSONObject().put("bye", true).put("session", c.session))) {
+            signal.send(JSONObject().put("bye", true).put("UUID", c.uuid).put("session", c.session))
+        }
     }
 
     // ------------------------------------------------------ data channels
 
     private fun handleIncomingChannel(c: VdoConnection, dc: DataChannel) {
         val label = dc.label() ?: ""
-        log("data channel from ${c.uuid}: \"$label\"")
+        log("data channel received")
         if (label.isEmpty() || label == Protocol.CONTROL_CHANNEL) {
             setupControlChannel(c, dc)
             return
@@ -972,7 +1410,7 @@ class VdoNinja @JvmOverloads constructor(
             return
         }
         // File transfers, resources and chunked channels are not part of this SDK.
-        log("ignoring unsupported channel \"$label\"")
+        log("ignoring unsupported data channel")
         dc.close()
     }
 
@@ -981,7 +1419,7 @@ class VdoNinja @JvmOverloads constructor(
         fun opened() {
             if (c.closed || c.controlOpen) return
             c.controlOpen = true
-            log("control channel open for ${c.uuid}/${c.type}")
+            log("control data channel opened")
             if (c.type == "viewer") {
                 c.sendControl(c.viewOptions.toPrefs())
                 if (options.autoPingViewer) startPingMonitor(c)
@@ -990,7 +1428,8 @@ class VdoNinja @JvmOverloads constructor(
             }
             val subs = synchronized(lock) { subscriptions.toList() }
             if (subs.isNotEmpty()) c.sendControl(JSONObject().put("pipe", JSONObject().put("type", "subscribe").put("channels", JSONArray(subs))))
-            emit(VdoEvent(VdoEvents.DATA_CHANNEL_OPEN, uuid = c.uuid, streamId = c.streamId, connectionType = c.type))
+            emit(VdoEvent(VdoEvents.DATA_CHANNEL_OPEN, uuid = c.uuid, sessionId = c.session,
+                streamId = c.streamId, connectionType = c.type))
         }
         dc.registerObserver(object : DataChannel.Observer {
             override fun onBufferedAmountChange(previousAmount: Long) {}
@@ -1000,7 +1439,8 @@ class VdoNinja @JvmOverloads constructor(
                     DataChannel.State.CLOSED -> if (c.controlOpen) {
                         c.controlOpen = false
                         c.pingTask?.cancel(false)
-                        emit(VdoEvent(VdoEvents.DATA_CHANNEL_CLOSE, uuid = c.uuid, streamId = c.streamId, connectionType = c.type))
+                        emit(VdoEvent(VdoEvents.DATA_CHANNEL_CLOSE, uuid = c.uuid, sessionId = c.session,
+                            streamId = c.streamId, connectionType = c.type))
                     }
                     else -> {}
                 }
@@ -1010,7 +1450,7 @@ class VdoNinja @JvmOverloads constructor(
                 val bytes = ByteArray(buffer.data.remaining()).also { buffer.data.get(it) }
                 val text = String(bytes, StandardCharsets.UTF_8)
                 val msg = try { JSONObject(text) } catch (_: Exception) { return }
-                log("<- DC(${c.uuid}/${c.type}) ${text.take(300)}")
+                log("control data-channel message received (payload omitted)")
                 handleControlMessage(c, msg)
             }
         })
@@ -1061,7 +1501,7 @@ class VdoNinja @JvmOverloads constructor(
                 if (c.pendingPing == ts) { c.pendingPing = 0; c.missedPings = 0 }
                 emit(VdoEvent(VdoEvents.PEER_LATENCY, uuid = c.uuid, streamId = c.streamId, latencyMs = System.currentTimeMillis() - ts))
             }
-            msg.has("bye") -> handleBye(c.uuid, VdoEvents.BYE, msg)
+            msg.has("bye") -> handleBye(c.uuid, VdoEvents.BYE, msg, c.session)
             msg.has("videoMuted") -> {
                 emit(VdoEvent(VdoEvents.REMOTE_VIDEO_MUTE_STATE, uuid = c.uuid, streamId = c.streamId, connectionType = c.type, muted = msg.optBoolean("videoMuted"), raw = msg))
                 emit(VdoEvent(VdoEvents.DATA_RECEIVED, uuid = c.uuid, streamId = c.streamId, data = msg, raw = msg))
@@ -1220,52 +1660,89 @@ class VdoNinja @JvmOverloads constructor(
     private fun handleOfferRequest(uuid: String?) {
         val peerId = uuid?.takeIf(String::isNotBlank) ?: return
         if (!publishing) return
+        val sessionId = Crypto.generateSession()
         val reserved = synchronized(lock) {
             if (!publishing || connections[peerId]?.publisher?.closed == false ||
-                !publisherOffersInProgress.add(peerId)) false
-            else true
+                publisherOffersInProgress.containsKey(peerId)) false
+            else { publisherOffersInProgress[peerId] = sessionId; true }
         }
         if (!reserved) return
-        var admitted = false
         var conn: VdoConnection? = null
+        var stage = "reserve_candidate"
         try {
-            if (publisherAdmission?.tryAdmit(peerId) == false) return
-            admitted = true
+            if (publisherAdmission?.tryReserve(peerId, sessionId) == false) return
+            emitPublisherDiagnostic(sessionId, "candidate_reserved")
             if (!publishing) {
-                publisherAdmission?.release(peerId)
-                admitted = false
+                publisherAdmission?.release(sessionId)
                 return
             }
-            val c = createConnection(peerId, "publisher")
+            stage = "create_peer_connection"
+            val c = createConnection(peerId, "publisher", sessionId)
             conn = c
             c.streamId = streamId
+            stage = "create_control_channel"
             val dc = c.pc.createDataChannel(Protocol.CONTROL_CHANNEL, DataChannel.Init())
             setupControlChannel(c, dc)
-            addLocalTracks(c)
+            stage = "create_offer"
             c.pc.createOffer(sdpObserver({ offer ->
-                if (offer == null) return@sdpObserver
-                c.pc.setLocalDescription(sdpObserver({ sendDescription(c, offer) }, { log("setLocalDescription failed: $it") }), offer)
-            }, { emit(VdoEvent(VdoEvents.ERROR, uuid = peerId, message = "failed to create offer: $it")) }), MediaConstraints())
-        } catch (e: Exception) {
-            val failed = conn ?: connection(peerId, "publisher")
-            failed?.let {
-                synchronized(lock) { removeConnection(it) }
-                it.close()
+                if (offer == null) {
+                    failPublisherConnection(c, "create_offer", IllegalStateException("createOffer returned no description"))
+                    return@sdpObserver
+                }
+                if (c.closed) return@sdpObserver
+                emitPublisherDiagnostic(c.session, "local_offer_created")
+                c.pc.setLocalDescription(sdpObserver({
+                    if (!c.closed) {
+                        emitPublisherDiagnostic(c.session, "local_sdp_applied")
+                        sendDescription(c, offer)
+                    }
+                }, { error ->
+                    failPublisherConnection(c, "set_local_description", IllegalStateException(error))
+                }), offer)
+            }, { error -> failPublisherConnection(c, "create_offer", IllegalStateException(error)) }), MediaConstraints())
+        } catch (failure: Throwable) {
+            val failed = conn ?: connection(peerId, "publisher")?.takeIf { it.session == sessionId }
+            if (failed != null) failPublisherConnection(failed, stage, failure)
+            else {
+                publisherAdmission?.release(sessionId)
+                failPublisherSession(peerId, sessionId, stage, failure)
             }
-            if (admitted && failed == null) publisherAdmission?.release(peerId)
-            emit(VdoEvent(VdoEvents.ERROR, uuid = peerId, message = "failed to create offer: $e"))
         } finally {
-            synchronized(lock) { publisherOffersInProgress.remove(peerId) }
+            synchronized(lock) {
+                if (publisherOffersInProgress[peerId] == sessionId) publisherOffersInProgress.remove(peerId)
+            }
         }
     }
 
     private fun handleSdp(msg: JSONObject, via: VdoConnection?) {
-        val desc = SessionDescription.fromJson(pw.decodeField(msg, "description")) ?: return
         val uuid = via?.uuid ?: msg.optString("UUID", null) ?: return
         val session = msg.optString("session", "").ifEmpty { via?.session }
+        val publisher = if (via == null || via.type == "publisher") connection(uuid, "publisher") else null
+        val decoded = try {
+            pw.decodeFieldOrThrow(msg, "description")
+        } catch (failure: Throwable) {
+            if (publisher != null && !session.isNullOrEmpty() && session == publisher.session) {
+                failPublisherConnection(publisher, "decrypt_remote_description", failure)
+            }
+            return
+        }
+        val desc = SessionDescription.fromJson(decoded)
+        if (desc == null) {
+            if (publisher != null && !session.isNullOrEmpty() && session == publisher.session && msg.has("description")) {
+                failPublisherConnection(publisher, "parse_remote_description",
+                    IllegalArgumentException("remote description was missing or malformed"))
+            }
+            return
+        }
         when (desc.type) {
             "offer" -> handleOffer(uuid, session, msg, desc, via)
-            "answer" -> handleAnswer(uuid, session, desc)
+            "answer" -> {
+                val c = publisher ?: if (via?.type == "publisher") via else connection(uuid, "publisher")
+                // Answers without the exact VDO session are not safe to associate with a peer generation.
+                if (c == null || session.isNullOrEmpty() || c.session != session) return
+                emitPublisherDiagnostic(c.session, "remote_sdp_decrypted")
+                handleAnswer(c, desc)
+            }
         }
     }
 
@@ -1328,15 +1805,17 @@ class VdoNinja @JvmOverloads constructor(
         }, fail), RtcSessionDescription(RtcSessionDescription.Type.OFFER, desc.sdp))
     }
 
-    private fun handleAnswer(uuid: String, session: String?, desc: SessionDescription) {
-        val c = connection(uuid, "publisher") ?: connection(uuid) ?: return
-        if (!session.isNullOrEmpty() && c.session != session) {
-            log("session mismatch, ignoring answer from $uuid")
-            return
-        }
+    private fun handleAnswer(c: VdoConnection, desc: SessionDescription) {
+        if (c.type != "publisher" || c.closed || connection(c.uuid, "publisher") !== c) return
         c.pc.setRemoteDescription(sdpObserver({
             drainPendingIce(c, "remote")
-        }, { emit(VdoEvent(VdoEvents.ERROR, uuid = uuid, message = "failed to handle answer: $it")) }), RtcSessionDescription(RtcSessionDescription.Type.ANSWER, desc.sdp))
+            if (connection(c.uuid, "publisher") !== c || c.closed) return@sdpObserver
+            c.remoteAnswerApplied = true
+            emitPublisherDiagnostic(c.session, "remote_sdp_applied")
+            completePublisherAuthentication(c)
+        }, { error ->
+            failPublisherConnection(c, "set_remote_description", IllegalStateException(error))
+        }), RtcSessionDescription(RtcSessionDescription.Type.ANSWER, desc.sdp))
     }
 
     private fun handleRemoteCandidates(msg: JSONObject, single: Boolean = false, via: VdoConnection? = null) {
@@ -1360,9 +1839,22 @@ class VdoNinja @JvmOverloads constructor(
     private fun addCandidates(c: VdoConnection, cands: List<IceCandidate>) {
         for (ic in cands) {
             try {
-                c.pc.addIceCandidate(org.webrtc.IceCandidate(ic.sdpMid ?: "0", ic.sdpMLineIndex ?: 0, ic.candidate))
-            } catch (e: Exception) {
-                log("addIceCandidate failed: $e")
+                val accepted = c.pc.addIceCandidate(
+                    org.webrtc.IceCandidate(ic.sdpMid ?: "0", ic.sdpMLineIndex ?: 0, ic.candidate),
+                )
+                if (!accepted && c.type == "publisher") {
+                    emitPublisherDiagnostic(
+                        c.session,
+                        "remote_ice_candidate_rejected",
+                        failure = IllegalStateException("libwebrtc rejected a remote ICE candidate"),
+                    )
+                }
+            } catch (failure: Exception) {
+                if (c.type == "publisher") {
+                    emitPublisherDiagnostic(c.session, "remote_ice_candidate_failed", failure = failure)
+                } else {
+                    log("remote ICE candidate processing failed for viewer")
+                }
             }
         }
     }
@@ -1378,16 +1870,22 @@ class VdoNinja @JvmOverloads constructor(
         addCandidates(c, list.flatMap { it.matching(c.session) })
     }
 
-    private fun handleBye(uuid: String?, type: String, msg: JSONObject) {
+    private fun handleBye(uuid: String?, type: String, msg: JSONObject, expectedSession: String? = null) {
         if (uuid.isNullOrEmpty()) return
         val conns: List<VdoConnection>
+        val session = expectedSession ?: msg.optString("session", "")
         var retry: String? = null
         synchronized(lock) {
-            pendingIce.remove("local:$uuid")
-            pendingIce.remove("remote:$uuid")
-            val pair = connections.remove(uuid)
-            peerSubscriptions.remove(uuid)
-            conns = listOfNotNull(pair?.publisher, pair?.viewer)
+            val pair = connections[uuid]
+            conns = listOfNotNull(pair?.publisher, pair?.viewer).filter {
+                session.isEmpty() || it.session == session
+            }
+            conns.forEach(::removeConnection)
+            if (connections[uuid] == null) {
+                pendingIce.remove("local:$uuid")
+                pendingIce.remove("remote:$uuid")
+                peerSubscriptions.remove(uuid)
+            }
             for (c in conns) {
                 val sid = c.streamId
                 if (c.type == "viewer" && sid != null && !intentional && sid !in stoppedViews) {
@@ -1397,9 +1895,8 @@ class VdoNinja @JvmOverloads constructor(
                 }
             }
         }
-        conns.forEach { it.close() }
+        conns.forEach { peer -> peer.close(); emitPeerDisconnected(peer) }
         retry?.let { scheduleViewRetry(it, 2000) }
-        emit(VdoEvent(type, uuid = uuid, raw = msg))
-        emit(VdoEvent(VdoEvents.PEER_DISCONNECTED, uuid = uuid))
+        emit(VdoEvent(type, uuid = uuid, sessionId = session.ifEmpty { null }, raw = msg))
     }
 }

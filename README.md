@@ -212,15 +212,19 @@ Remote viewing is independent of Motion's enable switch and can run with vehicle
 
 | Transport | Browser views |
 | --- | --- |
-| VDO.Ninja | Four-camera composition only |
-| Tailscale Serve (private) or Funnel (public) | Composition plus Front, Rear, Left, and Right |
-| Zrok (public) | Composition plus Front, Rear, Left, and Right |
+| VDO.Ninja | Live four-camera composition on the standard VDO.Ninja page |
+| Tailscale Serve (private) or Funnel (public) | Shared Live / Recordings page: composition or an individual camera, plus the Extend archive |
+| Zrok (public) | The same Live / Recordings page as Tailscale |
 
 VDO.Ninja creates a random `byd-…` stream ID if its ID field is left empty; you can instead enter a custom ID. Its viewer link is built from that ID. Set a viewer password in the app; it is entered separately from the link ([VDO.Ninja stream IDs](https://docs.vdo.ninja/getting-started/stream-ids), [passwords](https://docs.vdo.ninja/advanced-settings/setup-parameters/and-password)). For Tailscale, enter a device name or leave it blank for an app-generated one, then choose **Authorize**; if sign-in is needed, the embedded Tailscale client supplies the authorization URL to approve that device in your tailnet. **Serve** is private to the tailnet and follows its access-control rules; **Funnel** is public ([Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve), [Funnel](https://tailscale.com/docs/features/tailscale-funnel)). For Zrok, enter the account token from your myzrok account console ([official token instructions](https://netfoundry.io/docs/zrok/get-started/get-token/)). You can enter a custom connection name or keep the app-generated default; **Authorize** enables the environment, and **Start viewing** creates the share address. Zrok uses this account token and does not provide a separate authorization URL.
 
 A viewer password is required for VDO.Ninja and every public route, including Tailscale Funnel and Zrok; public viewing cannot start with an empty password. Private Tailscale Serve uses tailnet identity and policy instead. The shared link and QR code do not contain the viewer password. Passwords, provider tokens, and tunnel identity are encrypted with Android Keystore and are excluded from settings exports and Android backups. Revoke stops the active share and clears the saved credentials for that transport.
 
-All remote modes are video-only, allow one viewer at a time, and do not create recordings or archive clips. Video encoding and camera use start only for a connected viewer. Viewing requires a compatible hardware H.264 encoder; there is no software-encoding fallback. Network routing, existing VPNs, firmware, and sleep state can prevent access, and remote viewing cannot wake a vehicle that is fully asleep or unreachable. Compatibility and recovery behavior are not guaranteed on every model or encoder.
+The Tailscale/Zrok page is included in the app and served by the vehicle; it needs no separate website or hosting account. It uses Extend's language and theme. Choose **Live** for composition or Front / Rear / Left / Right, or **Recordings** for the calendar, covers and read-only Extend archive. Playback includes event markers, seeking, speed and fullscreen controls, and preserves audio when the recording contains it. Old recordings without saved camera order offer composition only. Opening the archive does not start live cameras; OEM Sentry recordings are not included. VDO.Ninja remains live-only, with its standard viewer and no Extend archive or camera-selection menu.
+
+One viewer is active across all transports. A new authenticated viewer replaces the previous session; our Tailscale/Zrok page explains the replacement and does not reconnect automatically. Live-to-live handover retains the camera source. A failed password does not replace the current viewer, and closing an old session cannot stop its replacement. The standard VDO page's exact notice and reconnect behavior depend on VDO.Ninja.
+
+Live streams are video-only and do not create recordings. Live encoding and camera use start only for a connected viewer and require a compatible hardware H.264 encoder; there is no software-encoding fallback. Network routing, existing VPNs, firmware, and sleep state can prevent access, and remote viewing cannot wake a vehicle that is fully asleep or unreachable. Compatibility and recovery behavior are not guaranteed on every model or encoder.
 
 Thanks to the [OverDrive project](https://github.com/yash-srivastava/Overdrive-release) for its publicly available code and ideas that informed our camera and tunnel research.
 

@@ -14,9 +14,12 @@ class VdoPasswordTest {
         viewer.encryptInto(envelope, "description", description)
 
         assertEquals("test-description", (publisher.decodeField(envelope, "description") as JSONObject).getString("sdp"))
-        assertNull(PasswordContext("wrong-password", "vdo.ninja").decodeField(envelope, "description"))
+        val wrongPassword = PasswordContext("wrong-password", "vdo.ninja")
+        assertNull(wrongPassword.decodeField(envelope, "description"))
+        assertNotNull(runCatching { wrongPassword.decodeFieldOrThrow(envelope, "description") }.exceptionOrNull())
         assertNull(publisher.decodeField(JSONObject().put("description", description), "description"))
         envelope.remove("vector")
         assertNull(publisher.decodeField(envelope, "description"))
+        assertNotNull(runCatching { publisher.decodeFieldOrThrow(envelope, "description") }.exceptionOrNull())
     }
 }

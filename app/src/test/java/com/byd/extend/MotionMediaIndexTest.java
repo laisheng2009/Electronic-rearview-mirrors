@@ -261,4 +261,25 @@ public final class MotionMediaIndexTest {
         assertEquals(1, saved.markers.size());
         assertEquals("event-preserved", saved.markers.get(0).eventId);
     }
+
+    @Test public void separateReaderReloadsAtomicIndexUpdatesFromWriter() throws Exception {
+        File file = new File(Files.createTempDirectory("motion-index-cross-process-").toFile(), "library.json");
+        MotionMediaIndex reader = new MotionMediaIndex(file);
+        MotionMediaIndex writer = new MotionMediaIndex(file);
+        MotionMediaIndex.Record record = new MotionMediaIndex.Record(
+                "content://media/external_primary/video/media/81", "external_primary",
+                "Motion_shared.mp4", "shared-81", 1_797_000_000_000L,
+                10_000L, 1920, 1080, MotionMediaIndex.RECORDING);
+
+        writer.put(record);
+        reader.reloadIfChanged();
+        assertNotNull(reader.find(record.uri));
+
+        assertTrue(writer.finishRecording(record.uri, MotionMediaIndex.COMPLETE, 5_000L, 321_000L));
+        reader.reloadIfChanged();
+        MotionMediaIndex.Record refreshed = reader.find(record.uri);
+        assertEquals(MotionMediaIndex.COMPLETE, refreshed.status);
+        assertEquals(5_000L, refreshed.durationMs);
+        assertEquals(321_000L, refreshed.sizeBytes);
+    }
 }
