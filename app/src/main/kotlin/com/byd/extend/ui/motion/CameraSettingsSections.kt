@@ -247,6 +247,7 @@ internal fun FormScope.CameraViewingScreen(
     val phaseStatus = when {
         blocked || phase == "low_battery" -> strings.motionText(R.string.cameras_status_low_battery)
         phase == "authorizing" -> strings.motionText(R.string.cameras_status_authorizing)
+        phase == "connecting" -> strings.motionText(R.string.cameras_status_connecting)
         phase == "ready" -> strings.motionText(R.string.cameras_status_ready)
         phase == "preparing" -> strings.motionText(R.string.cameras_status_preparing)
         phase == "connected" -> strings.motionText(R.string.cameras_status_connected)
@@ -254,7 +255,7 @@ internal fun FormScope.CameraViewingScreen(
         else -> strings.motionText(R.string.cameras_not_connected)
     }
     val phaseTone = when {
-        blocked || phase == "low_battery" || phase == "authorizing" || phase == "preparing" -> StatusTone.Warning
+        blocked || phase in setOf("low_battery", "authorizing", "connecting", "preparing") -> StatusTone.Warning
         phase == "connected" -> StatusTone.Ok
         phase == "error" -> StatusTone.Error
         phase == "ready" -> StatusTone.Ok
@@ -299,12 +300,18 @@ internal fun FormScope.CameraViewingScreen(
                         R.string.cameras_public_security else R.string.cameras_private_security),
                         color = colors.muted, fontSize = 13.sp)
                 }
+                row("setup") {
+                    Text(strings.motionText(if (state.config.tailscalePublic)
+                        R.string.cameras_tailscale_public_setup else R.string.cameras_tailscale_private_setup),
+                        color = colors.muted, fontSize = 13.sp)
+                }
                 row("name") {
                     ConnectionField(strings.motionText(R.string.cameras_device_name), streamIdDraft,
                         colors, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
-                        }, onCommit = ::commitEdits)
+                        }, onCommit = ::commitEdits,
+                        hint = strings.motionText(R.string.cameras_connection_name_hint))
                 }
                 if (state.config.tailscalePublic) row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
@@ -336,7 +343,8 @@ internal fun FormScope.CameraViewingScreen(
                         colors, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
-                        }, onCommit = ::commitEdits)
+                        }, onCommit = ::commitEdits,
+                        hint = strings.motionText(R.string.cameras_connection_name_hint))
                 }
                 row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
@@ -358,7 +366,8 @@ internal fun FormScope.CameraViewingScreen(
                         colors, onValueChange = {
                             streamIdDraft = it
                             streamIdDirty = true
-                        }, onCommit = ::commitEdits)
+                        }, onCommit = ::commitEdits,
+                        hint = strings.motionText(R.string.cameras_vdo_id_hint))
                 }
                 row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
@@ -368,7 +377,8 @@ internal fun FormScope.CameraViewingScreen(
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
                             passwordDraft = it
                             passwordDirty = true
-                        }, onCommit = ::commitEdits)
+                        }, onCommit = ::commitEdits,
+                        hint = strings.motionText(R.string.cameras_vdo_password_hint))
                 }
             }
         }
@@ -394,7 +404,8 @@ internal fun FormScope.CameraViewingScreen(
             Text(viewerUrl, color = colors.muted, fontSize = 12.sp)
         } }
         if (state.viewerUrl.isNullOrBlank()) row("link-pending") {
-            Text(strings.motionText(R.string.cameras_link_pending), color = colors.muted, fontSize = 13.sp)
+            Text(strings.motionText(if (transport == "vdo") R.string.cameras_vdo_link_pending
+                else R.string.cameras_link_pending), color = colors.muted, fontSize = 13.sp)
         }
         row("link-actions") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -459,6 +470,7 @@ private fun ConnectionField(
     onReveal: () -> Unit = {},
     onValueChange: (String) -> Unit,
     onCommit: () -> Unit = {},
+    hint: String? = null,
 ) {
     val focus = LocalFocusManager.current
     var focused by remember { mutableStateOf(false) }
@@ -506,6 +518,7 @@ private fun ConnectionField(
             }
         }
     }
+    if (hint != null) Text(hint, color = colors.muted, fontSize = 13.sp)
 }
 
 @Composable

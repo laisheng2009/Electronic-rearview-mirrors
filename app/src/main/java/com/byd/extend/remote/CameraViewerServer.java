@@ -18,6 +18,7 @@ public final class CameraViewerServer implements AutoCloseable {
         byte[] resource(String name) throws IOException;
     }
     private final ViewerAccess access;
+    private final boolean passwordRequired;
     private final Stream stream;
     private final ServerSocket server;
     private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
@@ -29,6 +30,7 @@ public final class CameraViewerServer implements AutoCloseable {
 
     public CameraViewerServer(String password, String privateProxyProof, Stream stream) throws IOException {
         this.access = new ViewerAccess(password, privateProxyProof);
+        this.passwordRequired = privateProxyProof == null;
         this.stream = stream;
         server = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
         server.setSoTimeout(1000);
@@ -120,7 +122,11 @@ public final class CameraViewerServer implements AutoCloseable {
             }
             if (path.equals("/") && first[0].equals("GET")) {
                 // This resource contains only the login shell. Video/assets/control require its session.
-                respond(socket, 200, "text/html; charset=utf-8", stream.resource("index.html"), null);
+                String page = new String(stream.resource("index.html"), StandardCharsets.UTF_8)
+                        .replace("<!--VIEWER_PASSWORD-->", passwordRequired
+                                ? "<input id=\"password\" type=\"password\" maxlength=\"1024\" autocomplete=\"current-password\">"
+                                : "");
+                respond(socket, 200, "text/html; charset=utf-8", page.getBytes(StandardCharsets.UTF_8), null);
                 return;
             }
             if (!access.accepts(session, now())) { json(socket, 401, "unauthorized", null); return; }

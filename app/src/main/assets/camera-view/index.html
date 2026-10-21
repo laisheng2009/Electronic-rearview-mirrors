@@ -5,7 +5,7 @@ body{margin:0;background:#101820;color:#eee;font:16px system-ui;text-align:cente
 button,input{padding:12px;margin:4px;border:1px solid #627384;border-radius:8px;background:#243545;color:white;font:inherit}
 button{cursor:pointer}canvas{width:100%;height:70vh;object-fit:contain;background:black}video{display:none}.hidden{display:none}
 </style></head><body><main><h2>BYD Extend</h2><p id="status"></p><p id="charge" style="color:#ffd54f"></p>
-<form id="login"><input id="password" type="password" maxlength="1024" autocomplete="current-password"><button id="connect"></button></form>
+<form id="login"><!--VIEWER_PASSWORD--><button id="connect"></button></form>
 <section id="viewer" class="hidden"><canvas id="canvas"></canvas><video id="video" muted playsinline autoplay></video>
 <nav id="views"></nav><button id="stop"></button></section></main>
 <script>
@@ -17,7 +17,7 @@ zh:['密码','连接','停止','组合','前方','后方','左侧','右侧','正
 }, t=texts[lang]||texts.en;
 const chargeText={en:['12V battery','Unable to verify charge: ','Protection for these readings is unavailable. Continue camera use at your discretion.'],uk:['12В АКБ','Не вдалося перевірити заряд: ','Захист за цими показниками недоступний. Подальша робота камер — на ваш розсуд.'],ru:['12В АКБ','Не удалось проверить заряд: ','Защита по этим показателям недоступна. Дальнейшая работа камер — на ваше усмотрение.'],zh:['12V电池','无法检查电量：','这些指标的保护不可用。是否继续使用摄像头由您决定。']}[lang]||['12V battery','Unable to verify charge: ','Protection for these readings is unavailable. Continue camera use at your discretion.'];
 const $=id=>document.getElementById(id), video=$('video'),canvas=$('canvas'),ctx=canvas.getContext('2d');
-$('password').placeholder=t[0];$('connect').textContent=t[1];$('stop').textContent=t[2];
+const password=$('password');if(password)password.placeholder=t[0];$('connect').textContent=t[1];$('stop').textContent=t[2];
 let active=false,view=-1,hls=null,poll=null,drawHandle=0,playing=false;
 for(let i=-1;i<4;i++){const b=document.createElement('button');b.textContent=t[i+4];b.onclick=()=>{view=i;draw()};$('views').append(b)}
 function draw(){cancelAnimationFrame(drawHandle);if(!active)return;
@@ -31,8 +31,8 @@ if(!Hls.isSupported())throw Error('decoder unavailable');hls=new Hls({liveSyncDu
 async function tick(){if(!active)return;try{const r=await fetch('/status');if(!r.ok){finish();status('ended');return}const data=await r.json();status(data.status);
 const missing=[];if(data.missingCharge&1)missing.push('SOC');if(data.missingCharge&2)missing.push(chargeText[0]);$('charge').textContent=missing.length?chargeText[1]+missing.join(' / ')+'. '+chargeText[2]:'';
 if(data.status==='connected')await startVideo();else if(data.status==='low_battery'){hls?.destroy();hls=null;video.removeAttribute('src');video.load();playing=false;ctx.clearRect(0,0,canvas.width,canvas.height)}}catch(e){status('error')}}
-$('login').onsubmit=async e=>{e.preventDefault();$('connect').disabled=true;try{const r=await fetch('/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('password').value})});
-const data=await r.json();status(data.status);if(!r.ok)return;$('password').value='';active=true;$('login').classList.add('hidden');$('viewer').classList.remove('hidden');draw();await tick();poll=setInterval(tick,2000)}catch(e){status('error')}finally{$('connect').disabled=false}};
+$('login').onsubmit=async e=>{e.preventDefault();$('connect').disabled=true;try{const r=await fetch('/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password?.value||''})});
+const data=await r.json();status(data.status);if(!r.ok)return;if(password)password.value='';active=true;$('login').classList.add('hidden');$('viewer').classList.remove('hidden');draw();await tick();poll=setInterval(tick,2000)}catch(e){status('error')}finally{$('connect').disabled=false}};
 function finish(){active=false;clearInterval(poll);cancelAnimationFrame(drawHandle);hls?.destroy();hls=null;video.removeAttribute('src');video.load();playing=false;$('charge').textContent='';$('viewer').classList.add('hidden');$('login').classList.remove('hidden')}
 $('stop').onclick=async()=>{try{await fetch('/stop',{method:'POST'})}finally{finish();status('ended')}};
 addEventListener('pagehide',()=>{if(active)navigator.sendBeacon('/stop','')});

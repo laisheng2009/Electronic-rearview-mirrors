@@ -113,7 +113,7 @@ func (p *zrokProvider) Authorize(name, credential string) tunnelResult {
 		Description: "BYD Extend camera stream",
 	})
 	if err != nil || enabled == nil || enabled.ZitiIdentity == "" || enabled.ZitiConfig == "" {
-		return failure("provider_unavailable")
+		return failure("zrok_enable_failed")
 	}
 	root.SetEnvironmentInMemory(&env_core.Environment{
 		AccountToken: credential,
@@ -198,7 +198,7 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 		NameSelections: []sdk.NameSelection{{NamespaceToken: "public", Name: name}},
 	})
 	if err != nil || share == nil || share.Token == "" {
-		return failure("provider_unavailable")
+		return failure("zrok_share_failed")
 	}
 	address := firstHttpsEndpoint(share.FrontendEndpoints)
 	if address == "" {

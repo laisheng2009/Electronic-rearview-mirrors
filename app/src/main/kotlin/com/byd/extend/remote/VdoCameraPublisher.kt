@@ -2,7 +2,6 @@ package com.byd.extend.remote
 
 import android.content.Context
 import android.util.Log
-import android.net.Uri
 import android.view.Surface
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -222,7 +221,7 @@ internal class VdoCameraPublisher(
         var completed = false
         try {
             check(!closed) { "Publisher closed" }
-            require(streamId.matches(Regex("[A-Za-z0-9_-]{1,64}"))) { "Invalid stream name" }
+            val viewerUrl = CameraViewingEdits.vdoViewerUrl(streamId)
             require(password.isNotBlank()) { "Viewing password required" }
 
             ensureWebRtcInitialized(appContext)
@@ -263,12 +262,6 @@ internal class VdoCameraPublisher(
             check(!closed) { "Publisher closed" }
             val publishedId = sdk.announce(streamId)
             check(publishedId == streamId) { "Invalid stream name" }
-            val viewerUrl = Uri.Builder()
-                .scheme("https")
-                .authority("vdo.ninja")
-                .appendQueryParameter("view", streamId)
-                .build()
-                .toString()
 
             synchronized(lock) {
                 check(!closed) { "Publisher closed" }

@@ -16,7 +16,6 @@ import com.byd.extend.remote.tunnel.CameraTunnelProvider
 import com.byd.extend.remote.tunnel.CameraTunnelResult
 import java.security.SecureRandom
 import java.net.URI
-import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -108,9 +107,10 @@ class CameraViewingController private constructor(private val context: Context) 
             mutable.value = state.value.copy(config = readConfig())
             stopListening()
         }
-        val name = try { edits.validatedName() }
-            catch (failure: IllegalArgumentException) { throw ViewingFailure(R.string.cameras_error_name) }
-        edits.validateSecrets()
+        val name = if (regenerate) null else validatedName(edits)
+        validatePassword(edits)
+        try { edits.validateToken() }
+        catch (failure: IllegalArgumentException) { throw ViewingFailure(R.string.cameras_error_token_length) }
         require(transport == null || transport in setOf("vdo", "tailscale", "zrok"))
         val config = state.value.config
         val changedSecrets = listOf("password" to edits.password, "token" to edits.token)
@@ -132,7 +132,7 @@ class CameraViewingController private constructor(private val context: Context) 
             if (name != null) editor.putString("${edits.transport}_name", name)
             if (regenerate) {
                 check(edits.transport == "vdo")
-                editor.putString("vdo_name", newName())
+                editor.putString("vdo_name", CameraViewingEdits.newName("vdo"))
             }
             if (transport != null) editor.putString("transport", transport)
             if (tailscalePublic != null) editor.putBoolean("tailscale_public", tailscalePublic)
@@ -174,13 +174,30 @@ class CameraViewingController private constructor(private val context: Context) 
         (state.value.config.transport != "zrok" || getToken().isNotBlank())
 
     private fun requirePassword() {
-        if (publicAccess() && getPassword().isBlank())
-            throw ViewingFailure(R.string.cameras_error_password_required)
+        if (publicAccess()) {
+            val password = getPassword()
+            if (password.isBlank()) throw ViewingFailure(R.string.cameras_error_password_required)
+            validatePassword(CameraViewingEdits(state.value.config.transport, password = password))
+        }
+    }
+
+    private fun validatedName(edits: CameraViewingEdits): String? = try { edits.validatedName() }
+        catch (failure: IllegalArgumentException) {
+            throw ViewingFailure(if (edits.transport == "vdo") R.string.cameras_vdo_id_hint
+                else R.string.cameras_error_name)
+        }
+
+    private fun validatePassword(edits: CameraViewingEdits) {
+        try { edits.validatePassword() }
+        catch (failure: IllegalArgumentException) {
+            throw ViewingFailure(if (edits.transport == "vdo") R.string.cameras_vdo_password_hint
+                else R.string.cameras_error_password_length)
+        }
     }
 
     private fun ensureName(): String {
         if (state.value.config.streamId.isNotEmpty()) return state.value.config.streamId
-        val name = newName()
+        val name = CameraViewingEdits.newName(state.value.config.transport)
         check(preferences.edit().putString("${state.value.config.transport}_name", name).commit())
         refreshConfiguration()
         return name
@@ -197,7 +214,9 @@ class CameraViewingController private constructor(private val context: Context) 
             return
         }
         val token = getToken().ifBlank { null }
-        val active = CameraTunnelProvider(context, config.transport, ensureName())
+        val name = ensureName()
+        validatedName(CameraViewingEdits(config.transport, name))
+        val active = CameraTunnelProvider(context, config.transport, name)
         provider = active
         val epoch = generation
         mutable.value = state.value.copy(phase = "authorizing", error = null)
@@ -227,9 +246,10 @@ class CameraViewingController private constructor(private val context: Context) 
         if (!reuseAuthorization) stopListening()
         val config = state.value.config
         val name = ensureName()
+        validatedName(CameraViewingEdits(config.transport, name))
         val password = getPassword()
         val epoch = generation
-        mutable.value = state.value.copy(phase = "preparing", error = null, authorizationUrl = null)
+        mutable.value = state.value.copy(phase = "connecting", error = null, authorizationUrl = null)
         MotionRuntime.settingsChanged(context)
         if (config.transport == "vdo") {
             publisher = VdoCameraPublisher(context, name, password, object : VdoCameraPublisher.Listener {
@@ -272,7 +292,20 @@ class CameraViewingController private constructor(private val context: Context) 
             // Native codes are bounded identifiers; never journal provider details, URLs or secrets.
             val code = result.errorCode.takeIf { it.matches(Regex("[a-z_]{1,64}")) } ?: "unknown"
             Log.w("CameraViewing", "provider=${state.value.config.transport} error=$code")
-            throw ViewingFailure(R.string.cameras_error_connection)
+            throw ViewingFailure(when (code) {
+                "invalid_name" -> if (state.value.config.transport == "vdo") R.string.cameras_vdo_id_hint
+                    else R.string.cameras_error_name
+                "credential_required" -> R.string.cameras_error_token_required
+                "not_authorized", "login_required" -> R.string.cameras_error_authorization_required
+                "secure_store_error" -> R.string.cameras_error_secret
+                "native_unavailable", "runtime_error", "invalid_provider" -> R.string.cameras_error_tunnel_runtime
+                "invalid_port", "private_credential_missing", "invalid_request" -> R.string.cameras_error_local_viewer
+                "tailscale_https_failed" -> R.string.cameras_error_tailscale_https
+                "tailscale_funnel_failed" -> R.string.cameras_error_tailscale_funnel
+                "zrok_enable_failed" -> R.string.cameras_error_zrok_enable
+                "zrok_share_failed" -> R.string.cameras_error_zrok_share
+                else -> R.string.cameras_error_connection
+            })
         }
         for (address in listOfNotNull(result.address, result.loginUrl)) {
             val uri = URI(address)
@@ -283,7 +316,8 @@ class CameraViewingController private constructor(private val context: Context) 
         if (openLogin) interactiveAuthorization = false
         mutable.value = state.value.copy(
             phase = when (result.state) {
-                "serving", "authorized" -> "ready"
+                "serving" -> "ready"
+                "authorized" -> "connecting"
                 "login_required" -> "authorizing"
                 else -> "idle"
             },
@@ -446,6 +480,5 @@ class CameraViewingController private constructor(private val context: Context) 
         }
         private fun randomProof(): String = ByteArray(32).also(SecureRandom()::nextBytes)
             .joinToString("") { "%02x".format(it.toInt() and 255) }
-        private fun newName(): String = "byd-" + UUID.randomUUID().toString().replace("-", "").take(16)
     }
 }

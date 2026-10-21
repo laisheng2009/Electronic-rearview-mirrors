@@ -162,7 +162,10 @@ func (p *tailscaleProvider) Start(name string, localPort int, public bool, priva
 		listener, err = p.server.ListenTLS("tcp", ":443")
 	}
 	if err != nil {
-		return failure("provider_unavailable")
+		if public {
+			return failure("tailscale_funnel_failed")
+		}
+		return failure("tailscale_https_failed")
 	}
 	address := tailscaleAddressFromServer(p.server)
 	if address == "" {
