@@ -81,9 +81,27 @@ dependencies {
     implementation("androidx.core:core:1.13.1")
     implementation("io.coil-kt.coil3:coil-compose-core:3.0.4")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.85")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("io.getstream:stream-webrtc-android:1.3.10")
+    implementation("androidx.media3:media3-muxer:1.8.0")
+    implementation("com.google.zxing:core:3.5.3")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+}
+
+val tunnelJniOutput = layout.buildDirectory.dir("generated/tunnelJniLibs")
+android.sourceSets.getByName("main").jniLibs.srcDir(tunnelJniOutput)
+val buildCameraTunnels by tasks.registering(Exec::class) {
+    inputs.dir("src/main/native/tunnel")
+    outputs.dir(tunnelJniOutput)
+    commandLine("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        file("src/main/native/tunnel/build.ps1").absolutePath,
+        "-AndroidNdk", android.sdkDirectory.resolve("ndk/${android.ndkVersion}").absolutePath,
+        "-OutputRoot", tunnelJniOutput.get().asFile.absolutePath)
+}
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }.configureEach {
+    dependsOn(buildCameraTunnels)
 }
 
 val copyPerformanceApkToBuildOutput by tasks.registering(Copy::class) {

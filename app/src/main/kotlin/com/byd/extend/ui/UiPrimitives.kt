@@ -767,6 +767,7 @@ internal fun NumericSetting(
     decimalPlaces: Int = 0,
     labelWidth: Dp? = null,
     inputWidth: Dp? = null,
+    adjustmentStep: Float = 1f,
 ) {
     val compact = LocalCompactControls.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -809,8 +810,9 @@ internal fun NumericSetting(
     }
     fun adjust(delta: Float) {
         if (!enabled) return
-        val next = ((draft.toFloatOrNull() ?: range.start) + delta).coerceIn(range)
-        draft = if (next % 1f == 0f) next.roundToInt().toString() else next.toString()
+        val next = ((draft.toFloatOrNull() ?: range.start) + delta * adjustmentStep).coerceIn(range)
+        draft = if (decimalPlaces == 1) cameraFovText(next.toDouble())
+            else if (next % 1f == 0f) next.roundToInt().toString() else next.toString()
         invalid = false
         commit(draft)
     }

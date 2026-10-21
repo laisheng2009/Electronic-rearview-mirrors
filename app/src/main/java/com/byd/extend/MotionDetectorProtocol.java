@@ -17,7 +17,7 @@ public final class MotionDetectorProtocol {
     static final String CONFIG_PATH = STATE_ROOT + "/config.json";
     static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
     static final String EXTRA_SESSION = "motion_session_id";
-    static final int VERSION = 13;
+    static final int VERSION = 14;
     public static final String EXTRA_WINDOW_REPORTER = "motion_window_reporter";
     public static final String WINDOW_COMMANDS = "window_commands";
     public static final String WINDOW_CANCELLED = "window_cancelled";
@@ -59,12 +59,17 @@ public final class MotionDetectorProtocol {
     static final int TX_CHECK_START = IBinder.FIRST_CALL_TRANSACTION + 19;
     static final int TX_CHECK_CANCEL = IBinder.FIRST_CALL_TRANSACTION + 20;
     static final int TX_OPEN_THUMBNAIL = IBinder.FIRST_CALL_TRANSACTION + 21;
+    static final int TX_READ_CHARGE = IBinder.FIRST_CALL_TRANSACTION + 22;
+    static final int TX_VIEW_PREPARE = IBinder.FIRST_CALL_TRANSACTION + 23;
+    static final int TX_VIEW_RELEASE = IBinder.FIRST_CALL_TRANSACTION + 24;
 
     static final int CB_PREPARED = IBinder.FIRST_CALL_TRANSACTION;
     static final int CB_STATUS = IBinder.FIRST_CALL_TRANSACTION + 1;
     static final int CB_DETECTION = IBinder.FIRST_CALL_TRANSACTION + 2;
     static final int CB_ERROR = IBinder.FIRST_CALL_TRANSACTION + 3;
     static final int CB_SCREEN = IBinder.FIRST_CALL_TRANSACTION + 4;
+    static final int CB_CHARGE = IBinder.FIRST_CALL_TRANSACTION + 5;
+    static final int CB_CONFIGURED = IBinder.FIRST_CALL_TRANSACTION + 6;
 
     // CameraRuntimeHost operations on byd_extend_guard/TX_CAMERA_RUNTIME.
     static final int CAMERA_ATTACH = 13;
@@ -88,6 +93,45 @@ public final class MotionDetectorProtocol {
     static final String OEM_PACKAGE = "com.byd.sentrymode";
 
     private MotionDetectorProtocol() {}
+
+    static void writeChargeState(Parcel parcel, CameraChargePolicy.State state) {
+        Integer soc = state.socPercent();
+        Float voltage = state.voltageVolts();
+        parcel.writeInt(soc == null ? 0 : 1);
+        if (soc != null) parcel.writeInt(soc);
+        parcel.writeInt(voltage == null ? 0 : 1);
+        if (voltage != null) parcel.writeFloat(voltage);
+        parcel.writeInt(state.missingMetrics());
+        parcel.writeInt(state.lowCauses());
+        parcel.writeInt(state.isMonitoring() ? 1 : 0);
+        parcel.writeInt(state.isLatchPersistenceHealthy() ? 1 : 0);
+    }
+
+    static CameraChargePolicy.State readChargeState(Parcel parcel) {
+        int hasSoc = readFlag(parcel);
+        Integer soc = hasSoc == 1 ? parcel.readInt() : null;
+        int hasVoltage = readFlag(parcel);
+        Float voltage = hasVoltage == 1 ? parcel.readFloat() : null;
+        int missing = parcel.readInt();
+        int causes = parcel.readInt();
+        int monitoring = readFlag(parcel);
+        int persistenceHealthy = readFlag(parcel);
+        if ((missing & ~(CameraChargePolicy.MISSING_SOC | CameraChargePolicy.MISSING_VOLTAGE)) != 0
+                || (causes & ~(CameraChargePolicy.CAUSE_SOC | CameraChargePolicy.CAUSE_VOLTAGE)) != 0
+                || soc != null && (soc < 0 || soc > 100)
+                || voltage != null && (!Float.isFinite(voltage) || voltage <= 0.0f || voltage > 20.0f)
+                || (soc == null) != ((missing & CameraChargePolicy.MISSING_SOC) != 0)
+                || (voltage == null) != ((missing & CameraChargePolicy.MISSING_VOLTAGE) != 0))
+            throw new IllegalArgumentException("invalid camera charge state");
+        return new CameraChargePolicy.State(soc, voltage, missing, causes,
+                monitoring == 1, persistenceHealthy == 1);
+    }
+
+    private static int readFlag(Parcel parcel) {
+        int value = parcel.readInt();
+        if (value != 0 && value != 1) throw new IllegalArgumentException("flag must be 0 or 1");
+        return value;
+    }
 
     public static ResultReceiver remoteReceiver(ResultReceiver receiver) {
         // Bundles must name the framework class, not a process-local anonymous subclass.

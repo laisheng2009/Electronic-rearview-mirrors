@@ -121,6 +121,7 @@ final class CameraHelperMain {
         private int reverseWarmLeaseRequestId;
         private int reverseStockRetainedCallbackEpoch;
         private MotionRecordingOutput motionRecordingOutput;
+        private MotionRecordingOutput viewingOutput;
         private CameraFpsOemDiagnostics fpsOemDiagnostics;
         private String fpsOperationId;
         private long fpsOperationStartedAtMs;
@@ -1428,6 +1429,32 @@ final class CameraHelperMain {
             motionRecordingOutput = null;
         }
 
+        synchronized void attachViewing(Surface[] surfaces, int requestId) throws Exception {
+            if (persistentSession.viewingGroup.has()) {
+                releaseSurfaces(surfaces);
+                throw new IllegalStateException("camera viewer already attached");
+            }
+            if (camera != null && !persistentPanoProducer || unconfirmedOneShotOwner) {
+                releaseSurfaces(surfaces);
+                throw new IllegalStateException("camera owner busy");
+            }
+            MotionRecordingOutput output = MotionRecordingOutput.find(surfaces[0]);
+            String result = attachPersistentGroup(persistentSession.viewingGroup, surfaces,
+                    new int[]{4, 1, 2, 3}, requestId, "camera_viewing", false, false,
+                    null, "camera_viewing_attach", false);
+            if (!persistentSession.viewingGroup.has()) throw new IllegalStateException(result);
+            viewingOutput = output;
+        }
+
+        synchronized void detachViewing() {
+            if (persistentSession.viewingGroup.has()) closePersistentGroup(
+                    persistentSession.viewingGroup, "camera_viewing_stop",
+                    persistentSession.viewingGroup.requestId);
+            if (persistentSession.viewingGroup.has())
+                throw new IllegalStateException("Camera viewer did not detach");
+            viewingOutput = null;
+        }
+
         private synchronized String openMotionCompositionPreview(
                 Surface surface, int direction, int requestId) {
             final int sourceIndex;
@@ -2490,7 +2517,8 @@ final class CameraHelperMain {
                 int requestId, String requestedView, boolean exclusive, boolean shellOwned,
                 int[] profileIds, String errorStage, boolean firstSurfaceDirect,
                 boolean[] initialActive) {
-            if (persistentSession.vehiclePowerOff && !persistentSession.isMotionGroup(target)) {
+            if (persistentSession.vehiclePowerOff && !persistentSession.isMotionGroup(target)
+                    && target != persistentSession.viewingGroup) {
                 releaseSurfaces(requestedSurfaces);
                 return result("camera_error", "vehicle_power_off");
             }
@@ -2902,6 +2930,7 @@ final class CameraHelperMain {
                 };
                 if (reconnect) {
                     if (motionRecordingOutput != null) motionRecordingOutput.register();
+                    if (viewingOutput != null) viewingOutput.register();
                     try {
                         persistentSession.restartProducer(port, openedHub,
                                 openedProducerEpoch, retainedConsumers, beforeStart,
@@ -2914,6 +2943,7 @@ final class CameraHelperMain {
                                 });
                     } finally {
                         if (motionRecordingOutput != null) motionRecordingOutput.unregister();
+                        if (viewingOutput != null) viewingOutput.unregister();
                     }
                 } else {
                     persistentSession.startProducer(
@@ -4081,6 +4111,7 @@ final class CameraHelperMain {
             final ConsumerGroup mirrorGroup = new ConsumerGroup(CAMERA_OWNER_MIRROR);
             final ConsumerGroup reverseGroup = new ConsumerGroup(CAMERA_OWNER_REVERSE);
             final ConsumerGroup motionGroup = new ConsumerGroup("motion_recording");
+            final ConsumerGroup viewingGroup = new ConsumerGroup("camera_viewing");
             final ConsumerGroup[] motionPreviewGroups = {
                     new ConsumerGroup("motion_preview_front"),
                     new ConsumerGroup("motion_preview_rear"),
@@ -4121,14 +4152,15 @@ final class CameraHelperMain {
             }
 
             private ConsumerGroup[] consumerGroups() {
-                ConsumerGroup[] groups = new ConsumerGroup[6 + motionPreviewGroups.length];
+                ConsumerGroup[] groups = new ConsumerGroup[7 + motionPreviewGroups.length];
                 groups[0] = activityGroup;
                 groups[1] = overlayGroup;
                 groups[2] = parkingGroup;
                 groups[3] = mirrorGroup;
                 groups[4] = reverseGroup;
                 groups[5] = motionGroup;
-                System.arraycopy(motionPreviewGroups, 0, groups, 6,
+                groups[6] = viewingGroup;
+                System.arraycopy(motionPreviewGroups, 0, groups, 7,
                         motionPreviewGroups.length);
                 return groups;
             }
@@ -4969,13 +5001,13 @@ final class CameraHelperMain {
                 if (reverseGroup.has()) {
                     return restoreGroups(
                             port, new ConsumerGroup[]{parkingGroup, mirrorGroup,
-                                    motionGroup, motionPreviewGroups[0], motionPreviewGroups[1],
+                                    motionGroup, viewingGroup, motionPreviewGroups[0], motionPreviewGroups[1],
                                     motionPreviewGroups[2], motionPreviewGroups[3]},
                             events, shellClose, cameraId, epoch);
                 }
                 return restoreGroups(
                         port, new ConsumerGroup[]{overlayGroup, parkingGroup, activityGroup,
-                                mirrorGroup, motionGroup, motionPreviewGroups[0],
+                                mirrorGroup, motionGroup, viewingGroup, motionPreviewGroups[0],
                                 motionPreviewGroups[1], motionPreviewGroups[2],
                                 motionPreviewGroups[3]},
                         events, shellClose, cameraId, epoch);
@@ -6019,6 +6051,9 @@ final class CameraHelperMain {
         }
 
         private void emit(String kind, Object... fields) {
+            if ("camera_error".equals(kind)
+                    && "camera_viewing".equals(fieldString(fields, "camera_owner"))
+                    && viewingOutput != null) viewingOutput.failed("camera_source_failed");
             if (!DiagnosticLogPolicy.shouldProduce(kind)) return;
             String line;
             try {

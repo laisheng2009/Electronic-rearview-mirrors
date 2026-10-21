@@ -30,22 +30,20 @@ import com.byd.extend.ui.UiPalette
 import com.byd.extend.ui.UiStrings
 
 @Composable
-internal fun MotionCheckupSection(colors: UiPalette, strings: UiStrings) {
-    var open by remember { mutableStateOf(false) }
+internal fun MotionCheckupSection(colors: UiPalette, strings: UiStrings, onRun: () -> Unit) {
     Section(strings.resource(R.string.motion_check_title), colors) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Text(strings.resource(R.string.motion_check_hint), color = colors.muted,
                 fontSize = 13.sp, modifier = Modifier.weight(1f))
             ActionButton(strings.resource(R.string.motion_check_run), colors,
-                icon = Icons.Outlined.CheckCircle, onClick = { open = true })
+                icon = Icons.Outlined.CheckCircle, onClick = onRun)
         }
     }
-    if (open) MotionCheckupDialog(colors, strings) { open = false }
 }
 
 @Composable
-private fun MotionCheckupDialog(colors: UiPalette, strings: UiStrings, onClose: () -> Unit) {
+internal fun MotionCheckupDialog(colors: UiPalette, strings: UiStrings, onClose: () -> Unit) {
     val context = LocalContext.current
     val results = remember { mutableStateMapOf<Int, MotionCheckupClient.Update>() }
     DisposableEffect(context) {

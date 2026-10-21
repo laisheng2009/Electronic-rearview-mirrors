@@ -43,6 +43,7 @@
 
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/secure_data_extraction_rules"
         android:requestLegacyExternalStorage="true"
         android:hasCode="true"
         android:icon="@drawable/byd_extend_launcher_padded"

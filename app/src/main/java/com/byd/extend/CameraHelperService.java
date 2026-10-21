@@ -1446,6 +1446,7 @@ public final class CameraHelperService extends Service {
     }
 
     private void destroyRuntime() {
+        com.byd.extend.remote.CameraViewingController.get(this).runtimeStopped();
         runtimeHandler.removeCallbacksAndMessages(null);
         boolean recover = GuardRecovery.shouldRecover(this);
         boolean explicitShutdown = GuardRecovery.isUserShutdownActive(this);
@@ -1508,6 +1509,7 @@ public final class CameraHelperService extends Service {
         if (motionRuntime == null)
             motionRuntime = new MotionRuntime(this, cameraRuntime, this::acceptHelperLine);
         else motionRuntime.refresh();
+        com.byd.extend.remote.CameraViewingController.get(this).runtimeStarted();
         helper.startGuardRuntime();
         helper.configureAvas();
         helper.configureCalls(CallsRuntime.requiresRescueSubscription(this));
@@ -1523,6 +1525,7 @@ public final class CameraHelperService extends Service {
 
     private void stopRuntime(
             boolean terminateShells, String reason, String action, int requestStartId) {
+        com.byd.extend.remote.CameraViewingController.get(this).runtimeStopped();
         runtimeHandler.removeCallbacks(heartbeat);
         runtimeHandler.removeCallbacks(resumeOverlay);
         runtimeHandler.removeCallbacks(retryCameraDiscovery);

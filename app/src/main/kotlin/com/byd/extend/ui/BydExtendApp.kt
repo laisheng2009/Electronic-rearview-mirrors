@@ -423,7 +423,8 @@ private fun SignalsScreen(
             }
             BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(8.dp))
                 .border(1.dp, colors.border, RoundedCornerShape(8.dp))
-                .background(colors.surface).padding(12.dp)) {
+                .background(colors.surface).padding(12.dp),
+                contentAlignment = Alignment.TopStart) {
                 val avasColumns = if (maxWidth >= 600.dp) 2 else 1
                 when (state.category) {
                     SignalsCategory.TurnSignals -> Column(Modifier.fillMaxSize()
@@ -535,8 +536,7 @@ private fun SignalsScreen(
                         CallsIntegrationSettings(state.calls, strings, colors, onAction,
                             onEditDestination = { editingCallsProfile = it })
                     }
-                    SignalsCategory.Motion -> Column(Modifier.fillMaxSize()
-                        .verticalScroll(LocalPrimaryScroll.current)) {
+                    SignalsCategory.Motion -> LazyForm(Modifier.fillMaxSize(), LocalPrimaryLazyList.current) {
                         MotionIntegrationScreen(colors, strings, cameraHost, motionArchiveState)
                     }
                 }

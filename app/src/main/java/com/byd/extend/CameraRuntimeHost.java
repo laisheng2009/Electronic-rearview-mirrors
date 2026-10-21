@@ -21,6 +21,7 @@ final class CameraRuntimeHost {
             MOTION_RECORD_ATTACH = 16, MOTION_RECORD_DETACH = 17,
             MOTION_OWN_WAKE = 18, MOTION_END_WAKE = 19, MOTION_BIND_WORKER = 20,
             MOTION_UNBIND_WORKER = 21;
+    static final int VIEW_ATTACH = 22, VIEW_DETACH = 23;
     static final String CALLBACK = "com.byd.extend.ICameraRuntimeClient";
     static final int POWER_QUICKBOOT = 1, POWER_SCREEN_OFF = 2, POWER_SCREEN_ON = 3,
             POWER_USER_PRESENT = 4;
@@ -45,6 +46,8 @@ final class CameraRuntimeHost {
     private String motionSession;
     private IBinder motionWorker;
     private IBinder.DeathRecipient motionDeath;
+    private IBinder viewerOwner;
+    private IBinder.DeathRecipient viewerDeath;
     private final String motionSourceEpoch = java.util.UUID.randomUUID().toString();
     private final MotionWakeOwnership motionWake = new MotionWakeOwnership();
     private JSONObject motionPower, motionLock, motionDisplay;
@@ -95,6 +98,8 @@ final class CameraRuntimeHost {
 
     int transact(Parcel data, Parcel reply) throws Exception {
         int operation = data.readInt();
+        if (operation == VIEW_ATTACH || operation == VIEW_DETACH)
+            return transactViewing(operation, data, reply);
         if (operation >= MOTION_ATTACH && operation <= MOTION_UNBIND_WORKER)
             return transactMotion(operation, data, reply);
         if (Binder.getCallingUid() != appUid) throw new SecurityException("camera app caller required");
@@ -261,6 +266,63 @@ final class CameraRuntimeHost {
                     if (surface != null) surface.release();
             }
         }
+    }
+
+    private int transactViewing(int operation, Parcel data, Parcel reply) throws Exception {
+        if (Binder.getCallingUid() != appUid) throw new SecurityException("viewer caller denied");
+        IBinder owner = data.readStrongBinder();
+        String session = data.readString();
+        android.view.Surface[] surfaces = operation == VIEW_ATTACH
+                ? data.createTypedArray(android.view.Surface.CREATOR) : null;
+        int requestId = operation == VIEW_ATTACH ? data.readInt() : 0;
+        MotionRecordingOutput output = null;
+        boolean[] consumed = {false};
+        try {
+            if (owner == null || !owner.isBinderAlive() || !MotionDetectorProtocol.validSession(session))
+                throw new IllegalArgumentException("invalid camera viewer owner");
+            if (operation == VIEW_ATTACH) {
+                if (surfaces == null || surfaces.length != 4 || requestId <= 0)
+                    throw new IllegalArgumentException("invalid camera viewer surfaces");
+                for (android.view.Surface surface : surfaces)
+                    if (surface == null || !surface.isValid()) throw new IllegalArgumentException("invalid camera viewer surface");
+                output = MotionRecordingOutput.readFromParcel(data, session, surfaces);
+                output.register();
+            }
+            if (data.dataAvail() != 0) throw new IllegalArgumentException("unexpected viewer payload");
+            call(() -> {
+                if (lifetime.stopped()) throw new IllegalStateException("camera runtime stopped");
+                if (operation == VIEW_ATTACH) {
+                    if (viewerOwner != null) throw new IllegalStateException("camera viewer busy");
+                    lifetime.start(this::initialize);
+                    viewerOwner = owner;
+                    viewerDeath = () -> handler.post(() -> {
+                        if (viewerOwner == owner) clearViewer();
+                    });
+                    try {
+                        owner.linkToDeath(viewerDeath, 0);
+                        consumed[0] = true;
+                        helper.attachViewing(surfaces, requestId);
+                    } catch (Exception error) { clearViewer(); throw error; }
+                } else {
+                    if (viewerOwner != null && viewerOwner != owner)
+                        throw new SecurityException("camera viewer owner changed");
+                    clearViewer();
+                }
+                return null;
+            });
+            reply.writeNoException(); reply.writeInt(1);
+            return operation;
+        } finally {
+            if (output != null) output.unregister();
+            if (!consumed[0] && surfaces != null)
+                for (android.view.Surface surface : surfaces) if (surface != null) surface.release();
+        }
+    }
+
+    private void clearViewer() {
+        helper.detachViewing();
+        if (viewerOwner != null && viewerDeath != null) viewerOwner.unlinkToDeath(viewerDeath, 0);
+        viewerOwner = null; viewerDeath = null;
     }
 
     private void clearMotion() {
@@ -545,6 +607,8 @@ final class CameraRuntimeHost {
 
     private void stopOnHandler() {
         lifetime.shutdown(() -> {
+            try { clearViewer(); }
+            catch (Exception error) { event("camera_viewing_detach_error", "error", error.getClass().getSimpleName()); }
             boolean motionDrained = false;
             try {
                 helper.detachMotionRecording();

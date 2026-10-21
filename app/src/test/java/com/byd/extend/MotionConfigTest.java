@@ -59,4 +59,16 @@ public class MotionConfigTest {
         assertFalse(locked.eligible(0,-1));
         assertTrue(MotionConfig.parse("{\"enabled\":true}").eligible(0,2));
     }
+
+    @Test public void remoteViewingKeepsWorkerEnabledWithoutEnablingMotion() throws Exception {
+        MotionConfig remoteOnly = MotionConfig.parse(
+                "{\"remoteViewingEnabled\":true,\"chargeSocThreshold\":35,\"chargeVoltageTenths\":127}");
+        assertTrue(remoteOnly.anyEnabled());
+        assertFalse(remoteOnly.motionEnabled());
+        assertFalse(remoteOnly.eligible(0, 2));
+        MotionConfig reopened = MotionConfig.parse(remoteOnly.toJson());
+        assertTrue(reopened.remoteViewingEnabled);
+        assertEquals(35, reopened.chargeSocThresholdPercent);
+        assertEquals(127, reopened.chargeVoltageThresholdTenths);
+    }
 }

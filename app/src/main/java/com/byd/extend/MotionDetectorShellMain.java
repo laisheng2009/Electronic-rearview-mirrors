@@ -34,6 +34,9 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileLock;
 import java.io.RandomAccessFile;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -92,6 +95,11 @@ public final class MotionDetectorShellMain {
     private final MotionScreenControl screen;
     private final MotionSessionConfigStore configStore;
     private final MotionSessionRuntime sessionRuntime = new MotionSessionRuntime();
+    private CameraChargeTelemetry.Owner cameraChargeOwner;
+    private volatile CameraChargePolicy.State cameraChargeState = new CameraChargePolicy.State(
+            null, null, CameraChargePolicy.MISSING_SOC | CameraChargePolicy.MISSING_VOLTAGE,
+            0, false, true);
+    private boolean chargeHandlingEnabled;
     private final MotionCameraPreparation cameraPreparation;
     private final Runnable armCheck = this::advanceEligibility;
     private final Runnable telemetryRefresh = this::refreshTelemetry;
@@ -106,6 +114,8 @@ public final class MotionDetectorShellMain {
     private final Runnable recordingTailFinished = this::finishRecordingTail;
     private volatile MotionConfig config;
     private MotionSessionConfigStore.Snapshot pendingConfig;
+    private IBinder pendingConfigureCallback;
+    private String pendingConfigureToken;
     private MotionShellMediaContext mediaContext;
     private MotionMediaLibrary mediaLibrary;
     private MotionMediaIndexBridge mediaBridge;
@@ -177,6 +187,18 @@ public final class MotionDetectorShellMain {
     private String lastReportedDetectorState = "";
     private boolean firstInferenceReceived;
     private volatile ManualCheck manualCheck;
+    private final Map<IBinder, RemoteViewLease> remoteViewLeases = new IdentityHashMap<>();
+
+    private static final class ConfigureResult {
+        final MotionSessionConfigStore.Snapshot snapshot;
+        // True only when this request changed/disabled the active worker config, not on a no-op or pending drain.
+        final boolean applied;
+
+        ConfigureResult(MotionSessionConfigStore.Snapshot snapshot, boolean applied) {
+            this.snapshot = snapshot;
+            this.applied = applied;
+        }
+    }
 
     private final class ManualCheck {
         final String id;
@@ -196,6 +218,17 @@ public final class MotionDetectorShellMain {
             death = () -> cancelCheck(this);
             timeout = () -> completeCheck(this, MotionCheckupClient.ERROR, "timeout",
                     "Check-up stage did not complete before its deadline", true);
+        }
+    }
+
+    private final class RemoteViewLease {
+        final String id;
+        final IBinder owner;
+        final IBinder.DeathRecipient death;
+        RemoteViewLease(String id, IBinder owner) {
+            this.id = id;
+            this.owner = owner;
+            death = () -> control.post(() -> releaseRemoteViewOnControl(id, owner));
         }
     }
 
@@ -346,15 +379,21 @@ public final class MotionDetectorShellMain {
                         int version = data.readInt();
                         int build = data.readInt();
                         String configJson = data.readString();
+                        String requestToken = data.readString();
+                        IBinder configureCallback = data.readStrongBinder();
                         if (version != MotionDetectorProtocol.VERSION || build != BuildConfig.VERSION_CODE
-                                || configJson == null || configJson.length() > 8192 || data.dataAvail() != 0)
+                                || configJson == null || configJson.length() > 8192
+                                || !MotionDetectorProtocol.validSession(requestToken)
+                                || configureCallback == null || !configureCallback.isBinderAlive()
+                                || data.dataAvail() != 0)
                             throw new IllegalArgumentException("invalid Motion config request");
-                        MotionSessionConfigStore.Snapshot snapshot = callControl(
-                                () -> configureOnControl(configJson));
+                        ConfigureResult configured = callControl(
+                                () -> configureOnControl(configJson, configureCallback, requestToken));
                         reply.writeNoException();
                         reply.writeInt(1);
-                        reply.writeString(snapshot == null ? "" : snapshot.sessionId);
+                        reply.writeString(configured.snapshot == null ? "" : configured.snapshot.sessionId);
                         reply.writeStrongBinder(binder);
+                        reply.writeInt(configured.applied ? 1 : 0);
                         return true;
                     }
                     case MotionDetectorProtocol.TX_ATTACH_UI: {
@@ -389,6 +428,41 @@ public final class MotionDetectorShellMain {
                         reply.writeString(config == null ? "" : config.toJson());
                         reply.writeInt(warning ? 1 : 0);
                         reply.writeInt(warningWindowDrawn ? 1 : 0);
+                        MotionDetectorProtocol.writeChargeState(reply, cameraChargeState);
+                        return true;
+                    }
+                    case MotionDetectorProtocol.TX_READ_CHARGE: {
+                        if (data.dataAvail() != 0)
+                            throw new IllegalArgumentException("charge refresh payload not empty");
+                        CameraChargePolicy.State fresh = callControl(() -> {
+                            if (cameraChargeOwner == null || !cameraChargeOwner.isMonitoring())
+                                throw new IllegalStateException("shared camera charge telemetry is not active");
+                            return cameraChargeOwner.readNow();
+                        });
+                        reply.writeNoException();
+                        MotionDetectorProtocol.writeChargeState(reply, fresh);
+                        return true;
+                    }
+                    case MotionDetectorProtocol.TX_VIEW_PREPARE: {
+                        String id = data.readString();
+                        IBinder owner = data.readStrongBinder();
+                        if (!MotionDetectorProtocol.validSession(id) || owner == null
+                                || data.dataAvail() != 0)
+                            throw new IllegalArgumentException("invalid remote camera preparation request");
+                        boolean ready = callControl(() -> prepareRemoteViewOnControl(id, owner));
+                        reply.writeNoException();
+                        reply.writeInt(ready ? 1 : 0);
+                        return true;
+                    }
+                    case MotionDetectorProtocol.TX_VIEW_RELEASE: {
+                        String id = data.readString();
+                        IBinder owner = data.readStrongBinder();
+                        if (!MotionDetectorProtocol.validSession(id) || owner == null
+                                || data.dataAvail() != 0)
+                            throw new IllegalArgumentException("invalid remote camera release request");
+                        int released = callControl(() -> releaseRemoteViewOnControl(id, owner));
+                        reply.writeNoException();
+                        reply.writeInt(released);
                         return true;
                     }
                     case MotionDetectorProtocol.TX_EXPLICIT_SHUTDOWN: {
@@ -496,7 +570,8 @@ public final class MotionDetectorShellMain {
         }
     }
 
-    private MotionSessionConfigStore.Snapshot configureOnControl(String configJson) throws Exception {
+    private ConfigureResult configureOnControl(String configJson, IBinder configureCallback,
+            String requestToken) throws Exception {
         ManualCheck check = manualCheck;
         if (check != null) completeCheck(check, MotionCheckupClient.NOT_CHECKED,
                 "cancelled", "Motion settings changed during check-up", true);
@@ -506,19 +581,150 @@ public final class MotionDetectorShellMain {
         MotionSessionConfigStore.Snapshot next = configStore.write(configJson);
         if (next == null) {
             pendingConfig = null;
+            pendingConfigureCallback = null;
+            pendingConfigureToken = null;
+            clearRemoteViewLeases();
+            stopChargeTelemetry();
             if (sessionId != null) stopOnControl(sessionId, "settings_disabled");
             config = null;
             eligible = false;
-            return null;
+            return new ConfigureResult(null, true);
         }
         if (next.sessionId.equals(sessionId) && !sessionRuntime.suspended()) {
             if (teardownPending) {
                 pendingConfig = next;
-                return null;
+                pendingConfigureCallback = configureCallback;
+                pendingConfigureToken = requestToken;
+                return new ConfigureResult(null, false);
             }
-            return next;
+            return new ConfigureResult(next, false);
         }
-        return startConfiguredSession(next) ? next : null;
+        boolean applied = startConfiguredSession(next, configureCallback, requestToken);
+        return new ConfigureResult(applied ? next : null, applied);
+    }
+
+    private void startChargeTelemetry(MotionConfig next) {
+        try {
+            if (cameraChargeOwner == null)
+                cameraChargeOwner = new CameraChargeTelemetry.Owner(
+                        systemContext, control, this::onChargeStateChanged);
+            cameraChargeOwner.start(next);
+            cameraChargeState = cameraChargeOwner.snapshot();
+        } catch (Throwable failure) {
+            cameraChargeState = new CameraChargePolicy.State(null, null,
+                    CameraChargePolicy.MISSING_SOC | CameraChargePolicy.MISSING_VOLTAGE,
+                    CameraChargePolicy.CAUSE_SOC | CameraChargePolicy.CAUSE_VOLTAGE, true, false);
+            logEvent("camera_charge_owner_failed", sessionId, "error", summary(failure));
+        }
+    }
+
+    private boolean prepareRemoteViewOnControl(String id, IBinder owner) throws Exception {
+        if (sessionId == null || shuttingDown || teardownPending || sessionRuntime.suspended()
+                || config == null || !config.remoteViewingEnabled || owner == null
+                || !owner.isBinderAlive() || cameraChargeOwner == null
+                || !cameraChargeOwner.isMonitoring()) return false;
+
+        RemoteViewLease lease = remoteViewLeases.get(owner);
+        CameraChargePolicy.State fresh = lease == null ? cameraChargeOwner.readNow() : cameraChargeState;
+        if (!fresh.isMonitoring() || fresh.isBlocked()) return false;
+
+        int power = sessionRuntime.power();
+        if (power != 0 && power != 1 && power != 2) return false;
+
+        if (lease != null && !lease.id.equals(id)) return false;
+        if (lease == null) {
+            lease = new RemoteViewLease(id, owner);
+            try { owner.linkToDeath(lease.death, 0); }
+            catch (RemoteException deadOwner) { return false; }
+            remoteViewLeases.put(owner, lease);
+        }
+
+        updateCameraDemand();
+        // OFF uses the same owner as Motion preparation. ON/standby viewing has no IDC requirement.
+        return power != 0 || cameraPreparation.ready(sessionId);
+    }
+
+    private int releaseRemoteViewOnControl(String id, IBinder owner) {
+        RemoteViewLease lease = remoteViewLeases.get(owner);
+        if (lease != null && lease.id.equals(id)) {
+            remoteViewLeases.remove(owner);
+            try { owner.unlinkToDeath(lease.death, 0); } catch (Throwable ignored) { }
+            updateCameraDemand();
+        }
+        return 1;
+    }
+
+    private void clearRemoteViewLeases() {
+        if (remoteViewLeases.isEmpty()) return;
+        ArrayList<RemoteViewLease> leases = new ArrayList<>(remoteViewLeases.values());
+        remoteViewLeases.clear();
+        for (RemoteViewLease lease : leases) {
+            try { lease.owner.unlinkToDeath(lease.death, 0); } catch (Throwable ignored) { }
+        }
+    }
+
+    private void stopChargeTelemetry() {
+        CameraChargeTelemetry.Owner owner = cameraChargeOwner;
+        if (owner != null) owner.close();
+    }
+
+    private void onChargeStateChanged(CameraChargePolicy.State next) {
+        if (next == null) return;
+        CameraChargePolicy.State previous = cameraChargeState;
+        cameraChargeState = next;
+        String id = sessionId;
+        if (id != null) sendChargeState(id, next);
+        if (!chargeHandlingEnabled || !next.isMonitoring() || !sameSession(id)
+                || config == null) return;
+
+        if (!previous.isBlocked() && next.isBlocked()) {
+            clearRemoteViewLeases();
+            if (config.motionEnabled()) {
+                try {
+                    if (eligible) setEligibleOnControl(id, false);
+                    else if (warning) finishWarning(id, false);
+                    if (recorder != null && recorder.isRecording() && !recordingTailPending()) {
+                        long tailMs = Math.max(0L, config.afterSeconds * 1000L);
+                        recorder.finishAfter(SystemClock.elapsedRealtime() + tailMs);
+                        state = "recording_tail";
+                        control.removeCallbacks(recordingTailFinished);
+                        control.postDelayed(recordingTailFinished, tailMs);
+                    }
+                } catch (Throwable failure) {
+                    fail(id, "camera_charge_block", failure);
+                    return;
+                }
+            }
+            updateCameraDemand();
+            if (!recordingTailPending() && !warning) state = "charge_blocked";
+            sendStatus(id, "charge_blocked", "a confirmed low-charge cause pauses tablet warning, recording and remote viewing");
+            return;
+        }
+
+        if (previous.isBlocked() && !next.isBlocked()) {
+            if (config.motionEnabled()) {
+                if (workerBound) {
+                    if (prepared) updateCameraDemand();
+                    else if (!workerBinding) prepareSession(id);
+                } else beginWorkerBinding(id);
+            } else {
+                state = "viewing_only";
+                sendStatus(id, state, "fresh charge readings are above every latched threshold");
+            }
+        }
+    }
+
+    private void sendChargeState(String id, CameraChargePolicy.State next) {
+        IBinder target = appCallback;
+        if (target == null || !sameSession(id)) return;
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(MotionDetectorProtocol.CALLBACK_DESCRIPTOR);
+            data.writeString(id);
+            MotionDetectorProtocol.writeChargeState(data, next);
+            target.transact(MotionDetectorProtocol.CB_CHARGE, data, null, IBinder.FLAG_ONEWAY);
+        } catch (RemoteException ignored) { detachUiOnControl(id, target); }
+        finally { data.recycle(); }
     }
 
     private void cancelCheck(ManualCheck check) {
@@ -664,9 +870,17 @@ public final class MotionDetectorShellMain {
     }
 
     private boolean startConfiguredSession(MotionSessionConfigStore.Snapshot snapshot) throws Exception {
+        return startConfiguredSession(snapshot, null, null);
+    }
+
+    private boolean startConfiguredSession(MotionSessionConfigStore.Snapshot snapshot,
+            IBinder configureCallback, String requestToken) throws Exception {
+        clearRemoteViewLeases();
         if (sessionId != null) {
             if (teardownPending) {
                 pendingConfig = snapshot;
+                pendingConfigureCallback = configureCallback;
+                pendingConfigureToken = requestToken;
                 sendStatus(sessionId, "settings_pending_teardown",
                         "latest settings snapshot will start after confirmed encoder and Surface drain");
                 return false;
@@ -674,6 +888,8 @@ public final class MotionDetectorShellMain {
             stopOnControl(sessionId, "settings_changed");
             if (sessionId != null) {
                 pendingConfig = snapshot;
+                pendingConfigureCallback = configureCallback;
+                pendingConfigureToken = requestToken;
                 sendStatus(sessionId, "settings_pending_teardown",
                         "latest settings snapshot will start after confirmed encoder and Surface drain");
                 return false;
@@ -718,7 +934,23 @@ public final class MotionDetectorShellMain {
         workerBound = false;
         expectedSourceEpoch = "";
         screen.beginSession(id);
-        sendStatus(id, "preparing", "shell-owned Motion session; inspecting installed OEM detector artifacts");
+        chargeHandlingEnabled = false;
+        startChargeTelemetry(config);
+        chargeHandlingEnabled = true;
+        if (cameraChargeState.isBlocked()) {
+            state = "charge_blocked";
+            sendStatus(id, state, "shared charge protection is latched; Motion surfaces and recording are suspended");
+        } else {
+            sendStatus(id, "preparing", "shell-owned Motion session; inspecting installed OEM detector artifacts");
+        }
+        if (config.motionEnabled() && cameraChargeState.isBlocked() && !config.remoteViewingEnabled)
+            return true;
+        beginWorkerBinding(id);
+        return true;
+    }
+
+    private void beginWorkerBinding(String id) {
+        if (!sameSession(id) || workerBinding || workerBound || config == null) return;
         workerBinding = true;
         hostOperations.execute(() -> {
             Throwable failure = null;
@@ -732,7 +964,6 @@ public final class MotionDetectorShellMain {
             boolean hostBound = workerBound;
             control.post(() -> onHostBindingComplete(id, hostBound, result));
         });
-        return true;
     }
 
     private void onHostBindingComplete(String id, boolean hostBound, Throwable failure) {
@@ -756,6 +987,19 @@ public final class MotionDetectorShellMain {
         }
         workerBinding = false;
         workerBound = true;
+        if (config == null) return;
+        if (!config.motionEnabled()) {
+            state = cameraChargeState.isBlocked() ? "charge_blocked" : "viewing_only";
+            sendStatus(id, state, cameraChargeState.isBlocked()
+                    ? "shared charge protection blocks viewing; vehicle power telemetry remains observed"
+                    : "remote viewing owns the worker; Motion detection is not enabled");
+            return;
+        }
+        if (cameraChargeState.isBlocked()) {
+            state = "charge_blocked";
+            sendStatus(id, state, "shared charge protection blocks Motion camera consumers");
+            return;
+        }
         prepareSession(id);
     }
 
@@ -776,6 +1020,7 @@ public final class MotionDetectorShellMain {
         appCallbackDeath = () -> control.post(() -> detachUiOnControl(id, callback));
         callback.linkToDeath(appCallbackDeath, 0);
         if (prepared) sendPrepared(id);
+        sendChargeState(id, cameraChargeState);
         String detail = "UI observer attached; shell session continues independently";
         if ("error".equals(state) && !lastError.isEmpty()) detail += "; " + lastError;
         sendStatus(id, state, detail);
@@ -811,6 +1056,8 @@ public final class MotionDetectorShellMain {
     private int suspendForExplicitShutdown(String id, String reason) {
         if (!sameSession(id)) return 1;
         pendingConfig = null;
+        pendingConfigureCallback = null;
+        pendingConfigureToken = null;
         shuttingDown = true;
         sessionRuntime.suspendForHostShutdown();
         stopOnControl(id, "explicit_shutdown_" + reason);
@@ -819,6 +1066,16 @@ public final class MotionDetectorShellMain {
 
     private void prepareSession(String id) {
         if (!sameSession(id)) return;
+        if (config == null || !config.motionEnabled() || cameraChargeState.isBlocked()) {
+            if (config != null && config.remoteViewingEnabled && !cameraChargeState.isBlocked()) {
+                state = "viewing_only";
+                sendStatus(id, state, "Motion detection remains off for remote-only configuration");
+            } else if (cameraChargeState.isBlocked()) {
+                state = "charge_blocked";
+                sendStatus(id, state, "shared charge protection blocks Motion preparation");
+            }
+            return;
+        }
         ManualCheck pendingCheck = manualCheck;
         if (pendingCheck != null && pendingCheck.ownsSession && !checkLive(pendingCheck)) {
             completeCheck(pendingCheck, MotionCheckupClient.NOT_CHECKED, "cancelled",
@@ -870,6 +1127,13 @@ public final class MotionDetectorShellMain {
 
     private int setEligibleOnControl(String id, boolean next) throws Exception {
         requireSession(id);
+        if (next && cameraChargeState.isBlocked()) {
+            state = "charge_blocked";
+            sendStatus(id, state, "fresh charge readings have not cleared every confirmed low cause");
+            return 1;
+        }
+        if (!config.motionEnabled() && next)
+            throw new IllegalStateException("Motion eligibility is disabled for remote-only configuration");
         if (!prepared) throw new IllegalStateException("detector is not prepared");
         if (eligible == next) return 1;
         if (!next) {
@@ -1224,7 +1488,7 @@ public final class MotionDetectorShellMain {
 
     private void requestWarningWake(String id) {
         if (!sameSession(id) || !eligible || warning || warningClosing || sessionRuntime.warningRetryBlocked()
-                || config == null || !config.warningEnabled) return;
+                || config == null || !config.warningEnabled || cameraChargeState.isBlocked()) return;
         warning = true;
         warningWindowPending = false;
         warningWindowDrawn = false;
@@ -1722,19 +1986,26 @@ public final class MotionDetectorShellMain {
     }
 
     private void updateCameraDemand() {
-        boolean needed = sessionId != null && prepared && !shuttingDown && !teardownPending
-                && !sessionRuntime.suspended() && config != null && config.anyEnabled()
-                && sessionRuntime.power() == 0
-                && (sessionRuntime.arming() || sessionRuntime.armed() || eligible
-                    || recorder != null && recorder.isRecording());
+        boolean recordingDrain = recorder != null && recorder.isRecording();
+        boolean motionDemand = config != null && config.motionEnabled()
+                && !cameraChargeState.isBlocked()
+                && (sessionRuntime.arming() || sessionRuntime.armed() || eligible);
+        boolean viewingDemand = config != null && config.remoteViewingEnabled
+                && !remoteViewLeases.isEmpty() && !cameraChargeState.isBlocked();
+        boolean activeSession = sessionId != null && !shuttingDown && !teardownPending
+                && !sessionRuntime.suspended();
+        boolean needed = activeSession && sessionRuntime.power() == 0
+                && (prepared && (motionDemand || recordingDrain) || viewingDemand);
         if (needed) {
-            holdCpu(true);
+            // The app viewer holds its own process-lifetime CPU lease; Motion keeps its existing one.
+            if (prepared && (motionDemand || recordingDrain)) holdCpu(true);
             cameraPreparation.start(sessionId);
         } else cameraPreparation.stop();
     }
 
     private void cameraPreparationSample(String id, int power, int online, int stream, String error) {
-        if (!sameSession(id) || shuttingDown || teardownPending || sessionRuntime.suspended()) return;
+        if (!sameSession(id) || shuttingDown || teardownPending || sessionRuntime.suspended()
+                || config == null || !config.motionEnabled()) return;
         String snapshot = power + "/" + online + "/" + stream + "/" + error;
         if (!snapshot.equals(lastCameraPreparation)) {
             lastCameraPreparation = snapshot;
@@ -1753,7 +2024,8 @@ public final class MotionDetectorShellMain {
             return;
         }
         // A ready flag gates opening. A later flag loss alone is not proof of lost frames.
-        if (prepared && sessionRuntime.armed() && !eligible && cameraPreparation.ready(id)) {
+        if (!cameraChargeState.isBlocked() && prepared && sessionRuntime.armed()
+                && !eligible && cameraPreparation.ready(id)) {
             try { setEligibleOnControl(id, true); }
             catch (Throwable failure) { fail(id, "camera_prepare_attach", failure); }
         }
@@ -1869,12 +2141,17 @@ public final class MotionDetectorShellMain {
 
     private void startRecording(String id) {
         if (!sameSession(id) || !eligible || config == null || !config.recordingEnabled
-                || recorder != null || shuttingDown || teardownPending
+                || cameraChargeState.isBlocked() || recorder != null || shuttingDown || teardownPending
                 || recordingFailureRevision == sessionRuntime.recordingRevision()) return;
         startRecording(id, null);
     }
 
     private void startRecording(String id, ManualCheck check) {
+        if (cameraChargeState.isBlocked()) {
+            if (check != null) completeCheck(check, MotionCheckupClient.NOT_CHECKED,
+                    "charge_blocked", "shared camera charge protection is active", true);
+            return;
+        }
         MotionConfig recordingConfig = check == null ? config : check.recordingConfig;
         recordingAttemptRevision = sessionRuntime.recordingRevision();
         try {
@@ -2094,6 +2371,8 @@ public final class MotionDetectorShellMain {
     private void shutdownFromHost(String id, String reason, boolean surfacesDrained) {
         if (!sameSession(id)) return;
         pendingConfig = null;
+        pendingConfigureCallback = null;
+        pendingConfigureToken = null;
         shuttingDown = true;
         sessionRuntime.suspendForHostShutdown();
         control.removeCallbacks(armCheck);
@@ -2119,6 +2398,7 @@ public final class MotionDetectorShellMain {
         if (check != null) completeCheck(check, MotionCheckupClient.NOT_CHECKED, "cancelled", reason, false);
         if (teardownPending && sameSession(id)) return;
         teardownPending = true;
+        clearRemoteViewLeases();
         cameraPreparation.stop();
         control.removeCallbacks(telemetryRefresh);
         telemetryRefreshQueued = false;
@@ -2239,8 +2519,14 @@ public final class MotionDetectorShellMain {
         MotionSessionConfigStore.Snapshot next = pendingConfig;
         pendingConfig = null;
         if (next != null) {
-            try { startConfiguredSession(next); }
-            catch (Throwable error) {
+            IBinder configureCallback = pendingConfigureCallback;
+            String requestToken = pendingConfigureToken;
+            pendingConfigureCallback = null;
+            pendingConfigureToken = null;
+            try {
+                if (startConfiguredSession(next, configureCallback, requestToken))
+                    sendConfigured(configureCallback, requestToken, next);
+            } catch (Throwable error) {
                 state = "error";
                 lastError = "pending_config: " + summary(error);
                 System.err.println("motion_pending_config_failed " + lastError);
@@ -2399,6 +2685,24 @@ public final class MotionDetectorShellMain {
 
     private void sendStatus(String id, String next, String detail) {
         sendStatus(appCallback, id, next, detail);
+    }
+
+    private void sendConfigured(IBinder target, String requestToken,
+            MotionSessionConfigStore.Snapshot snapshot) {
+        if (target == null || !target.isBinderAlive()
+                || !MotionDetectorProtocol.validSession(requestToken) || snapshot == null) return;
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(MotionDetectorProtocol.CALLBACK_DESCRIPTOR);
+            data.writeInt(MotionDetectorProtocol.VERSION);
+            data.writeInt(BuildConfig.VERSION_CODE);
+            data.writeInt(Process.myPid());
+            data.writeString(requestToken);
+            data.writeString(snapshot.sessionId);
+            data.writeString(snapshot.config.toJson());
+            target.transact(MotionDetectorProtocol.CB_CONFIGURED, data, null, IBinder.FLAG_ONEWAY);
+        } catch (RemoteException ignored) { }
+        finally { data.recycle(); }
     }
 
     private void sendStatus(IBinder target, String id, String next, String detail) {

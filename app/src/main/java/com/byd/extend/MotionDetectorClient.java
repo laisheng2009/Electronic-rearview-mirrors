@@ -9,21 +9,25 @@ import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.SystemClock;
+import java.io.File;
+import java.io.IOException;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
-import java.io.File;
-import java.io.IOException;
 
 /** App facade for the shell-owned native detector and fixed camera/screen controls. */
 public final class MotionDetectorClient implements AutoCloseable, MotionMediaLibrary.Access {
     interface Listener {
         default void onPrepared(IBinder workerBinder) {}
+        /** The worker applied or activated this config; this is distinct from native preparation. */
+        default void onConfigured() {}
         default void onStatus(String state, String detail, long elapsedMs) {}
         default void onDetection(int level, long elapsedMs, int rawResult, int nativeState,
                 long frameNumber, long frameTimestampNs, long warningUntilMs) {}
         default void onError(String stage, String detail, long elapsedMs) {}
         default void onScreenState(String state, String detail, long elapsedMs) {}
+        default void onChargeState(CameraChargePolicy.State state) {}
     }
 
     static final class Status {
@@ -36,9 +40,11 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         final String configJson;
         final boolean warning;
         final boolean warningWindowDrawn;
+        final CameraChargePolicy.State chargeState;
 
         Status(String state, boolean prepared, boolean eligible, String lastError, long elapsedMs,
-                String sessionId, String configJson, boolean warning, boolean warningWindowDrawn) {
+                String sessionId, String configJson, boolean warning, boolean warningWindowDrawn,
+                CameraChargePolicy.State chargeState) {
             this.state = state;
             this.prepared = prepared;
             this.eligible = eligible;
@@ -48,6 +54,7 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             this.configJson = configJson;
             this.warning = warning;
             this.warningWindowDrawn = warningWindowDrawn;
+            this.chargeState = chargeState;
         }
     }
 
@@ -63,6 +70,10 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
     private volatile IBinder worker;
     private volatile boolean closed;
     private int requestGeneration;
+    private int configureCompletionGeneration;
+    private String configureCompletionToken;
+    private String configureCompletionJson;
+    private boolean awaitingConfigureCompletion;
     private boolean legacyIndexImported;
     private boolean legacyIndexAttempted;
 
@@ -278,10 +289,11 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             throw new IllegalArgumentException("valid Motion config is required");
         if (nextListener == null) throw new IllegalArgumentException("listener required");
         final int generation;
+        final String token;
         synchronized (lock) {
             if (closed) throw new IllegalStateException("motion client is closed");
-            if (nextConfigJson.equals(configJson) && sessionId != null && worker != null
-                    && worker.isBinderAlive()) {
+            if (nextConfigJson.equals(configJson) && (awaitingConfigureCompletion
+                    || sessionId != null && worker != null && worker.isBinderAlive())) {
                 listener = nextListener;
                 return;
             }
@@ -289,15 +301,21 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             listener = nextListener;
             sessionId = null;
             generation = ++requestGeneration;
+            token = UUID.randomUUID().toString().replace("-", "");
+            configureCompletionGeneration = generation;
+            configureCompletionToken = token;
+            configureCompletionJson = nextConfigJson;
+            awaitingConfigureCompletion = true;
         }
-        try { commands.execute(() -> configureOnWorker(generation, nextConfigJson)); }
+        try { commands.execute(() -> configureOnWorker(generation, nextConfigJson, token)); }
         catch (java.util.concurrent.RejectedExecutionException ignored) {
             // close() may win between publishing the session and queuing this task.
         }
     }
 
-    private void configureOnWorker(int generation, String requestedConfig) {
+    private void configureOnWorker(int generation, String requestedConfig, String requestToken) {
         String id = "";
+        boolean configuredAcknowledged = false;
         try {
             if (!isCurrentRequest(generation)) return;
             IBinder candidate = resolveWorker();
@@ -325,15 +343,23 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 data.writeInt(MotionDetectorProtocol.VERSION);
                 data.writeInt(BuildConfig.VERSION_CODE);
                 data.writeString(requestedConfig);
+                data.writeString(requestToken);
+                data.writeStrongBinder(callback);
                 if (!candidate.transact(MotionDetectorProtocol.TX_CONFIGURE, data, reply, 0))
                     throw new IllegalStateException("motion worker rejected config transaction");
                 reply.readException();
                 if (reply.readInt() != 1) throw new IllegalStateException("motion worker refused configuration");
                 id = reply.readString();
                 IBinder returned = reply.readStrongBinder();
+                int applied = reply.readInt();
+                if (applied != 0 && applied != 1)
+                    throw new IllegalStateException("invalid Motion configure completion flag");
+                configuredAcknowledged = applied == 1;
                 if (returned == null || !returned.isBinderAlive())
                     throw new IllegalStateException("motion worker Binder unavailable");
                 worker = returned;
+                if (reply.dataAvail() != 0)
+                    throw new IllegalStateException("Motion configure reply has trailing data");
             } finally {
                 data.recycle();
                 reply.recycle();
@@ -342,18 +368,111 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             if (id == null || id.isEmpty()) {
                 synchronized (lock) { sessionId = null; }
                 boolean enabled = MotionConfig.parse(requestedConfig).anyEnabled();
+                if (!enabled && !configuredAcknowledged)
+                    throw new IllegalStateException("worker did not confirm disabled configuration");
+                if (enabled && configuredAcknowledged) {
+                    configuredAcknowledged = false;
+                    throw new IllegalStateException("worker reported an applied config without a session");
+                }
                 reportRequestStatus(generation, enabled ? "configured_pending" : "configured_disabled",
                         enabled ? "latest Motion settings are persisted and will start after the previous session drains"
                                 : "monitoring disabled in shell; media-only worker remains available",
                         SystemClock.elapsedRealtime());
+                if (!enabled) reportRequestConfigured(generation, requestToken);
                 return;
             }
             if (!MotionDetectorProtocol.validSession(id))
                 throw new IllegalStateException("motion worker returned an invalid session ID");
             synchronized (lock) { sessionId = id; }
             attachUi(candidate, id);
+            if (configuredAcknowledged) reportRequestConfigured(generation, requestToken);
+            else clearConfigureRequest(generation, requestToken);
         } catch (Throwable error) {
+            if (configuredAcknowledged) reportRequestConfigured(generation, requestToken);
+            else clearConfigureRequest(generation, requestToken);
             reportRequestError(generation, id, "configure", summary(error));
+        }
+    }
+
+    private void attachConfiguredSession(int generation, String requestToken, String id,
+            String requestedConfig, int workerPid) {
+        if (!isPendingConfigure(generation, requestToken, requestedConfig)) return;
+        boolean confirmedWorker = false;
+        try {
+            IBinder candidate = resolveWorker();
+            WorkerIdentity identity = readIdentity(candidate);
+            if (!matchesCurrentApk(identity) || identity.pid != workerPid)
+                throw new IllegalStateException("configured Motion worker is unavailable or changed");
+            confirmedWorker = true;
+            worker = candidate;
+            synchronized (lock) {
+                if (!matchesPendingConfigureLocked(generation, requestToken, requestedConfig)) return;
+                sessionId = id;
+            }
+            attachUi(candidate, id);
+            reportRequestConfigured(generation, requestToken);
+        } catch (Throwable error) {
+            if (confirmedWorker) reportRequestConfigured(generation, requestToken);
+            else clearConfigureRequest(generation, requestToken);
+            reportRequestError(generation, id, "configure_attach", summary(error));
+        }
+    }
+
+    private boolean isPendingConfigure(int generation, String requestToken, String requestedConfig) {
+        synchronized (lock) {
+            return matchesPendingConfigureLocked(generation, requestToken, requestedConfig);
+        }
+    }
+
+    private boolean matchesPendingConfigureLocked(int generation, String requestToken,
+            String requestedConfig) {
+        return !closed && awaitingConfigureCompletion && generation == requestGeneration
+                && generation == configureCompletionGeneration
+                && requestToken.equals(configureCompletionToken)
+                && requestedConfig.equals(configureCompletionJson);
+    }
+
+    private void queueConfiguredSession(String requestToken, String id, String requestedConfig,
+            int workerPid) {
+        final int generation;
+        synchronized (lock) {
+            if (closed || !awaitingConfigureCompletion
+                    || !requestToken.equals(configureCompletionToken)
+                    || !requestedConfig.equals(configureCompletionJson)) return;
+            generation = configureCompletionGeneration;
+        }
+        try {
+            commands.execute(() -> attachConfiguredSession(generation, requestToken, id,
+                    requestedConfig, workerPid));
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // close() may win before the confirmed-session attachment can be queued.
+        }
+    }
+
+    private void reportRequestConfigured(int generation, String requestToken) {
+        final Listener target;
+        synchronized (lock) {
+            if (closed || !awaitingConfigureCompletion || generation != requestGeneration
+                    || generation != configureCompletionGeneration
+                    || !requestToken.equals(configureCompletionToken)) return;
+            awaitingConfigureCompletion = false;
+            configureCompletionToken = null;
+            configureCompletionJson = null;
+            target = listener;
+        }
+        if (target != null) main.post(() -> {
+            if (isCurrentRequest(generation)) target.onConfigured();
+        });
+    }
+
+    private void clearConfigureRequest(int generation, String requestToken) {
+        synchronized (lock) {
+            if (!awaitingConfigureCompletion || generation != requestGeneration
+                    || generation != configureCompletionGeneration
+                    || !requestToken.equals(configureCompletionToken)) return;
+            awaitingConfigureCompletion = false;
+            configureCompletionToken = null;
+            configureCompletionJson = null;
         }
     }
 
@@ -411,6 +530,87 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         } finally { data.recycle(); reply.recycle(); }
     }
 
+    static CameraChargePolicy.State readChargeState(Context context) throws Exception {
+        return readChargeState(context, false);
+    }
+
+    static CameraChargePolicy.State readChargeState(Context context, boolean forceFresh)
+            throws Exception {
+        Context application = context.getApplicationContext();
+        Context app = application == null ? context : application;
+        IBinder candidate = resolveWorker();
+        WorkerIdentity identity = readIdentity(candidate);
+        if (candidate == null || identity == null || identity.version != MotionDetectorProtocol.VERSION
+                || identity.build != BuildConfig.VERSION_CODE
+                || !currentApkIdentity(app).equals(identity.apk))
+            throw new IllegalStateException("current Motion worker is unavailable or obsolete");
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
+            int transaction = forceFresh ? MotionDetectorProtocol.TX_READ_CHARGE
+                    : MotionDetectorProtocol.TX_STATUS;
+            if (!candidate.transact(transaction, data, reply, 0))
+                throw new IllegalStateException("shared camera charge status unavailable");
+            reply.readException();
+            CameraChargePolicy.State state;
+            if (forceFresh) state = MotionDetectorProtocol.readChargeState(reply);
+            else state = readStatusReply(reply).chargeState;
+            if (reply.dataAvail() != 0)
+                throw new IllegalStateException("shared camera charge reply has trailing data");
+            CameraChargeTelemetry.publish(state);
+            return state;
+        } finally { data.recycle(); reply.recycle(); }
+    }
+
+    static boolean prepareRemoteView(Context context, IBinder owner, String id) throws Exception {
+        if (owner == null || !MotionDetectorProtocol.validSession(id))
+            throw new IllegalArgumentException("remote view owner and 32-character session are required");
+        IBinder target = verifiedWorker(context);
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
+            data.writeString(id);
+            data.writeStrongBinder(owner);
+            if (!target.transact(MotionDetectorProtocol.TX_VIEW_PREPARE, data, reply, 0))
+                throw new IllegalStateException("remote camera preparation unavailable");
+            reply.readException();
+            int ready = reply.readInt();
+            if ((ready != 0 && ready != 1) || reply.dataAvail() != 0)
+                throw new IllegalStateException("invalid remote camera preparation reply");
+            return ready == 1;
+        } finally { data.recycle(); reply.recycle(); }
+    }
+
+    static void releaseRemoteView(Context context, IBinder owner, String id) throws Exception {
+        if (owner == null || !MotionDetectorProtocol.validSession(id))
+            throw new IllegalArgumentException("remote view owner and 32-character session are required");
+        IBinder target = verifiedWorker(context);
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(MotionDetectorProtocol.DESCRIPTOR);
+            data.writeString(id);
+            data.writeStrongBinder(owner);
+            if (!target.transact(MotionDetectorProtocol.TX_VIEW_RELEASE, data, reply, 0))
+                throw new IllegalStateException("remote camera release unavailable");
+            reply.readException();
+            if (reply.readInt() != 1 || reply.dataAvail() != 0)
+                throw new IllegalStateException("invalid remote camera release reply");
+        } finally { data.recycle(); reply.recycle(); }
+    }
+
+    private static IBinder verifiedWorker(Context context) throws Exception {
+        if (context == null) throw new IllegalArgumentException("context required");
+        Context application = context.getApplicationContext();
+        Context app = application == null ? context : application;
+        IBinder candidate = resolveWorker();
+        WorkerIdentity identity = readIdentity(candidate);
+        if (candidate == null || identity == null || identity.version != MotionDetectorProtocol.VERSION
+                || identity.build != BuildConfig.VERSION_CODE
+                || !currentApkIdentity(app).equals(identity.apk))
+            throw new IllegalStateException("current Motion worker is unavailable or obsolete");
+        return candidate;
+    }
+
     public static boolean isLiveWarningSession(Context context, String id) {
         if (!MotionDetectorProtocol.validSession(id)) return false;
         try {
@@ -429,8 +629,10 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         String config = reply.readString();
         boolean warning = reply.readInt() == 1;
         boolean drawn = reply.readInt() == 1;
+        CameraChargePolicy.State chargeState = MotionDetectorProtocol.readChargeState(reply);
         if (reply.dataAvail() != 0) throw new IllegalStateException("Motion status reply has trailing data");
-        return new Status(state, prepared, eligible, error, elapsed, id, config, warning, drawn);
+        return new Status(state, prepared, eligible, error, elapsed, id, config, warning, drawn,
+                chargeState);
     }
 
     private IBinder requireWorker(String id) throws Exception {
@@ -603,6 +805,16 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
         main.post(() -> { if (isCurrent(id)) target.onScreenState(state, detail, elapsedMs); });
     }
 
+    private void reportChargeState(String id, CameraChargePolicy.State state) {
+        Listener target = listener;
+        if (!isCurrent(id) || target == null) return;
+        main.post(() -> {
+            if (!isCurrent(id)) return;
+            CameraChargeTelemetry.publish(state);
+            target.onChargeState(state);
+        });
+    }
+
     private final class Callback extends Binder {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
@@ -612,6 +824,23 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             }
             if (Binder.getCallingUid() != 2000) throw new SecurityException("motion callback sender denied");
             data.enforceInterface(MotionDetectorProtocol.CALLBACK_DESCRIPTOR);
+            if (code == MotionDetectorProtocol.CB_CONFIGURED) {
+                int protocol = data.readInt();
+                int build = data.readInt();
+                int workerPid = data.readInt();
+                String requestToken = data.readString();
+                String id = data.readString();
+                String requestedConfig = data.readString();
+                if (protocol != MotionDetectorProtocol.VERSION || build != BuildConfig.VERSION_CODE
+                        || workerPid <= 0 || workerPid != Binder.getCallingPid()
+                        || !MotionDetectorProtocol.validSession(requestToken)
+                        || !MotionDetectorProtocol.validSession(id)
+                        || requestedConfig == null || requestedConfig.length() > 8192
+                        || data.dataAvail() != 0)
+                    throw new SecurityException("invalid configured-session callback");
+                queueConfiguredSession(requestToken, id, requestedConfig, workerPid);
+                return true;
+            }
             String id = data.readString();
             if (!isCurrent(id)) return true;
             switch (code) {
@@ -653,6 +882,13 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
                 case MotionDetectorProtocol.CB_SCREEN:
                     reportScreen(id, data.readString(), data.readString(), data.readLong());
                     break;
+                case MotionDetectorProtocol.CB_CHARGE: {
+                    CameraChargePolicy.State chargeState = MotionDetectorProtocol.readChargeState(data);
+                    if (data.dataAvail() != 0)
+                        throw new SecurityException("charge callback has trailing data");
+                    reportChargeState(id, chargeState);
+                    break;
+                }
                 default:
                     return false;
             }
@@ -717,6 +953,9 @@ public final class MotionDetectorClient implements AutoCloseable, MotionMediaLib
             if (closed) return;
             closed = true;
             listener = null;
+            awaitingConfigureCompletion = false;
+            configureCompletionToken = null;
+            configureCompletionJson = null;
             id = sessionId;
             target = worker;
         }

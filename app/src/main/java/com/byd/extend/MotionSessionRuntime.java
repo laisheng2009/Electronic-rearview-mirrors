@@ -55,7 +55,7 @@ final class MotionSessionRuntime {
     }
 
     Change advance(long nowMs) {
-        boolean eligible = !suspended && config != null && config.anyEnabled()
+        boolean eligible = !suspended && config != null && config.motionEnabled()
                 && telemetry.eligible(config);
         if (!eligible) {
             if (armed || armDeadlineMs != 0L) {

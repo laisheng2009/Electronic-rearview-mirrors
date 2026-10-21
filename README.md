@@ -197,6 +197,33 @@ Assigned buttons can replace their original actions. Reset a binding to release 
 
 </details>
 
+### Cameras integration
+
+`BYD integrations -> Cameras` groups `Tablet display`, `Video recording`, and `Viewing` in three tabs. Tablet display and recording can use vehicle battery; their consumption is not necessarily the same. Saved charge thresholds are shared by all three tabs and protect the tablet Motion warning, recording, and remote video:
+
+| Reading | Range | Default |
+| --- | --- | --- |
+| SOC | 10–90% in 1% steps | 20% |
+| 12V battery | 12.0–13.0V in 0.1V steps | 12.4V |
+
+When either valid reading is at or below its threshold, those three activities pause without turning off their switches or resetting their settings; an active recording is finalized cleanly. This guard does not disable reverse, blind-zone, or other driving-camera functions. If a reading is unavailable and no low-charge stop was previously confirmed, an in-form warning lists only the missing metric and allows you to continue at your discretion. Missing data does not clear a confirmed low-charge stop: it remains latched across runtime restarts until a fresh valid reading is above the threshold for every cause. The affected enabled features then recover automatically, subject to their normal Motion and vehicle conditions.
+
+Remote viewing is independent of Motion's enable switch and can run with vehicle power ON or OFF while the camera runtime, network route, and vehicle remain available. Choose one of these transports:
+
+| Transport | Browser views |
+| --- | --- |
+| VDO.Ninja | Four-camera composition only |
+| Tailscale Serve (private) or Funnel (public) | Composition plus Front, Rear, Left, and Right |
+| Zrok (public) | Composition plus Front, Rear, Left, and Right |
+
+VDO.Ninja creates a random `byd-…` stream ID if its ID field is left empty; you can instead enter a custom ID. Its viewer link is built from that ID. Set a viewer password in the app; it is entered separately from the link ([VDO.Ninja stream IDs](https://docs.vdo.ninja/getting-started/stream-ids), [passwords](https://docs.vdo.ninja/advanced-settings/setup-parameters/and-password)). For Tailscale, enter a device name or leave it blank for an app-generated one, then choose **Authorize**; if sign-in is needed, the embedded Tailscale client supplies the authorization URL to approve that device in your tailnet. **Serve** is private to the tailnet and follows its access-control rules; **Funnel** is public ([Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve), [Funnel](https://tailscale.com/docs/features/tailscale-funnel)). For Zrok, enter the account token from your myzrok account console ([official token instructions](https://netfoundry.io/docs/zrok/get-started/get-token/)). You can enter a custom connection name or keep the app-generated default; **Authorize** enables the environment, and **Start viewing** creates the share address. Zrok uses this account token and does not provide a separate authorization URL.
+
+A viewer password is required for VDO.Ninja and every public route, including Tailscale Funnel and Zrok; public viewing cannot start with an empty password. Private Tailscale Serve uses tailnet identity and policy instead. The shared link and QR code do not contain the viewer password. Passwords, provider tokens, and tunnel identity are encrypted with Android Keystore and are excluded from settings exports and Android backups. Revoke stops the active share and clears the saved credentials for that transport.
+
+All remote modes are video-only, allow one viewer at a time, and do not create recordings or archive clips. Video encoding and camera use start only for a connected viewer. Viewing requires a compatible hardware H.264 encoder; there is no software-encoding fallback. Network routing, existing VPNs, firmware, and sleep state can prevent access, and remote viewing cannot wake a vehicle that is fully asleep or unreachable. Compatibility and recovery behavior are not guaranteed on every model or encoder.
+
+Thanks to the [OverDrive project](https://github.com/yash-srivastava/Overdrive-release) for its publicly available code and ideas that informed our camera and tunnel research.
+
 ## Optional integrations
 
 Enable these separately under `BYD integrations`.
@@ -394,6 +421,11 @@ Use JDK 17 and the Android SDK required by the Gradle project. Distribution buil
 ```
 
 On Windows, use `.\gradlew.bat :app:assemblePerformance`. The APK is copied to `build_output/byd-extend-v<version>.apk`.
+
+The embedded camera tunnels also require Windows PowerShell, Go **1.26.10** on `PATH`,
+and Android NDK **30.0.15729638-beta2** (SDK directory `ndk/30.0.15729638`). Gradle
+builds all four native ABIs from pinned sources into `app/build/generated/tunnelJniLibs`;
+the first build downloads the Go dependencies. See the [native build notes](app/src/main/native/tunnel/README.md).
 
 The current build script uses the existing `debug` signing configuration for update continuity; its name does not make this variant debuggable. A local build can update an installed copy only if its signing certificate matches. Do not confuse the source version with a published release.
 

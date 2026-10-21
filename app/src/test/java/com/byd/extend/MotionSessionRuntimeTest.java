@@ -4,6 +4,21 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class MotionSessionRuntimeTest {
+    @Test public void remoteOnlyRetainsPowerTelemetryWithoutArmingMotionOrRequiringLock()
+            throws Exception {
+        MotionSessionRuntime runtime = new MotionSessionRuntime();
+        runtime.configure("0123456789abcdef0123456789abcdef",
+                MotionConfig.parse("{\"remoteViewingEnabled\":true,\"lock\":1}"));
+        assertTrue(runtime.needsTelemetry());
+        assertEquals(MotionSessionRuntime.Change.NONE,
+                runtime.telemetry("epoch", "power", 0, true, 1_000));
+        assertFalse(runtime.needsTelemetry());
+        assertFalse(runtime.arming());
+        assertFalse(runtime.armed());
+        assertEquals(-1, runtime.lock());
+        assertEquals(MotionSessionRuntime.Change.NONE, runtime.advance(50_000));
+    }
+
     @Test public void cameraLossRearmsFromValidTelemetryWithoutWaitingForAnotherBaseline() throws Exception {
         MotionSessionRuntime runtime = new MotionSessionRuntime();
         runtime.configure("0123456789abcdef0123456789abcdef",

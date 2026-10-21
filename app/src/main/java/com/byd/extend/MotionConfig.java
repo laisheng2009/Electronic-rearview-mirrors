@@ -9,7 +9,8 @@ import org.json.JSONObject;
 public final class MotionConfig {
     public static final String SCREEN_PREFS = "motion_screen";
     public static final String RECORDING_PREFS = "motion_recording";
-    public final boolean warningEnabled, recordingEnabled, audioEnabled;
+    public final boolean warningEnabled, recordingEnabled, audioEnabled, remoteViewingEnabled;
+    public final int chargeSocThresholdPercent, chargeVoltageThresholdTenths;
     public final int lockCondition, beforeSeconds, afterSeconds, quality;
     public final boolean primarySd, fallbackEnabled, internalKeepFree, sdKeepFree, oemCleanup;
     public final int internalLimitGb, sdLimitGb, internalFreeGb, sdFreeGb, oemLimitGb;
@@ -19,6 +20,15 @@ public final class MotionConfig {
         warningEnabled = json.optBoolean("warning", false);
         recordingEnabled = json.optBoolean("enabled", false);
         audioEnabled = json.optBoolean("audio", false);
+        remoteViewingEnabled = json.optBoolean("remoteViewingEnabled", false);
+        chargeSocThresholdPercent = bounded(json.optInt("chargeSocThreshold",
+                CameraChargeSettings.DEFAULT_SOC_THRESHOLD_PERCENT),
+                CameraChargeSettings.MIN_SOC_THRESHOLD_PERCENT,
+                CameraChargeSettings.MAX_SOC_THRESHOLD_PERCENT);
+        chargeVoltageThresholdTenths = bounded(json.optInt("chargeVoltageTenths",
+                Math.round(CameraChargeSettings.DEFAULT_VOLTAGE_THRESHOLD_VOLTS * 10.0f)),
+                CameraChargeSettings.MIN_VOLTAGE_THRESHOLD_TENTHS,
+                CameraChargeSettings.MAX_VOLTAGE_THRESHOLD_TENTHS);
         lockCondition = normalizeLockMode(json.optInt("lock", 1));
         beforeSeconds = bounded(json.optInt("before", 10), 1, 30);
         afterSeconds = bounded(json.optInt("after", 10), 1, 30);
@@ -44,6 +54,9 @@ public final class MotionConfig {
         try {
             json.put("warning", screen.getBoolean("enabled", false));
             json.put("lock", lock);
+            json.put("remoteViewingEnabled", CameraChargeSettings.isRemoteViewingEnabled(context));
+            json.put("chargeSocThreshold", CameraChargeSettings.getSocThresholdPercent(context));
+            json.put("chargeVoltageTenths", CameraChargeSettings.getVoltageThresholdTenths(context));
         } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
         return new MotionConfig(json);
     }
@@ -55,9 +68,10 @@ public final class MotionConfig {
 
     public static int normalizeLockMode(int value) { return value == 0 ? 0 : 1; }
 
-    public boolean anyEnabled() { return warningEnabled || recordingEnabled; }
+    public boolean motionEnabled() { return warningEnabled || recordingEnabled; }
+    public boolean anyEnabled() { return motionEnabled() || remoteViewingEnabled; }
     boolean eligible(int power, int lock) {
-        return anyEnabled() && power == 0 && (lockCondition == 0 || lockCondition == 1 && lock == 2);
+        return motionEnabled() && power == 0 && (lockCondition == 0 || lockCondition == 1 && lock == 2);
     }
     public int width() { return quality == 0 ? 1280 : quality == 1 ? 1920 : 2560; }
     public int height() { return width() * 9 / 16; }
@@ -66,6 +80,9 @@ public final class MotionConfig {
     public String toJson() {
         try {
             return new JSONObject().put("warning", warningEnabled).put("enabled", recordingEnabled)
+                    .put("remoteViewingEnabled", remoteViewingEnabled)
+                    .put("chargeSocThreshold", chargeSocThresholdPercent)
+                    .put("chargeVoltageTenths", chargeVoltageThresholdTenths)
                     .put("audio", audioEnabled).put("lock", lockCondition)
                     .put("before", beforeSeconds).put("after", afterSeconds).put("quality", quality)
                     .put("sd", primarySd).put("fallback", fallbackEnabled)

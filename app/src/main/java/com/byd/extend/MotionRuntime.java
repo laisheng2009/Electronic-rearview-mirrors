@@ -23,6 +23,7 @@ public final class MotionRuntime implements AutoCloseable {
     private final Handler handler;
     private final SharedPreferences screenPrefs;
     private final SharedPreferences recordingPrefs;
+    private final SharedPreferences chargePrefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener changed =
             (prefs, key) -> refresh();
 
@@ -36,11 +37,13 @@ public final class MotionRuntime implements AutoCloseable {
         this.events = events == null ? ignored -> { } : events;
         screenPrefs = this.context.getSharedPreferences(MotionConfig.SCREEN_PREFS, Context.MODE_PRIVATE);
         recordingPrefs = this.context.getSharedPreferences(MotionConfig.RECORDING_PREFS, Context.MODE_PRIVATE);
+        chargePrefs = this.context.getSharedPreferences(CameraChargeSettings.PREFS, Context.MODE_PRIVATE);
         normalizeStoredLockMode(screenPrefs);
         thread.start();
         handler = new Handler(thread.getLooper());
         screenPrefs.registerOnSharedPreferenceChangeListener(changed);
         recordingPrefs.registerOnSharedPreferenceChangeListener(changed);
+        chargePrefs.registerOnSharedPreferenceChangeListener(changed);
         active = this;
         refresh();
     }
@@ -70,6 +73,19 @@ public final class MotionRuntime implements AutoCloseable {
         }
     }
 
+    /** Persists remote viewing and bootstraps the existing shell worker when it becomes enabled. */
+    public static void setRemoteViewingEnabled(Context context, boolean enabled) {
+        if (context == null) throw new IllegalArgumentException("context required");
+        Context application = context.getApplicationContext();
+        Context target = application == null ? context : application;
+        SharedPreferences preferences = target.getSharedPreferences(
+                CameraChargeSettings.PREFS, Context.MODE_PRIVATE);
+        if (preferences.getBoolean(CameraChargeSettings.KEY_REMOTE_VIEWING_ENABLED, false) == enabled)
+            return;
+        preferences.edit().putBoolean(CameraChargeSettings.KEY_REMOTE_VIEWING_ENABLED, enabled).apply();
+        settingsChanged(target);
+    }
+
     void refresh() {
         if (!handler.post(() -> refreshOnObserver())) return;
     }
@@ -92,9 +108,14 @@ public final class MotionRuntime implements AutoCloseable {
                 event("motion_worker_prepared", "uid", 2000);
             }
 
+            @Override public void onConfigured() {
+                com.byd.extend.remote.CameraViewingController.get(context).workerReconfigured();
+            }
+
             @Override public void onStatus(String state, String detail, long elapsedMs) {
                 if ("configured_disabled".equals(state)) {
                     event("motion_worker_disabled", "detail", detail, "elapsed_ms", elapsedMs);
+                    publishCurrentChargeState();
                     return;
                 }
                 event("motion_worker_state", "state", state, "detail", detail,
@@ -118,7 +139,16 @@ public final class MotionRuntime implements AutoCloseable {
                 event("motion_screen_state", "state", state, "detail", detail,
                         "elapsed_ms", elapsedMs);
             }
+
+            @Override public void onChargeState(CameraChargePolicy.State state) {
+                CameraChargeTelemetry.publish(state);
+            }
         });
+    }
+
+    private void publishCurrentChargeState() {
+        try { CameraChargeTelemetry.publish(MotionDetectorClient.readChargeState(context)); }
+        catch (Throwable ignored) { }
     }
 
     private static void normalizeStoredLockMode(SharedPreferences screen) {
@@ -144,6 +174,7 @@ public final class MotionRuntime implements AutoCloseable {
     @Override public void close() {
         screenPrefs.unregisterOnSharedPreferenceChangeListener(changed);
         recordingPrefs.unregisterOnSharedPreferenceChangeListener(changed);
+        chargePrefs.unregisterOnSharedPreferenceChangeListener(changed);
         FutureTask<Void> task = new FutureTask<>(() -> {
             closed = true;
             MotionDetectorClient old = detector;

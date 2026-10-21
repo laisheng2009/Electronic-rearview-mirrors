@@ -128,7 +128,7 @@ final class MotionRecordingOutput {
         } else if (onClosed != null) onClosed.run();
     }
 
-    private void failed(String detail) {
+    void failed(String detail) {
         Parcel data = Parcel.obtain();
         try {
             data.writeInterfaceToken(DESCRIPTOR); data.writeString(detail);

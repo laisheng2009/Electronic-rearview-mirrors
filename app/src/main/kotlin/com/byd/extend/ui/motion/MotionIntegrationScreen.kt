@@ -77,6 +77,7 @@ import kotlin.math.abs
 import java.util.Locale
 import com.byd.extend.MotionConfig
 import com.byd.extend.MotionRuntime
+import com.byd.extend.CameraChargeSettings
 import com.byd.extend.R
 import com.byd.extend.ui.ActionButton as ProductionActionButton
 import com.byd.extend.ui.ChoiceField
@@ -86,6 +87,7 @@ import com.byd.extend.ui.MirrorBorderColorPicker
 import com.byd.extend.ui.Section
 import com.byd.extend.ui.Segmented
 import com.byd.extend.ui.SwitchLine
+import com.byd.extend.ui.FormScope
 import com.byd.extend.ui.icons.Palette
 import com.byd.extend.ui.icons.Visibility
 import com.byd.extend.ui.UiLanguage
@@ -94,16 +96,17 @@ import com.byd.extend.ui.UiStrings
 import com.byd.extend.ui.palette
 
 @Composable
-internal fun MotionIntegrationScreen(
+internal fun FormScope.MotionIntegrationScreen(
     colors: UiPalette,
     strings: UiStrings,
     cameraHost: @Composable (com.byd.extend.ui.CameraHostSlot) -> Unit,
     archiveState: MotionArchiveState,
-) {
+): FormScope {
     val context = LocalContext.current
     val store = remember(context) { MotionTemplateStore(context) }
     val config = remember(context) { MotionConfig.read(context) }
     val scope = rememberCoroutineScope()
+    val focus = LocalFocusManager.current
     var library by remember { mutableStateOf(store.read()) }
     var enabled by rememberSaveable { mutableStateOf(config.warningEnabled) }
     var lock by rememberSaveable { mutableIntStateOf(config.lockCondition) }
@@ -118,6 +121,26 @@ internal fun MotionIntegrationScreen(
     var dialog by rememberSaveable { mutableIntStateOf(0) }
     var draft by rememberSaveable { mutableStateOf<MotionTemplate?>(null) }
     var importing by remember { mutableStateOf(false) }
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+    var checkupOpen by rememberSaveable { mutableStateOf(false) }
+    val chargeState = rememberCameraChargeState(context)
+    var socThreshold by remember(context) {
+        mutableIntStateOf(CameraChargeSettings.getSocThresholdPercent(context).coerceIn(10, 90))
+    }
+    var voltageThreshold by remember(context) {
+        mutableFloatStateOf(CameraChargeSettings.getVoltageThresholdVolts(context).coerceIn(12f, 13f))
+    }
+    val battery: @Composable () -> Unit = {
+        CameraChargeSettingsSection(colors, strings, chargeState, socThreshold, voltageThreshold,
+            onSocThreshold = {
+                socThreshold = it
+                CameraChargeSettings.setSocThresholdPercent(context, it)
+            },
+            onVoltageThreshold = {
+                voltageThreshold = it
+                CameraChargeSettings.setVoltageThresholdVolts(context, it)
+            })
+    }
     fun persist(next: MotionTemplates): Boolean = try {
         store.write(next)
         library = next
@@ -138,50 +161,75 @@ internal fun MotionIntegrationScreen(
             } finally { importing = false }
         }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        MotionCheckupSection(colors, strings)
-        Text(strings.motionText(R.string.motion_notice), color = colors.muted, fontSize = 13.sp)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Section(strings.motionText(R.string.preview), colors, Modifier.weight(1f)) {
-                Text(strings.motionText(R.string.motion_active), color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Text(templateName(library.active(), strings), color = colors.muted, fontSize = 14.sp)
-                MotionTemplateCanvas(library.active(), store, strings, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ActionButton(strings.motionText(R.string.motion_edit), Icons.Outlined.Edit, colors,
-                        Modifier.weight(1f)) { draft = library.active().let { it.copy(name = templateName(it, strings)) } }
-                    ActionButton(strings.motionText(R.string.motion_show), Icons.Outlined.PlayArrow, colors,
-                        Modifier.weight(1f)) { MotionFullscreenActivity.show(context) }
-                }
-            }
-            Section(strings.motionText(R.string.settings), colors, Modifier.weight(.8f)) {
-                SwitchLine(strings.motionText(R.string.motion_enable), strings.motionText(R.string.motion_timing), enabled, {
-                    enabled = it; store.preferences.edit().putBoolean("enabled", it).apply()
-                    MotionRuntime.settingsChanged(context)
-                }, colors)
-                ChoiceField(strings.motionText(R.string.motion_lock), listOf(R.string.motion_locked, R.string.motion_any)
-                    .map { strings.motionText(it) }, if (activationMode == 1) 0 else 1, { selected ->
-                    lock = if (selected == 0) 1 else 0; store.preferences.edit().putInt("lock", lock).apply()
-                    MotionRuntime.settingsChanged(context)
-                }, colors, enabled = enabled)
-                ActionButton(strings.motionText(R.string.motion_bases), Icons.Outlined.Palette, colors,
-                    Modifier.fillMaxWidth()) { dialog = 1 }
-                ActionButton(strings.motionText(R.string.motion_saved), Icons.Outlined.Visibility, colors,
-                    Modifier.fillMaxWidth()) { dialog = 2 }
-                ActionButton(strings.motionText(if (importing) R.string.motion_importing else R.string.motion_import),
-                    palette = colors, modifier = Modifier.fillMaxWidth(), enabled = !importing) {
-                    try { picker.launch(arrayOf("image/png", "image/jpeg", "image/webp")) }
-                    catch (_: android.content.ActivityNotFoundException) {
-                        Toast.makeText(context, strings.motionText(R.string.motion_import_error), Toast.LENGTH_LONG).show()
-                    }
-                }
-                Text(strings.motionText(R.string.motion_import_hint), color = colors.muted, fontSize = 13.sp)
-                Text(strings.motionText(R.string.motion_reference_notice), color = colors.muted, fontSize = 12.sp)
-            }
-        }
-        CompositionLocalProvider(LocalMotionCameraHost provides cameraHost) {
-            MotionRecordingScreen(colors, strings, archiveState)
+    row("camera-checkup") { MotionCheckupSection(colors, strings) { checkupOpen = true } }
+    row("camera-tabs") {
+        Segmented(listOf(R.string.cameras_tablet, R.string.cameras_recording, R.string.cameras_viewing)
+            .map { strings.motionText(it) }, tab, colors, Modifier.fillMaxWidth()) {
+            focus.clearFocus()
+            tab = it
         }
     }
+    if (tab != 2) row("camera-battery-notice") {
+        Text(strings.motionText(R.string.cameras_battery_notice), color = colors.yellow, fontSize = 13.sp)
+    }
+    if (tab == 0) {
+        row("motion-notice") {
+            Text(strings.motionText(R.string.motion_notice), color = colors.muted, fontSize = 13.sp)
+        }
+        row("motion-tablet-settings") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Section(strings.motionText(R.string.preview), colors, Modifier.weight(1f)) {
+                    Text(strings.motionText(R.string.motion_active), color = colors.text, fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold)
+                    Text(templateName(library.active(), strings), color = colors.muted, fontSize = 14.sp)
+                    MotionTemplateCanvas(library.active(), store, strings,
+                        Modifier.fillMaxWidth().aspectRatio(16f / 9f))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ActionButton(strings.motionText(R.string.motion_edit), Icons.Outlined.Edit, colors,
+                            Modifier.weight(1f)) { draft = library.active().let { it.copy(name = templateName(it, strings)) } }
+                        ActionButton(strings.motionText(R.string.motion_show), Icons.Outlined.PlayArrow, colors,
+                            Modifier.weight(1f)) { MotionFullscreenActivity.show(context) }
+                    }
+                }
+                Section(strings.motionText(R.string.settings), colors, Modifier.weight(.8f)) {
+                    SwitchLine(strings.motionText(R.string.motion_enable), strings.motionText(R.string.motion_timing), enabled, {
+                        enabled = it; store.preferences.edit().putBoolean("enabled", it).apply()
+                        MotionRuntime.settingsChanged(context)
+                    }, colors)
+                    ChoiceField(strings.motionText(R.string.motion_lock), listOf(R.string.motion_locked, R.string.motion_any)
+                        .map { strings.motionText(it) }, if (activationMode == 1) 0 else 1, { selected ->
+                        lock = if (selected == 0) 1 else 0; store.preferences.edit().putInt("lock", lock).apply()
+                        MotionRuntime.settingsChanged(context)
+                    }, colors, enabled = enabled)
+                    ActionButton(strings.motionText(R.string.motion_bases), Icons.Outlined.Palette, colors,
+                        Modifier.fillMaxWidth()) { dialog = 1 }
+                    ActionButton(strings.motionText(R.string.motion_saved), Icons.Outlined.Visibility, colors,
+                        Modifier.fillMaxWidth()) { dialog = 2 }
+                    ActionButton(strings.motionText(if (importing) R.string.motion_importing else R.string.motion_import),
+                        palette = colors, modifier = Modifier.fillMaxWidth(), enabled = !importing) {
+                        try { picker.launch(arrayOf("image/png", "image/jpeg", "image/webp")) }
+                        catch (_: android.content.ActivityNotFoundException) {
+                            Toast.makeText(context, strings.motionText(R.string.motion_import_error), Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    Text(strings.motionText(R.string.motion_import_hint), color = colors.muted, fontSize = 13.sp)
+                    Text(strings.motionText(R.string.motion_reference_notice), color = colors.muted, fontSize = 12.sp)
+                }
+            }
+        }
+        row("motion-tablet-battery") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(Modifier.weight(1f)) { battery() }
+                Spacer(Modifier.weight(.8f))
+            }
+        }
+    }
+    CompositionLocalProvider(LocalMotionCameraHost provides cameraHost) {
+        MotionRecordingScreen(colors, strings, archiveState, showContent = tab == 1, battery = battery)
+    }
+    if (tab == 2) CameraViewingScreen(colors, strings, chargeState)
+
+    if (checkupOpen) MotionCheckupDialog(colors, strings) { checkupOpen = false }
     if (dialog == 1 || dialog == 2) MotionLibraryDialog(dialog == 1, library, store, colors, strings,
         onClose = { dialog = 0 }, onUse = { if (persist(library.copy(activeId = it.id))) dialog = 0 },
         onEdit = { dialog = 0; draft = it.copy(name = templateName(it, strings)) }, onDelete = {
@@ -194,6 +242,7 @@ internal fun MotionIntegrationScreen(
         },
             onSave = { if (persist(library.save(it.forSave()))) draft = null })
     }
+    return this
 }
 
 private fun templateName(template: MotionTemplate, strings: UiStrings): String =
