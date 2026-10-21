@@ -356,7 +356,8 @@ public final class MotionDetectorShellMain {
                     if (reply != null) reply.writeException(new SecurityException("unregistered viewing helper"));
                     return true;
                 }
-            } else if (callerUid != appUid) {
+            } else if (callerUid != appUid && !(code == MotionDetectorProtocol.TX_PING
+                    && isRegisteredViewingCaller(callerUid, Binder.getCallingPid()))) {
                 if (reply != null) reply.writeException(new SecurityException("motion caller denied"));
                 return true;
             }

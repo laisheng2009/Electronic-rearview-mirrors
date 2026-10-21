@@ -70,6 +70,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         var preparing = false
         var deadline = 0L
         var interactive = false
+        var preparationError: String? = null
     }
 
     fun setListener(value: Consumer<JSONObject>?) { listener = value; value?.accept(snapshot()) }
@@ -99,7 +100,9 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             "reconfigured" -> {
                 observeCharge()
                 profiles.values.forEach { p -> p.run?.let { run ->
-                if (run.viewer) { closeVideo(run); run.deadline = SystemClock.elapsedRealtime() + 30_000; prepare(p, run) }
+                if (run.viewer && payload.optBoolean("restartVideo", true)) {
+                    closeVideo(run); run.deadline = SystemClock.elapsedRealtime() + 30_000; prepare(p, run)
+                }
                 } }
             }
             "authorization_opened" -> {
@@ -150,7 +153,6 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             connectivity.registerDefaultNetworkCallback(networkCallback)
             networkRegistered = true
         }
-        if (chargeObservation == null) observeCharge()
         configure(payload.getBoolean("enabled"))
     }
 
@@ -270,8 +272,18 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     private fun prepare(p: Profile, run: Run) {
         if (p.run !== run || !enabled || !run.viewer || run.video) return
         run.preparing = false
-        val charge = try { RemoteCameraPreparation.readChargeState(context).also { chargeState = it } }
-            catch (_: Exception) { retryPreparation(p, run); return }
+        val charge = try {
+            if (chargeObservation == null) observeCharge()
+            RemoteCameraPreparation.readChargeState(context).also { chargeState = it }
+        } catch (failure: Exception) {
+            val type = failure.javaClass.simpleName
+            if (run.preparationError != type) {
+                run.preparationError = type
+                Log.w("CameraViewing", "stage=charge_prepare provider=${p.method} type=$type")
+            }
+            if (SystemClock.elapsedRealtime() >= run.deadline) throw RuntimeFailure("camera_backend_unavailable")
+            retryPreparation(p, run); return
+        }
         if (charge.isBlocked) { closeVideo(run); p.phase = "low_battery"; return }
         p.phase = "preparing"
         val camera = run.source ?: RemoteCameraSource(context) {

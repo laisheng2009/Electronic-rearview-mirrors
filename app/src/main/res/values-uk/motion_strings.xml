@@ -77,6 +77,7 @@
     <string name="cameras_error_camera_unavailable">"Потік камер недоступний. Перевірте ADB і готовність камер."</string>
     <string name="cameras_error_encoder_unavailable">"Апаратне кодування відео недоступне."</string>
     <string name="cameras_error_connection">"Не вдалося встановити з’єднання для перегляду. Перевірте авторизацію та мережу."</string>
+    <string name="cameras_error_helper">"Внутрішня служба перегляду або камер недоступна. Це не помилка авторизації акаунта."</string>
     <string name="cameras_error_secret">"Не вдалося прочитати або зберегти захищені облікові дані. Повторно авторизуйте цей пристрій."</string>
     <string name="motion_notice">"Робота залежить від доступних компонентів авто. Потрібні можливості перевіряються під час роботи; помилки та їхні причини записуються в журнал."</string>
     <string name="motion_enable">"Показувати попередження при виявленні руху"</string>

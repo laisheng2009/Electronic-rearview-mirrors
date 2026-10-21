@@ -414,7 +414,7 @@ internal fun FormScope.CameraViewingScreen(
                     Alignment.CenterHorizontally)) {
                     if (transport == "vdo" && !state.authorized) {
                         ActionButton(strings.motionText(R.string.cameras_regenerate), colors,
-                            Modifier.width(160.dp), enabled = !fieldsLocked) {
+                            Modifier.weight(1f), enabled = !fieldsLocked) {
                             clearFocusForAction()
                             streamIdDraft = CameraViewingEdits.newName("vdo")
                             streamIdDirty = true
@@ -422,7 +422,7 @@ internal fun FormScope.CameraViewingScreen(
                         }
                     }
                     ActionButton(strings.motionText(if (state.authorized) R.string.cameras_retry_connection
-                        else R.string.cameras_authorize), colors, Modifier.width(180.dp),
+                        else R.string.cameras_authorize), colors, Modifier.weight(1f),
                         enabled = canAuthorize) {
                         clearFocusForAction()
                         submit(authorize = true)
@@ -465,16 +465,16 @@ internal fun FormScope.CameraViewingScreen(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp,
                 Alignment.CenterHorizontally)) {
                 ActionButton(strings.motionText(R.string.cameras_copy_link), colors,
-                    Modifier.width(140.dp), enabled = shareable) {
+                    Modifier.weight(1f), enabled = shareable) {
                     state.viewerUrl?.let { copyViewerUrl(context, it, strings) }
                 }
-                ActionButton(strings.motionText(R.string.cameras_qr), colors, Modifier.width(140.dp),
+                ActionButton(strings.motionText(R.string.cameras_qr), colors, Modifier.weight(1f),
                     enabled = shareable) { showQr = true }
                 if (state.authorized || state.revocationPending || state.viewerUrl != null ||
                     state.passwordConfigured || state.tokenConfigured) {
                     ActionButton(strings.motionText(if (state.revocationPending)
                         R.string.cameras_retry_revoke else R.string.cameras_revoke), colors,
-                        Modifier.width(140.dp), destructive = true, enabled = canRevoke) {
+                        Modifier.weight(1f), destructive = true, enabled = canRevoke) {
                     clearFocusForAction()
                     revokeSubmitted = true
                     controller.revoke()

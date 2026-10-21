@@ -77,6 +77,7 @@
     <string name="cameras_error_camera_unavailable">"The camera stream is unavailable. Check ADB and camera readiness."</string>
     <string name="cameras_error_encoder_unavailable">"Hardware video encoding is unavailable."</string>
     <string name="cameras_error_connection">"Could not establish the viewing connection. Check authorization and network access."</string>
+    <string name="cameras_error_helper">"The internal viewing or camera service is unavailable. This is not an account authorization error."</string>
     <string name="cameras_error_secret">"Secure credentials could not be read or saved. Authorize this device again."</string>
     <string name="motion_notice">"Operation depends on the available vehicle components. Required capabilities are checked at runtime; failures and their causes are logged."</string>
     <string name="motion_enable">"Show a warning when motion is detected"</string>

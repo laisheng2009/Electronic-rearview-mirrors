@@ -217,7 +217,10 @@ public final class TurnSignalShellMain {
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
                 throws RemoteException {
+            CameraRuntimeHost viewingHost = cameraRuntime;
             if (!TurnSignalShellProtocol.isCallerAllowed(Binder.getCallingUid(), appUid)
+                    && !(code == TurnSignalShellProtocol.TX_PING && viewingHost != null
+                    && viewingHost.isRegisteredViewingCaller(Binder.getCallingUid(), Binder.getCallingPid()))
                     && !(Binder.getCallingUid() == 2000 && (code == TurnSignalShellProtocol.TX_CAMERA_RUNTIME
                     || code == TurnSignalShellProtocol.TX_SET_MOTION_TELEMETRY))) {
                 if (reply != null) reply.writeException(new SecurityException("caller uid denied"));

@@ -51,7 +51,7 @@ public final class CameraViewingShellClient implements AutoCloseable {
         }
     }
 
-    /** Resolves or launches only the fixed viewing helper, then registers its fixed camera capabilities. */
+    /** Profile management must remain available without the camera/Motion backend. */
     public void ensureConnected() throws Exception {
         synchronized (lock) {
             if (closed) throw new IllegalStateException("camera viewing client is closed");
@@ -75,9 +75,16 @@ public final class CameraViewingShellClient implements AutoCloseable {
                     throw new IllegalStateException("viewing helper readiness/protocol mismatch");
                 adopt(candidate, identity.pid);
             }
-            RemoteCameraPreparation.registerViewingHelper(context, candidate, identity.pid);
-            registerCameraViewingHelper(candidate, identity.pid);
         }
+    }
+
+    public void prepareCameraBackend() throws Exception {
+        IBinder candidate = requireHelper();
+        int pid = helperPid;
+        // Do not hold the client lock across worker bootstrap: auth/revoke are independent.
+        RemoteCameraPreparation.registerViewingHelper(context, candidate, pid);
+        registerCameraViewingHelper(candidate, pid);
+        if (candidate != requireHelper()) throw new IllegalStateException("viewing helper replaced");
     }
 
     /** Compatibility alias used by callers that describe bootstrap as a connection. */

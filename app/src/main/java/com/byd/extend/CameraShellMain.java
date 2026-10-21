@@ -174,6 +174,7 @@ public final class CameraShellMain {
                     context, CameraDisplayTarget.TABLET, this::emit);
             reverseOverlays[CameraDisplayTarget.CLUSTER] = new ShellReverseCameraOverlay(
                     context, CameraDisplayTarget.CLUSTER, this::emit);
+            for (ShellReverseCameraOverlay output : reverseOverlays) output.setModeRequest(this::setReverseSideMode);
             displayManager = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
             if (displayManager != null) displayManager.registerDisplayListener(displayListener, handler);
         }
@@ -451,7 +452,7 @@ public final class CameraShellMain {
                     }
                     runOnMain(() -> {
                         for (ShellReverseCameraOverlay output : reverseOverlays) {
-                            if (output.isOpen()) output.toggleSideMode(requestId);
+                            if (output.isOpen() && output.toggleSideMode(requestId)) break;
                         }
                         return null;
                     });
@@ -663,27 +664,13 @@ public final class CameraShellMain {
             }
         }
 
-        private void synchronizeReverseSideMode(String kind, Object[] fields) {
-            if (!"reverse_overlay_selector".equals(kind)) return;
-            Map<String, Object> values = eventFieldMap(fields);
-            if (values.containsKey("automatic")) return;
-            Object targetValue = values.get("display_target");
-            Object requestValue = values.get("request_id");
-            Object modeValue = values.get("mode");
-            if (!(targetValue instanceof Number) || !(requestValue instanceof Number)
-                    || !(modeValue instanceof String)) return;
-            int origin = ((Number) targetValue).intValue();
-            int requestId = ((Number) requestValue).intValue();
-            String mode = (String) modeValue;
-            int nextMode = "front".equals(mode) ? ReverseSideSelectorView.MODE_FRONT
-                    : "rear".equals(mode) ? ReverseSideSelectorView.MODE_REAR : -1;
-            if (!CameraDisplayTarget.isValid(origin) || nextMode < 0) return;
-            handler.post(() -> {
-                int other = origin == CameraDisplayTarget.TABLET
-                        ? CameraDisplayTarget.CLUSTER : CameraDisplayTarget.TABLET;
-                ShellReverseCameraOverlay output = reverseOverlay(other);
-                if (output.isOpenForRequest(requestId)) output.setSideMode(requestId, nextMode);
-            });
+        private void setReverseSideMode(int requestId, int mode) {
+            java.util.ArrayList<ReverseCameraCompositionView> roots = new java.util.ArrayList<>();
+            for (ShellReverseCameraOverlay output : reverseOverlays) {
+                ReverseCameraCompositionView root = output.rootForMode(requestId, mode);
+                if (root != null) roots.add(root);
+            }
+            ReverseCameraCompositionView.setSideModes(mode, roots.toArray(new ReverseCameraCompositionView[0]));
         }
 
         private boolean deferReverseSurfaceReady(String kind, Object[] fields) {
@@ -830,7 +817,6 @@ public final class CameraShellMain {
         }
 
         private void emit(String kind, Object... fields) {
-            synchronizeReverseSideMode(kind, fields);
             if (deferReverseSurfaceReady(kind, fields)) return;
             boolean releaseDeferredTablet = isClusterUnavailableForDeferredReverse(kind, fields);
             if (releaseDeferredTablet) {

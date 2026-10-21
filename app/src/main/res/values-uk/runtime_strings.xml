@@ -2,7 +2,7 @@
 <resources>
     <string name="weather_background_title">Оновлення погоди у фоні</string>
     <string name="weather_background_message">Щоб отримувати координати без відкриття BYD Extend, у дозволах застосунку для геолокації виберіть «Дозволяти завжди». Можна відмовитися; налаштування погоди збережуться.</string>
-    <string name="weather_background_allow">Дозволити геолокацію</string>
+    <string name="weather_background_allow">Дозволити</string>
     <string name="weather_background_limited">Дозвіл «Завжди» не надано. Фоновий доступ до геолокації обмежений.</string>
     <string name="runtime_weather_location_permission_needed">Потрібен дозвіл геолокації. Налаштування погоди збережено.</string>
     <string name="runtime_weather_location_denied">Android відхилив доступ до координат. Перевірте дозволи геолокації.</string>

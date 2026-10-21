@@ -22,6 +22,7 @@ final class CameraGpuOutput extends Binder {
     private static final int STOCK_CANVAS = BIND + 5;
     private static final int FRAME = BIND + 6;
     private static final int GEOMETRY = BIND + 7;
+    private static final int PRESENTATION = BIND + 8;
     static final float[] IDENTITY = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     private static final Map<Surface, Endpoint> OUTPUTS = new WeakHashMap<>();
     private static final class Endpoint {
@@ -41,7 +42,14 @@ final class CameraGpuOutput extends Binder {
     private Runnable stopped;
     private boolean released;
     private java.util.function.BiConsumer<Integer, Integer> stockCanvas;
-    private java.util.function.LongConsumer frameListener;
+    interface FrameListener { void frame(long timestamp, long presentation, long mapping, long geometry); }
+    private FrameListener frameListener;
+    private Surface alternateSurface;
+    private boolean alternateSent;
+    private boolean staging;
+    private int outputSlot;
+    private long presentationRevision;
+    private long presentationGeometry;
     private final DeathRecipient death = this::disconnected;
 
     CameraGpuOutput(int width, int height, CameraDewarpConfig config, long token,
@@ -102,7 +110,45 @@ final class CameraGpuOutput extends Binder {
         stockCanvas = handler;
     }
 
-    void setFrameListener(java.util.function.LongConsumer listener) { frameListener = listener; }
+    void setFrameListener(FrameListener listener) { frameListener = listener; }
+
+    synchronized long beginPresentation(Surface alternate, int slot) {
+        if (released || slot < 0 || slot > 1 || alternate == null || !alternate.isValid())
+            throw new IllegalStateException("GPU presentation unavailable");
+        alternateSurface = alternate;
+        outputSlot = slot;
+        staging = true;
+        return ++presentationRevision;
+    }
+
+    synchronized void submitPresentation() {
+        if (!staging || released) return;
+        staging = false;
+        presentationGeometry = geometryRevision;
+        if (control == null) return;
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(DESCRIPTOR);
+            writePresentation(data);
+            if (!control.transact(PRESENTATION, data, null, FLAG_ONEWAY)) disconnected();
+        } catch (RemoteException error) { disconnected(); }
+        finally { data.recycle(); }
+    }
+
+    synchronized boolean acceptsFrame(long presentation, long mapping, long geometryVersion) {
+        return !released && !staging && presentation == presentationRevision
+                && mapping == request.token && geometryVersion >= presentationGeometry;
+    }
+
+    private void writePresentation(Parcel data) {
+        data.writeLong(presentationRevision);
+        data.writeInt(outputSlot);
+        data.writeTypedObject(alternateSent ? null : alternateSurface, 0);
+        if (alternateSurface != null) alternateSent = true;
+        writeMapping(data, request);
+        data.writeLong(geometryRevision);
+        data.writeFloatArray(geometry);
+    }
 
     static void configureStockCanvas(Surface surface, int width, int height) throws RemoteException {
         Endpoint endpoint;
@@ -122,7 +168,7 @@ final class CameraGpuOutput extends Binder {
     synchronized void update(CameraDewarpConfig config, long token) {
         if (released || token <= request.token) return;
         request = new CameraDewarpRenderer.MappingRequest(config, token);
-        if (control == null) return;
+        if (control == null || staging) return;
         Parcel data = Parcel.obtain();
         try {
             data.writeInterfaceToken(DESCRIPTOR);
@@ -137,7 +183,7 @@ final class CameraGpuOutput extends Binder {
         if (released || java.util.Arrays.equals(geometry, value)) return;
         geometry = value.clone();
         geometryRevision++;
-        if (control == null) return;
+        if (control == null || staging) return;
         Parcel data = Parcel.obtain();
         try {
             data.writeInterfaceToken(DESCRIPTOR);
@@ -215,6 +261,7 @@ final class CameraGpuOutput extends Binder {
             writeMapping(reply, request);
             reply.writeLong(geometryRevision);
             reply.writeFloatArray(geometry);
+            writePresentation(reply);
             return true;
         }
         IBinder sender = data.readStrongBinder();
@@ -229,7 +276,9 @@ final class CameraGpuOutput extends Binder {
         }
         if (code == FRAME) {
             long timestamp = data.readLong();
-            if (!released && frameListener != null && timestamp > 0) frameListener.accept(timestamp);
+            long presentation = data.readLong(), mapping = data.readLong(), geometryVersion = data.readLong();
+            if (!released && frameListener != null && timestamp > 0)
+                frameListener.frame(timestamp, presentation, mapping, geometryVersion);
             return true;
         }
         if (code == APPLIED) {
@@ -274,6 +323,10 @@ final class CameraGpuOutput extends Binder {
         volatile CameraDewarpRenderer.MappingRequest request;
         volatile float[] geometry = IDENTITY;
         private long geometryRevision = -1;
+        private long presentationRevision = -1;
+        private int outputSlot;
+        private Surface alternateSurface;
+        private FrameConfiguration cachedFrame;
         private boolean closed;
         private final DeathRecipient ownerDeath;
 
@@ -300,6 +353,7 @@ final class CameraGpuOutput extends Binder {
                 }
                 accept(readMapping(reply));
                 acceptGeometry(reply);
+                acceptPresentation(reply);
             } catch (RemoteException | RuntimeException error) {
                 try { close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
                 throw error;
@@ -307,7 +361,10 @@ final class CameraGpuOutput extends Binder {
         }
 
         private synchronized void accept(CameraDewarpRenderer.MappingRequest next) {
-            if (!closed && (request == null || next.token > request.token)) request = next;
+            if (!closed && (request == null || next.token > request.token)) {
+                request = next;
+                cachedFrame = null;
+            }
         }
 
         private synchronized void acceptGeometry(Parcel parcel) {
@@ -319,7 +376,43 @@ final class CameraGpuOutput extends Binder {
             if (!closed && revision > geometryRevision) {
                 geometry = next;
                 geometryRevision = revision;
+                cachedFrame = null;
             }
+        }
+
+        private synchronized void acceptPresentation(Parcel parcel) {
+            long revision = parcel.readLong();
+            int slot = parcel.readInt();
+            Surface alternate = parcel.readTypedObject(Surface.CREATOR);
+            try {
+                if (revision < 0 || slot < 0 || slot > 1)
+                    throw new IllegalArgumentException("invalid GPU presentation");
+                CameraDewarpRenderer.MappingRequest next = readMapping(parcel);
+                long geometryVersion = parcel.readLong();
+                float[] matrix = parcel.createFloatArray();
+                validateGeometry(matrix);
+                if (geometryVersion < 0 || (slot == 1 && alternateSurface == null && alternate == null))
+                    throw new IllegalArgumentException("incomplete GPU presentation");
+                if (closed || revision < presentationRevision) return;
+                if (alternateSurface == null && alternate != null) {
+                    if (!alternate.isValid()) throw new IllegalArgumentException("invalid alternate surface");
+                    alternateSurface = alternate; alternate = null;
+                }
+                presentationRevision = revision;
+                outputSlot = slot;
+                cachedFrame = null;
+                accept(next);
+                if (geometryVersion >= geometryRevision) {
+                    geometryRevision = geometryVersion;
+                    geometry = matrix;
+                }
+            } finally { if (alternate != null) alternate.release(); }
+        }
+
+        synchronized FrameConfiguration frameConfiguration() {
+            if (cachedFrame == null) cachedFrame = new FrameConfiguration(request, geometry, geometryRevision,
+                    presentationRevision, outputSlot, alternateSurface);
+            return cachedFrame;
         }
 
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
@@ -330,6 +423,7 @@ final class CameraGpuOutput extends Binder {
                 acceptGeometry(data);
                 return true;
             }
+            if (code == PRESENTATION) { acceptPresentation(data); return true; }
             if (code == RELEASE) { releaseTarget.run(); return true; }
             return false;
         }
@@ -349,20 +443,27 @@ final class CameraGpuOutput extends Binder {
             } finally { data.recycle(); }
         }
 
-        void frame(long timestamp) throws RemoteException {
+        void frame(long timestamp, FrameConfiguration frame) throws RemoteException {
             if (!frameEvents) return;
             Parcel data = Parcel.obtain();
             try {
                 data.writeInterfaceToken(DESCRIPTOR);
                 data.writeStrongBinder(this);
                 data.writeLong(timestamp);
+                data.writeLong(frame.presentation);
+                data.writeLong(frame.mapping.token);
+                data.writeLong(frame.geometryRevision);
                 if (!endpoint.transact(FRAME, data, null, FLAG_ONEWAY))
                     throw new IllegalStateException("GPU frame acknowledgement rejected");
             } finally { data.recycle(); }
         }
 
         void close() {
-            synchronized (this) { if (closed) return; closed = true; }
+            synchronized (this) {
+                if (closed) return;
+                closed = true;
+                if (alternateSurface != null) { alternateSurface.release(); alternateSurface = null; }
+            }
             endpoint.unlinkToDeath(ownerDeath, 0);
             Parcel data = Parcel.obtain(), reply = Parcel.obtain();
             try {
@@ -372,6 +473,19 @@ final class CameraGpuOutput extends Binder {
             } catch (RemoteException ignored) {
                 // A dead owner has no remaining TextureView to release.
             } finally { data.recycle(); reply.recycle(); }
+        }
+    }
+
+    static final class FrameConfiguration {
+        final CameraDewarpRenderer.MappingRequest mapping;
+        final float[] geometry;
+        final long geometryRevision, presentation;
+        final int slot;
+        final Surface alternate;
+        FrameConfiguration(CameraDewarpRenderer.MappingRequest mapping, float[] geometry,
+                long geometryRevision, long presentation, int slot, Surface alternate) {
+            this.mapping = mapping; this.geometry = geometry; this.geometryRevision = geometryRevision;
+            this.presentation = presentation; this.slot = slot; this.alternate = alternate;
         }
     }
 }

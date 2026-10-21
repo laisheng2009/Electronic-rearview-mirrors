@@ -27,6 +27,7 @@ final class ShellReverseCameraOverlay implements ReverseCameraCompositionView.Ca
     private WindowlessOverlayHost frontControl;
     private WindowlessOverlayHost rearControl;
     private ReverseCameraCompositionView root;
+    private BiConsumer<Integer, Integer> modeRequest;
     private float imageAlpha = 1.0f;
     private int requestId;
     private int activeDisplayId = -1;
@@ -286,13 +287,21 @@ final class ShellReverseCameraOverlay implements ReverseCameraCompositionView.Ca
     }
 
     /** Handles one already-gated steering-button press without reopening or replacing the shell. */
-    void toggleSideMode(int expectedRequestId) {
+    void setModeRequest(BiConsumer<Integer, Integer> request) { modeRequest = request; }
+
+    ReverseCameraCompositionView rootForMode(int expectedRequestId, int mode) {
+        return isOpenForRequest(expectedRequestId)
+                && (mode != ReverseSideSelectorView.MODE_FRONT || frontIntegrationAvailable) ? root : null;
+    }
+
+    boolean toggleSideMode(int expectedRequestId) {
         requireRequest(expectedRequestId);
         if (!active || !visible || closing
-                || !widgetVisible || !widgetAvailable || !frontIntegrationAvailable) return;
+                || !widgetVisible || !widgetAvailable || !frontIntegrationAvailable) return false;
         int next = root.sideMode() == ReverseSideSelectorView.MODE_FRONT
                 ? ReverseSideSelectorView.MODE_REAR : ReverseSideSelectorView.MODE_FRONT;
         scheduleSelectorAction(next);
+        return true;
     }
 
     /** Applies an automatic gear-selected mode without requiring the selector widget to exist. */
@@ -315,7 +324,8 @@ final class ShellReverseCameraOverlay implements ReverseCameraCompositionView.Ca
                     "automatic", true, "state", "already_selected");
             return;
         }
-        root.setSideMode(mode);
+        if (modeRequest == null) root.setSideMode(mode);
+        else modeRequest.accept(requestId, mode);
         emit("reverse_overlay_selector", "request_id", requestId,
                 "mode", mode == ReverseSideSelectorView.MODE_FRONT ? "front" : "rear",
                 "automatic", true, "state", "changed");
@@ -681,7 +691,8 @@ final class ShellReverseCameraOverlay implements ReverseCameraCompositionView.Ca
         if (currentRoot == null || !active || closing) return;
         // Dispatch the actual selector change immediately.  Only the visual press state is held
         // for the BYD-HUD 90 ms feedback window; cancellation/hide still clears it below.
-        currentRoot.setSideMode(mode);
+        if (modeRequest == null) currentRoot.setSideMode(mode);
+        else modeRequest.accept(requestId, mode);
         emit("reverse_overlay_selector", "request_id", requestId,
                 "display_target", displayTarget,
                 "mode", mode == ReverseSideSelectorView.MODE_FRONT ? "front" : "rear");

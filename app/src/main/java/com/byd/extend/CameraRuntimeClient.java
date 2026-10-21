@@ -146,6 +146,8 @@ final class CameraRuntimeClient {
                 command(CameraRuntimeHost.VISIBILITY, visible, "", null);
                 if (preview) command(CameraRuntimeHost.PREVIEW, true, "", null);
                 handler.post(this::platformAttached);
+                // A new host needs the viewing capability registered again, without a polling loop.
+                com.byd.extend.remote.CameraViewingController.get(context).workerReconfigured();
                 return camera != null && camera.isBinderAlive();
             } finally { data.recycle(); reply.recycle(); }
         } catch (Exception error) {

@@ -48,9 +48,9 @@ final class CameraRuntimeHost {
     private IBinder.DeathRecipient motionDeath;
     private IBinder viewerOwner;
     private IBinder.DeathRecipient viewerDeath;
-    private IBinder viewingHelper;
+    private volatile IBinder viewingHelper;
     private IBinder.DeathRecipient viewingHelperDeath;
-    private int viewingHelperPid;
+    private volatile int viewingHelperPid;
     private final String viewingHelperApkIdentity;
     private final String motionSourceEpoch = java.util.UUID.randomUUID().toString();
     private final MotionWakeOwnership motionWake = new MotionWakeOwnership();
@@ -273,6 +273,12 @@ final class CameraRuntimeHost {
         }
     }
 
+    boolean isRegisteredViewingCaller(int uid, int pid) {
+        IBinder helper = viewingHelper;
+        return uid == 2000 && pid > 0 && pid == viewingHelperPid
+                && helper != null && helper.isBinderAlive();
+    }
+
     private int transactViewing(int operation, Parcel data, Parcel reply) throws Exception {
         if (operation == VIEW_REGISTER_HELPER) {
             if (Binder.getCallingUid() != appUid)
@@ -299,8 +305,8 @@ final class CameraRuntimeHost {
                     }
                 });
                 helperProcess.linkToDeath(death, 0);
-                viewingHelper = helperProcess;
                 viewingHelperPid = pid;
+                viewingHelper = helperProcess;
                 viewingHelperDeath = death;
                 return null;
             });
@@ -308,8 +314,7 @@ final class CameraRuntimeHost {
             reply.writeInt(1);
             return operation;
         }
-        if (Binder.getCallingUid() != 2000 || Binder.getCallingPid() != viewingHelperPid
-                || viewingHelper == null || !viewingHelper.isBinderAlive())
+        if (!isRegisteredViewingCaller(Binder.getCallingUid(), Binder.getCallingPid()))
             throw new SecurityException("unregistered viewing helper caller");
         IBinder owner = data.readStrongBinder();
         String session = data.readString();

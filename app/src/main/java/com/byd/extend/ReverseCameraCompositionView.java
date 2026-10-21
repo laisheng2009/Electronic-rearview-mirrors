@@ -90,6 +90,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     private boolean widgetVisible;
     private boolean widgetAvailable = true;
     private int sideMode = ReverseSideSelectorView.MODE_REAR;
+    private Handover handover;
     private int cornerRadiusDp = DEFAULT_CORNER_RADIUS_DP;
     private final FrameBarrier frameBarrier = new FrameBarrier();
     private int paneBufferViewportWidth;
@@ -149,6 +150,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     void setCallback(Callback value) {
+        if (value == null && handover != null) handover.abandon(true);
         callback = value;
     }
 
@@ -480,18 +482,124 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     void setSideMode(int mode) {
+        setSideModes(mode, new ReverseCameraCompositionView[]{this});
+    }
+
+    static void setSideModes(int mode, ReverseCameraCompositionView[] roots) {
         if (mode != ReverseSideSelectorView.MODE_REAR
                 && mode != ReverseSideSelectorView.MODE_FRONT) {
             throw new IllegalArgumentException("invalid reverse side mode");
         }
+        boolean changed = false;
+        boolean displayed = false;
+        boolean direct = android.os.Build.VERSION.SDK_INT >= 29;
+        for (ReverseCameraCompositionView root : roots) {
+            changed |= root.sideMode() != mode;
+            direct &= root.fusedOutput;
+            for (PaneView pane : root.panes) displayed |= pane.frameFresh;
+            displayed |= root.centralFrontPane != null && root.centralFrontPane.frameFresh
+                    || root.handover != null && root.handover.staged;
+        }
+        if (!changed) return;
+        for (ReverseCameraCompositionView root : roots)
+            if (root.handover != null) root.handover.abandon(false);
+        if (displayed && direct) {
+            Handover next = new Handover(roots, mode);
+            for (ReverseCameraCompositionView root : roots) {
+                root.handover = next;
+                root.sideSelector.setMode(mode);
+            }
+            next.stage();
+        } else {
+            for (ReverseCameraCompositionView root : roots) root.applySideMode(mode);
+        }
+    }
+
+    private void applySideMode(int mode) {
         sideMode = mode;
         if (sideSelector.mode() != mode) sideSelector.setMode(mode);
         applyActiveDewarpConfigs();
         applyModel();
     }
 
+    /** One commit covers all changed panes, including roots on different displays. */
+    private static final class Handover {
+        final ReverseCameraCompositionView[] roots;
+        final java.util.ArrayList<BlindSpotCameraView> outputs = new java.util.ArrayList<>();
+        final java.util.ArrayList<PaneView> required = new java.util.ArrayList<>();
+        final int mode;
+        boolean active = true;
+        boolean staged;
+        Handover(ReverseCameraCompositionView[] roots, int mode) {
+            this.roots = roots;
+            this.mode = mode;
+            for (ReverseCameraCompositionView root : roots) {
+                boolean front = mode == ReverseSideSelectorView.MODE_FRONT
+                        && root.centralFrontIntegrated && root.centralFrontSourceEnabled
+                        && root.centralFrontPane != null;
+                for (PaneView pane : root.panes) {
+                    if (!isPaneEligibleOnDisplay(root.model, pane.cameraIndex,
+                            root.displayTarget, root.visibilityMask)) continue;
+                    outputs.add(pane.texture);
+                    if (pane.cameraIndex != ReverseCameraLayout.REAR_CAMERA_INDEX || !front)
+                        required.add(pane);
+                }
+                if (root.centralFrontPane != null && isPaneEligibleOnDisplay(root.model,
+                        ReverseCameraLayout.REAR_CAMERA_INDEX, root.displayTarget, root.visibilityMask)) {
+                    outputs.add(root.centralFrontPane.texture);
+                    if (front) required.add(root.centralFrontPane);
+                }
+            }
+        }
+        void stage() {
+            if (!active || staged) return;
+            for (PaneView pane : required) if (!pane.texture.canStageHandover()) return;
+            outputs.removeIf(output -> !output.canStageHandover());
+            staged = true;
+            for (ReverseCameraCompositionView root : roots) {
+                for (PaneView pane : root.panes) pane.stagingLayout = true;
+                if (root.centralFrontPane != null) root.centralFrontPane.stagingLayout = true;
+            }
+            for (BlindSpotCameraView output : outputs) output.beginHandover(this::tryCommit);
+            for (ReverseCameraCompositionView root : roots) root.applySideMode(mode);
+            submit();
+        }
+        void submit() {
+            if (!active || !staged) return;
+            for (BlindSpotCameraView output : outputs) output.submitHandover();
+            tryCommit();
+        }
+        void tryCommit() {
+            if (!active || !staged) return;
+            for (PaneView pane : required) if (!pane.frameFresh || !pane.texture.handoverReady()) return;
+            active = false;
+            for (ReverseCameraCompositionView root : roots) {
+                root.handover = null;
+                for (PaneView pane : root.panes) pane.stagingLayout = false;
+                if (root.centralFrontPane != null) root.centralFrontPane.stagingLayout = false;
+                root.applyModel();
+            }
+            BlindSpotCameraView.commitHandovers(outputs.toArray(new BlindSpotCameraView[0]));
+        }
+        void abandon(boolean reset) {
+            active = false;
+            for (ReverseCameraCompositionView root : roots) if (root.handover == this) {
+                root.handover = null;
+                for (PaneView pane : root.panes) pane.stagingLayout = false;
+                if (root.centralFrontPane != null) root.centralFrontPane.stagingLayout = false;
+                if (reset) {
+                    for (PaneView pane : root.panes) { pane.frameFresh = false; pane.setAlpha(0f); }
+                    if (root.centralFrontPane != null) {
+                        root.centralFrontPane.frameFresh = false; root.centralFrontPane.setAlpha(0f);
+                    }
+                }
+            }
+            if (reset) BlindSpotCameraView.commitHandovers(outputs.toArray(new BlindSpotCameraView[0]));
+        }
+    }
+
     int sideMode() {
-        return sideMode;
+        return handover == null ? sideMode : handover.mode;
     }
 
     void setSelectorPressed(int mode, boolean pressed) {
@@ -970,6 +1078,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
                 if (isOutputSource(sourceIndex)) clearFrames();
                 applyModel();
                 if (isOutputSource(sourceIndex)) notifySurfacesReady();
+                if (handover != null) handover.stage();
             }
 
             @Override
@@ -988,6 +1097,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
                 boolean outputSource = isOutputSource(sourceIndex);
                 if (sourceIndex == 4 && outputSource && centralFrontSourceEnabled
                         && frameBarrier.revealed()) {
+                    if (handover != null) handover.abandon(true);
                     centralFrontSurfaceRecoveryPending = true;
                     resetCentralFrontFreshness();
                     applyModel();
@@ -1036,6 +1146,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
                 }
                 acceptFrame(sourceIndex,
                         previewBase == null ? pane.generation : inputGeneration);
+                if (handover != null) handover.tryCommit();
             }
 
             @Override
@@ -1521,7 +1632,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     private void applyModel(int width, int height) {
         if (applyingOverlayConfiguration) return;
         applyEffectiveVisibility();
-        applyBorders();
+        if (handover == null) applyBorders();
         for (PaneView pane : panes) {
             boolean frontSource = effectiveSourceIsFront(pane.sourceIndex, sideMode,
                     frontLeftIntegrated, frontRightIntegrated);
@@ -1560,7 +1671,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
                             && rearSteeringShiftEnabled);
             ReverseCameraLayout.PixelRect baseRect = ReverseCameraLayout.project(
                     centerFallback.rectFor(pane.cameraIndex, displayTarget), width, height);
-            applyFrameBounds(pane, baseRect);
+            if (handover == null) applyFrameBounds(pane, baseRect);
             pane.setZ(1.0f + model.zOrderFor(pane.cameraIndex, displayTarget));
             pane.applyTransform(sourceCrop, value.rotationDegrees, value.displayMode,
                     value.mirrorHorizontally, baseRect.width, baseRect.height);
@@ -1580,7 +1691,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
             ReverseCameraLayout.PixelRect centerRect = ReverseCameraLayout.project(
                     frontModel.rectFor(ReverseCameraLayout.REAR_CAMERA_INDEX,
                             displayTarget), width, height);
-            applyFrameBounds(centralFrontPane, centerRect);
+            if (handover == null) applyFrameBounds(centralFrontPane, centerRect);
             centralFrontPane.setZ(1.1f + model.zOrderFor(
                     ReverseCameraLayout.REAR_CAMERA_INDEX, displayTarget));
             centralFrontPane.applyTransform(centerSourceCrop, centerValue.rotationDegrees,
@@ -1822,6 +1933,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
     }
 
     private void resetPaneFreshness() {
+        if (handover != null && handover.staged) handover.abandon(true);
         centralFrontDisplayed = false;
         for (PaneView pane : panes) {
             pane.frameFresh = false;
@@ -1911,6 +2023,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
         int generation;
         boolean targetActive;
         boolean frameFresh;
+        boolean stagingLayout;
         boolean discardNextFrame = true;
         ReverseCameraLayout.Rect crop = ReverseCameraLayout.sourceCrop(0, 0, 1, 1);
         int rotationDegrees;
@@ -1981,9 +2094,9 @@ final class ReverseCameraCompositionView extends FrameLayout {
                     : new ReverseCameraLayout.PixelRect(0, 0, width, height);
             FrameLayout.LayoutParams textureParams =
                     (FrameLayout.LayoutParams) texture.getLayoutParams();
-            if (textureParams.width != fitted.width || textureParams.height != fitted.height
+            if (!stagingLayout && (textureParams.width != fitted.width || textureParams.height != fitted.height
                     || textureParams.leftMargin != fitted.left
-                    || textureParams.topMargin != fitted.top) {
+                    || textureParams.topMargin != fitted.top)) {
                 textureParams.width = fitted.width;
                 textureParams.height = fitted.height;
                 textureParams.leftMargin = fitted.left;
@@ -2010,7 +2123,7 @@ final class ReverseCameraCompositionView extends FrameLayout {
                 transformed[i] += fitted.left;
                 transformed[i + 1] += fitted.top;
             }
-            cropMask.setCrop(transformed);
+            if (!stagingLayout) cropMask.setCrop(transformed);
             texture.setRotation(0.0f);
             texture.setScaleX(1.0f);
             texture.setScaleY(1.0f);

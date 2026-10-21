@@ -24,6 +24,7 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
         final SurfaceControl layer;
         final Surface surface;
         final int width, height;
+        Output alternate;
         Output(SurfaceControl layer, Surface surface, int width, int height) {
             this.layer = layer; this.surface = surface; this.width = width; this.height = height;
         }
@@ -31,8 +32,12 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
             try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
                 transaction.setVisibility(layer, false).reparent(layer, null).apply();
             }
+            if (alternate != null) alternate.hide();
         }
-        void release() { surface.release(); layer.release(); }
+        void release() {
+            if (alternate != null) alternate.release();
+            surface.release(); layer.release();
+        }
     }
 
     private final Listener listener;
@@ -43,6 +48,10 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
     private Output current;
     private SurfaceControl viewport;
     private boolean available;
+    private boolean staging;
+    private int displayedSlot;
+    private int stagedSlot;
+    private float retainedAlpha;
     private Method setMatrix;
     private Method setWindowCrop;
     private Method setCornerRadius;
@@ -60,6 +69,46 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
     }
 
     boolean available() { return available; }
+
+    int stageOutput() {
+        if (current == null || viewport == null) throw new IllegalStateException("camera output unavailable");
+        if (current.alternate == null) {
+            SurfaceControl layer = null;
+            Surface surface = null;
+            try {
+                layer = new SurfaceControl.Builder().setName("byd-camera-staged")
+                        .setParent(viewport).setBufferSize(current.width, current.height)
+                        .setFormat(PixelFormat.RGBA_8888).setOpaque(true).build();
+                surface = Surface.class.getConstructor().newInstance();
+                Surface.class.getMethod("copyFrom", SurfaceControl.class).invoke(surface, layer);
+                current.alternate = new Output(layer, surface, current.width, current.height);
+            } catch (ReflectiveOperationException | RuntimeException failure) {
+                if (surface != null) surface.release();
+                if (layer != null) layer.release();
+                throw new IllegalStateException("staged camera layer creation failed", failure);
+            }
+        }
+        if (!staging) retainedAlpha = viewAlpha();
+        staging = true;
+        stagedSlot = 1 - displayedSlot;
+        updateLayer();
+        return stagedSlot;
+    }
+
+    Surface alternateSurface() { return current.alternate.surface; }
+
+    static void commitStages(DirectCameraSurface... views) {
+        try (SurfaceControl.Transaction transaction = new SurfaceControl.Transaction()) {
+            for (DirectCameraSurface view : views) if (view != null) {
+                if (view.staging) {
+                    view.displayedSlot = view.stagedSlot;
+                    view.staging = false;
+                }
+                view.updateLayer(transaction);
+            }
+            transaction.apply();
+        }
+    }
 
     Output createOutput(int width, int height) {
         if (!available || current != null) throw new IllegalStateException("camera layer unavailable");
@@ -96,6 +145,8 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
         Output previous = current;
         current = null;
         viewport = null;
+        staging = false;
+        displayedSlot = 0;
         if (previous != null) previous.hide();
         return previous;
     }
@@ -117,6 +168,25 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
         Output output = current;
         if (output == null || !output.layer.isValid() || viewport == null || !viewport.isValid()
                 || getWidth() == 0 || getHeight() == 0) return;
+        float alpha = staging ? retainedAlpha : viewAlpha();
+        for (View view = this; view != null;) {
+            if (view.getVisibility() != VISIBLE) alpha = 0f;
+            ViewParent parent = view.getParent();
+            view = parent instanceof View ? (View) parent : null;
+        }
+        try {
+            float radius = viewportClip();
+            setWindowCrop.invoke(transaction, viewport, clip);
+            setCornerRadius.invoke(transaction, viewport, radius);
+            updateOutput(transaction, output, displayedSlot == 0 ? alpha : 0f);
+            if (output.alternate != null)
+                updateOutput(transaction, output.alternate, displayedSlot == 1 ? alpha : 0f);
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException("direct camera transform failed", failure);
+        }
+    }
+
+    private float viewAlpha() {
         float alpha = 1f;
         for (View view = this; view != null;) {
             alpha *= view.getAlpha();
@@ -124,19 +194,17 @@ final class DirectCameraSurface extends SurfaceView implements SurfaceHolder.Cal
             ViewParent parent = view.getParent();
             view = parent instanceof View ? (View) parent : null;
         }
-        try {
+        return alpha;
+    }
+
+    private void updateOutput(SurfaceControl.Transaction transaction, Output output, float alpha)
+            throws ReflectiveOperationException {
             // Arbitrary rotation belongs in GLES: app-UID SurfaceFlinger rejects it, and
             // shell-UID rotated child layers cannot be clipped to a rectangular ancestor.
             setMatrix.invoke(transaction, output.layer, (float) getWidth() / output.width,
                     0f, 0f, (float) getHeight() / output.height);
-            float radius = viewportClip();
-            setWindowCrop.invoke(transaction, viewport, clip);
-            setCornerRadius.invoke(transaction, viewport, radius);
             transaction.setVisibility(output.layer, true)
                     .setLayer(output.layer, 1).setAlpha(output.layer, alpha);
-        } catch (ReflectiveOperationException failure) {
-            throw new IllegalStateException("direct camera transform failed", failure);
-        }
     }
 
     /** Native children do not inherit View outlines; mirror the enclosing pane's rounded bounds. */

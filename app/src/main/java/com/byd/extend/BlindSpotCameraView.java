@@ -50,6 +50,9 @@ final class BlindSpotCameraView extends FrameLayout
     private CameraGpuOutput directOutput;
     private float[] directGeometry = CameraGpuOutput.IDENTITY;
     private long directFrameTimestamp;
+    private long handoverPresentation;
+    private boolean handoverReady;
+    private Runnable handoverListener;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Surface cameraSurface;
     private StockAvmOutput stockOutput;
@@ -300,6 +303,28 @@ final class BlindSpotCameraView extends FrameLayout
 
     static void syncDirectVisibility(BlindSpotCameraView first, BlindSpotCameraView second) {
         DirectCameraSurface.syncLayers(first.directView, second == null ? null : second.directView);
+    }
+
+    boolean canStageHandover() { return directOutput != null && directView.available(); }
+
+    void beginHandover(Runnable ready) {
+        int slot = directView.stageOutput();
+        handoverPresentation = directOutput.beginPresentation(directView.alternateSurface(), slot);
+        handoverReady = false;
+        handoverListener = ready;
+    }
+
+    void submitHandover() { if (directOutput != null) directOutput.submitPresentation(); }
+    boolean handoverReady() { return handoverReady && directOutput != null; }
+
+    static void commitHandovers(BlindSpotCameraView[] views) {
+        DirectCameraSurface[] layers = new DirectCameraSurface[views.length];
+        for (int i = 0; i < views.length; i++) {
+            layers[i] = views[i].directView;
+            views[i].handoverListener = null;
+            views[i].handoverPresentation = 0;
+        }
+        DirectCameraSurface.commitStages(layers);
     }
 
     boolean usesDewarpPipeline() {
@@ -582,6 +607,9 @@ final class BlindSpotCameraView extends FrameLayout
 
     private void retireActiveInput() {
         dewarpGeneration++;
+        handoverListener = null;
+        handoverPresentation = 0;
+        handoverReady = false;
         if (directOutput != null) {
             CameraGpuOutput output = directOutput;
             DirectCameraSurface.Output layer = directView.retireOutput();
@@ -630,10 +658,16 @@ final class BlindSpotCameraView extends FrameLayout
                     setAlpha(1f);
                     if (dewarpEventSink != null) dewarpEventSink.accept(event);
                 }));
-        directOutput.setFrameListener(timestamp -> mainHandler.post(() -> {
-            if (inputGeneration.current() != generation || cameraSurface != layer.surface) return;
+        directOutput.setFrameListener((timestamp, presentation, mapping, geometry) -> mainHandler.post(() -> {
+            if (inputGeneration.current() != generation || cameraSurface != layer.surface
+                    || directOutput == null || handoverPresentation != 0
+                    && !directOutput.acceptsFrame(presentation, mapping, geometry)) return;
             directFrameTimestamp = timestamp;
             if (callback != null) callback.onCameraFrameUpdated(this, generation);
+            if (handoverPresentation == presentation && !handoverReady) {
+                handoverReady = true;
+                if (handoverListener != null) handoverListener.run();
+            }
         }));
         directOutput.updateGeometry(directGeometry);
         CameraGpuOutput.register(layer.surface, directOutput);

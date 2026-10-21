@@ -32,6 +32,10 @@ class CameraViewingController private constructor(private val context: Context) 
     private val preferences = context.getSharedPreferences("camera_viewing", Context.MODE_PRIVATE)
     private val secrets by lazy { KeystoreSecretStore(context) }
     private val owner = Executors.newSingleThreadExecutor { Thread(it, "viewing-app-client") }
+    private val backend = Executors.newSingleThreadExecutor { Thread(it, "viewing-backend-setup") }
+    private var backendSetup: CameraViewingShellClient? = null
+    private var backendResetRequested = false
+    private var backendError: String? = null
     private val main = Handler(Looper.getMainLooper())
     private val mutable = MutableStateFlow(CameraViewingState(readConfig()))
     val state: StateFlow<CameraViewingState> = mutable.asStateFlow()
@@ -68,7 +72,7 @@ class CameraViewingController private constructor(private val context: Context) 
                 streamId = current.optString("name"), tailscalePublic = current.optBoolean("public")) else config,
             phase = phase, viewerUrl = current?.nullable("viewerUrl"),
             authorizationUrl = current?.nullable("authorizationUrl"),
-            error = current?.nullable("error")?.let { context.getString(errorResource(it)) },
+            error = (current?.nullable("error") ?: backendError)?.let { context.getString(errorResource(it)) },
             passwordConfigured = secret(method, "password").isNotEmpty(),
             tokenConfigured = secret(method, "token").isNotEmpty(),
             authorizationRequest = current?.optLong("authorizationRequest") ?: 0,
@@ -100,7 +104,10 @@ class CameraViewingController private constructor(private val context: Context) 
         if (enabled != null) MotionRuntime.setRemoteViewingEnabled(context, enabled)
         refresh()
         main.post(onSaved)
-        if (enabled == true) accept(ensureClient().request("configure", JSONObject().put("enabled", true)))
+        if (enabled == true) {
+            accept(ensureClient().request("configure", JSONObject().put("enabled", true)))
+            client?.let { prepareBackend(it) }
+        }
         else if (enabled == false && preferences.getBoolean("helper_provisioned", false))
             accept(ensureClient(false).request("configure", JSONObject().put("enabled", false)))
         if (authorize) {
@@ -120,6 +127,7 @@ class CameraViewingController private constructor(private val context: Context) 
             }
             accept(ensureClient().request(if (wasLocked) "reconnect" else "authorize",
                 JSONObject().put("transport", method).put("profile", payload)))
+            client?.let { prepareBackend(it) }
         }
     }
 
@@ -160,11 +168,39 @@ class CameraViewingController private constructor(private val context: Context) 
             accept(connected.request("provision", JSONObject().put("profiles", profiles)
                 .put("enabled", restoreEnabled)))
             check(preferences.edit().putBoolean("helper_provisioned", true).commit())
+            if (restoreEnabled) prepareBackend(connected)
             return connected
         } catch (failure: Exception) {
             if (client === connected) client = null
             connected.close()
             throw failure
+        }
+    }
+
+    private fun prepareBackend(connected: CameraViewingShellClient, reset: Boolean = false) {
+        if (backendSetup === connected) {
+            backendResetRequested = backendResetRequested || reset
+            return
+        }
+        backendSetup = connected
+        backendResetRequested = false
+        backend.execute {
+            val failure = runCatching {
+                connected.prepareCameraBackend()
+                connected.request("reconfigured", JSONObject().put("restartVideo", reset))
+            }.exceptionOrNull()
+            execute {
+                if (backendSetup === connected) backendSetup = null
+                if (client !== connected) return@execute
+                backendError = if (failure == null) null else "camera_backend_unavailable"
+                if (failure != null) Log.w("CameraViewing",
+                    "stage=backend_setup type=${failure.javaClass.simpleName}")
+                refresh()
+                if (backendResetRequested) {
+                    backendResetRequested = false
+                    prepareBackend(connected, true)
+                }
+            }
         }
     }
 
@@ -191,8 +227,10 @@ class CameraViewingController private constructor(private val context: Context) 
         refresh()
     }
 
-    fun runtimeStarted() = execute { if (CameraChargeSettings.isRemoteViewingEnabled(context)) ensureClient() }
-    fun runtimeStopped() = execute { client?.close(); client = null }
+    fun runtimeStarted() = execute {
+        if (CameraChargeSettings.isRemoteViewingEnabled(context)) prepareBackend(ensureClient())
+    }
+    fun runtimeStopped() = execute { client?.close(); client = null; backendError = null }
     fun explicitShutdown() = explicitShutdown(Runnable {})
     fun explicitShutdown(onComplete: Runnable) = execute {
         try { (client ?: if (preferences.getBoolean("helper_provisioned", false)) ensureClient(false) else null)
@@ -200,8 +238,7 @@ class CameraViewingController private constructor(private val context: Context) 
         finally { client?.close(); client = null; main.post(onComplete) }
     }
     fun workerReconfigured() = execute { client?.let {
-        it.ensureConnected()
-        accept(it.request("reconfigured", JSONObject()))
+        prepareBackend(it, true)
     } }
     fun authorizationOpened(request: Long) = execute {
         client?.let { accept(it.request("authorization_opened", JSONObject().put("transport", selected()).put("request", request))) }
@@ -214,7 +251,7 @@ class CameraViewingController private constructor(private val context: Context) 
             catch (failure: Exception) {
                 Log.w("CameraViewing", "app_operation failed type=${failure.javaClass.simpleName}")
                 mutable.value = state.value.copy(busy = false, error = context.getString(
-                    if (failure is SecurityException) R.string.cameras_error_secret else R.string.cameras_error_connection))
+                    if (failure is SecurityException) R.string.cameras_error_secret else R.string.cameras_error_helper))
             }
         }
     }
@@ -242,6 +279,7 @@ class CameraViewingController private constructor(private val context: Context) 
             "zrok_enable_failed" -> R.string.cameras_error_zrok_enable
             "zrok_share_failed" -> R.string.cameras_error_zrok_share
             "camera_unavailable" -> R.string.cameras_error_camera_unavailable
+            "camera_backend_unavailable", "helper_unavailable" -> R.string.cameras_error_helper
             "encoder_unavailable" -> R.string.cameras_error_encoder_unavailable
             else -> R.string.cameras_error_connection
         }

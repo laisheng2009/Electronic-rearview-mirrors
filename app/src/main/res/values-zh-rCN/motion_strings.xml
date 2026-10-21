@@ -77,6 +77,7 @@
     <string name="cameras_error_camera_unavailable">"摄像头视频流不可用。请检查 ADB 和摄像头是否就绪。"</string>
     <string name="cameras_error_encoder_unavailable">"硬件视频编码不可用。"</string>
     <string name="cameras_error_connection">"无法建立查看连接。请检查授权和网络。"</string>
+    <string name="cameras_error_helper">"内部查看或摄像头服务不可用。这不是账户授权错误。"</string>
     <string name="cameras_error_secret">"无法读取或保存安全凭据。请重新授权此设备。"</string>
     <string name="motion_notice">"功能取决于车辆可用的组件。运行时会检查所需能力，并将错误及其原因写入日志。"</string>
     <string name="motion_enable">"检测到移动时显示警示"</string>

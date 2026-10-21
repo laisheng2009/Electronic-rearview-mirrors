@@ -581,6 +581,9 @@ final class DirectCameraSourceHub
             // Detach is the teardown barrier; do not drain GPU work on the frame path.
             GLES20.glFinish();
             require(EGL14.eglDestroySurface(display, target.eglSurface), "downstream EGL release failed");
+            if (target.alternateEglSurface != EGL14.EGL_NO_SURFACE)
+                require(EGL14.eglDestroySurface(display, target.alternateEglSurface),
+                        "alternate downstream EGL release failed");
             if (target.mapping != null) target.mapping.close();
         }
 
@@ -988,7 +991,19 @@ final class DirectCameraSourceHub
 
         private DrawTiming draw(Target target, long acquiredFrameTimestampNanos) throws Exception {
             long startedNs = SystemClock.elapsedRealtimeNanos();
-            makeCurrent(target.eglSurface);
+            CameraGpuOutput.FrameConfiguration frame = target.mapping == null
+                    ? null : target.mapping.frameConfiguration();
+            EGLSurface output = target.eglSurface;
+            if (frame != null && frame.slot == 1) {
+                if (target.alternateEglSurface == EGL14.EGL_NO_SURFACE) {
+                    target.alternateEglSurface = EGL14.eglCreateWindowSurface(display, config,
+                            frame.alternate, new int[]{EGL14.EGL_NONE}, 0);
+                    require(target.alternateEglSurface != EGL14.EGL_NO_SURFACE,
+                            "alternate downstream EGL surface failed");
+                }
+                output = target.alternateEglSurface;
+            }
+            makeCurrent(output);
             if (target.mapping == null) updateTargetSize(target);
             GLES20.glViewport(0, 0, target.width, target.height);
             GLES20.glUseProgram(program);
@@ -998,12 +1013,12 @@ final class DirectCameraSourceHub
             GLES20.glEnableVertexAttribArray(texCoordLocation);
             CameraDewarpRenderer.MappingRequest rendered = target.mapping == null
                     || target.mapping.lifecycleOnly ? null
-                    : target.mesh.prepare(target.mapping.request, target.mapping.width, target.mapping.height);
+                    : target.mesh.prepare(frame.mapping, target.mapping.width, target.mapping.height);
             boolean corrected = rendered != null && rendered.config.enabled && !target.mesh.rawFallback;
             GLES20.glUniform1i(checkBoundsLocation, corrected ? 1 : 0);
             boolean directGeometry = target.mapping != null && !target.mapping.lifecycleOnly;
             GLES20.glUniformMatrix4fv(outputMatrixLocation, 1, false,
-                    directGeometry ? target.mapping.geometry : CameraGpuOutput.IDENTITY, 0);
+                    directGeometry ? frame.geometry : CameraGpuOutput.IDENTITY, 0);
             // Rotation/Fit can leave uncovered pixels even when fisheye correction is off.
             if (corrected || directGeometry) {
                 GLES20.glClearColor(0, 0, 0, 1);
@@ -1032,11 +1047,11 @@ final class DirectCameraSourceHub
             if (target.timestampFrames || rendered != null) {
                 // Local monotonic time travels with the buffer, independent of the vendor clock.
                 require(EGLExt.eglPresentationTimeANDROID(
-                        display, target.eglSurface, acquiredFrameTimestampNanos),
+                        display, output, acquiredFrameTimestampNanos),
                         "downstream frame timestamp failed");
             }
             long swapStartedNs = SystemClock.elapsedRealtimeNanos();
-            if (!EGL14.eglSwapBuffers(display, target.eglSurface)) {
+            if (!EGL14.eglSwapBuffers(display, output)) {
                 int eglError = EGL14.eglGetError();
                 reportSwapFailure(target, eglError);
                 throw new IllegalStateException("downstream buffer swap failed: source="
@@ -1050,7 +1065,7 @@ final class DirectCameraSourceHub
                         target.mesh.vertices.capacity() / 4, target.mesh.generationNs);
                 target.acknowledgedToken = rendered.token;
             }
-            if (target.mapping != null) target.mapping.frame(acquiredFrameTimestampNanos);
+            if (target.mapping != null) target.mapping.frame(acquiredFrameTimestampNanos, frame);
             if (swapWaitNs >= TimeUnit.MILLISECONDS.toNanos(100)
                     && swapStartedNs - target.lastStallReportNs >= STALL_REPORT_INTERVAL_NS) {
                 target.lastStallReportNs = swapStartedNs;
@@ -1619,6 +1634,7 @@ final class DirectCameraSourceHub
         final Surface surface;
         final int index;
         final EGLSurface eglSurface;
+        EGLSurface alternateEglSurface = EGL14.EGL_NO_SURFACE;
         final int requestId;
         final int producerEpoch;
         long lastStallReportNs;
