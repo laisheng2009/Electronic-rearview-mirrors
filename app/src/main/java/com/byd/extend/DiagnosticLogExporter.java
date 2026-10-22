@@ -45,6 +45,10 @@ final class DiagnosticLogExporter {
             new CollectorSpec(
                     "system/bydextend_motion.log",
                     "tail -c 1048576 " + MotionDetectorProtocol.LOG_PATH + " 2>/dev/null"),
+            new CollectorSpec("system/bydextend_viewing-events.jsonl",
+                    "cat /data/local/tmp/bydextend_viewing-events.jsonl 2>/dev/null"),
+            new CollectorSpec("system/bydextend_viewing-events.jsonl.1",
+                    "cat /data/local/tmp/bydextend_viewing-events.jsonl.1 2>/dev/null"),
             new CollectorSpec(
                     "system/logcat-all.txt",
                     "logcat -b all -v threadtime -d 2>/dev/null", true),

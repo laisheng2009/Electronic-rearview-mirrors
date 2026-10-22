@@ -16,9 +16,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** A viewer owns this encoder. No files, audio, software fallback or network writes on its drain thread. */
 internal class CameraHlsEncoder(
     private val diagnostics: (String, Long, Long) -> Unit,
-    private val failed: (Throwable) -> Unit,
+    private val ready: (CameraHlsEncoder) -> Unit,
+    private val failed: (CameraHlsEncoder, Throwable) -> Unit,
 ) : AutoCloseable {
-    val window = FragmentedVideoWindow()
+    val window = FragmentedVideoWindow { ready(this) }
     private val stopped = AtomicBoolean()
     private var codec: MediaCodec? = null
     private var input: Surface? = null
@@ -109,7 +110,7 @@ internal class CameraHlsEncoder(
                     }
                 }
             }
-        } catch (error: Throwable) { if (!stopped.get()) failed(error) }
+        } catch (error: Throwable) { if (!stopped.get()) failed(this, error) }
         finally {
             runCatching {
                 if (lastPts > fragmentStart) window.nextFragmentDuration((lastPts - fragmentStart) / 1_000_000.0)

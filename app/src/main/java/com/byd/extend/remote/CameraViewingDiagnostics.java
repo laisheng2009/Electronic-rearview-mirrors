@@ -10,6 +10,11 @@ import java.util.regex.Pattern;
 
 /** Preserve the failure chain without putting access credentials into exported logs. */
 public final class CameraViewingDiagnostics {
+    private static volatile android.content.Context appContext;
+
+    public static void initializeApp(android.content.Context context) {
+        appContext = context.getApplicationContext();
+    }
     private static final Pattern URL = Pattern.compile("(?i)\\b(?:https?|wss?)://[^\\s<>\"']+");
     private static final Pattern SECRET = Pattern.compile(
             "(?i)([\"']?(?:password|credential|privateProxyCredential|token|authkey|authorization|key|secret)[\"']?\\s*[:=]\\s*)"
@@ -57,6 +62,11 @@ public final class CameraViewingDiagnostics {
 
     private static void write(String stage, String provider, String text) {
         String prefix = "stage=" + stage + " provider=" + provider + " ";
+        if (android.os.Process.myUid() == 2000) {
+            com.byd.extend.CameraViewingShellMain.logViewingEvent(stage, provider, text);
+        } else {
+            com.byd.extend.CameraHelperService.logViewingEvent(appContext, stage, provider, text);
+        }
         List<String> parts = chunks(text);
         for (int i = 0; i < parts.size(); i++)
             Log.w("CameraViewing", prefix + "part=" + (i + 1) + "/" + parts.size() + " " + parts.get(i));

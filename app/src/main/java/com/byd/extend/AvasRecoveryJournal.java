@@ -25,12 +25,14 @@ final class AvasRecoveryJournal {
 
     static void event(Context context, String kind, Object... fields) {
         if (context == null || kind == null) return;
+        try { event(recoveryDirectory(context), FILE_NAME, kind, fields); }
+        catch (Throwable ignored) { /* Diagnostics cannot block recovery. */ }
+    }
+
+    static void event(File directory, String fileName, String kind, Object... fields) {
         synchronized (AvasRecoveryJournal.class) {
             try {
-                File directory = recoveryDirectory(context);
                 if (directory == null) return;
-                File current = new File(directory, FILE_NAME);
-                rotateIfNeeded(current, new File(directory, PREVIOUS_FILE_NAME));
                 JSONObject event = new JSONObject()
                         .put("kind", kind)
                         .put("source", "avas_recovery")
@@ -47,14 +49,21 @@ final class AvasRecoveryJournal {
                         event.put(String.valueOf(fields[index]), fields[index + 1]);
                     }
                 }
-                byte[] line = (event.toString() + "\n").getBytes(StandardCharsets.UTF_8);
-                try (FileOutputStream output = new FileOutputStream(current, true)) {
-                    output.write(line);
-                    output.getFD().sync();
-                }
+                writeRecord(directory, fileName, event);
             } catch (Throwable ignored) {
                 // Recovery must never depend on diagnostics.
             }
+        }
+    }
+
+    static synchronized void writeRecord(File directory, String fileName, JSONObject event) throws Exception {
+        File current = new File(directory, fileName);
+        String previous = FILE_NAME.equals(fileName) ? PREVIOUS_FILE_NAME : fileName + ".1";
+        rotateIfNeeded(current, new File(directory, previous));
+        byte[] line = (event.toString() + "\n").getBytes(StandardCharsets.UTF_8);
+        try (FileOutputStream output = new FileOutputStream(current, true)) {
+            output.write(line);
+            output.getFD().sync();
         }
     }
 

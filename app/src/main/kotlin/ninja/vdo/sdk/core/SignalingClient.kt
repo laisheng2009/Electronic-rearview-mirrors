@@ -36,7 +36,7 @@ class SignalingClient(
     var onOpen: ((reconnect: Boolean) -> Unit)? = null
     var onClose: ((intentional: Boolean) -> Unit)? = null
     var onReconnecting: ((attempt: Int) -> Unit)? = null
-    var onReconnectFailed: (() -> Unit)? = null
+    var onReconnectFailed: ((Throwable?) -> Unit)? = null
     var onMessage: ((JSONObject) -> Unit)? = null
 
     private val lock = Any()
@@ -47,6 +47,7 @@ class SignalingClient(
     @Volatile private var intentional = false
     private var everConnected = false
     private var attempts = 0
+    @Volatile private var reconnectFailure: Throwable? = null
     private var reconnectTask: ScheduledFuture<*>? = null
     private val generation = AtomicInteger()
 
@@ -57,20 +58,20 @@ class SignalingClient(
         if (connected) return
         synchronized(lock) { reconnectTask?.cancel(false); reconnectTask = null }
         val err = open(timeoutMs, reconnect = false)
-        if (err != null) throw java.io.IOException(err)
+        if (err != null) throw err
     }
 
-    /** Returns null on success, else an error message. */
-    private fun open(timeoutMs: Long, reconnect: Boolean, expectedGeneration: Int? = null): String? {
+    /** Returns null on success, otherwise preserves the original failure. */
+    private fun open(timeoutMs: Long, reconnect: Boolean, expectedGeneration: Int? = null): Throwable? {
         val latch = CountDownLatch(1)
         val gen = synchronized(lock) {
             if (intentional || (expectedGeneration != null && expectedGeneration != generation.get()))
-                return "connection cancelled"
-            if (pendingOpen != null) return "connection already in progress"
+                return java.io.IOException("connection cancelled")
+            if (pendingOpen != null) return java.io.IOException("connection already in progress")
             pendingOpen = latch
             generation.incrementAndGet()
         }
-        var error: String? = null
+        var error: Throwable? = null
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 synchronized(lock) {
@@ -79,6 +80,7 @@ class SignalingClient(
                     connected = true
                     everConnected = true
                     attempts = 0
+                    reconnectFailure = null
                 }
                 latch.countDown()
                 log?.invoke("signaling connected")
@@ -95,7 +97,7 @@ class SignalingClient(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 com.byd.extend.remote.CameraViewingDiagnostics.failure(
                     "signaling_websocket_http_${response?.code ?: 0}", "vdo", t)
-                error = t.message ?: t.toString()
+                error = t
                 log?.invoke("signaling error; see redacted diagnostic")
                 handleClosed(gen)
                 latch.countDown()
@@ -135,9 +137,9 @@ class SignalingClient(
         // Hand off retry ownership atomically with checking the connection result.
         return synchronized(lock) {
             if (pendingOpen === latch) pendingOpen = null
-            if (!opened) "connect timeout"
+            if (!opened) java.net.SocketTimeoutException("signaling connect timeout")
             else if (gen == generation.get() && connected) null
-            else error ?: "connection failed"
+            else error ?: java.io.IOException("connection failed")
         }
     }
 
@@ -165,7 +167,7 @@ class SignalingClient(
             if (intentional || connected) return
             gen = generation.get()
             if (attempts >= maxReconnectAttempts) {
-                onReconnectFailed?.invoke()
+                onReconnectFailed?.invoke(reconnectFailure)
                 return
             }
             delay = minOf(reconnectDelayMs shl attempts, 30_000L)
@@ -179,6 +181,7 @@ class SignalingClient(
                     onReconnecting?.invoke(attempt)
                     val err = open(15_000, reconnect = true, expectedGeneration = gen)
                     if (err != null) {
+                        reconnectFailure = err
                         log?.invoke("reconnect attempt $attempt failed; see redacted diagnostic")
                         scheduleReconnect()
                     }

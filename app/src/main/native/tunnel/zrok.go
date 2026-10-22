@@ -5,20 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/go-openapi/runtime"
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
+	"github.com/openziti/sdk-golang/ziti"
 	"github.com/openziti/sdk-golang/ziti/edge"
 	"github.com/openziti/zrok/v2/environment/env_core"
 	"github.com/openziti/zrok/v2/rest_client_zrok"
+	"github.com/openziti/zrok/v2/rest_client_zrok/metadata"
+	restShare "github.com/openziti/zrok/v2/rest_client_zrok/share"
 	"github.com/openziti/zrok/v2/sdk/golang/sdk"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -31,6 +33,9 @@ const (
 )
 
 type zrokProvider struct {
+	instanceID      string
+	serving         *servingRun
+	zitiContext     ziti.Context
 	runtimeDir      string
 	listener        edge.Listener
 	httpServer      *http.Server
@@ -128,6 +133,9 @@ func zrokOperationFailure(ctx context.Context, code, stage string, err error, ro
 }
 
 func zrokFailure(code, stage string, err error, root *memoryRoot, secrets ...string) tunnelResult {
+	if errors.Is(err, errZrokEnvironmentMissing) {
+		code = "zrok_environment_missing"
+	}
 	if root != nil && root.Environment() != nil {
 		secrets = append(secrets, root.Environment().AccountToken)
 	}
@@ -167,7 +175,6 @@ func (p *zrokProvider) Authorize(name, credential string) tunnelResult {
 	if err != nil {
 		return zrokFailure("secure_store_error", "authorize.load_environment", err, nil, credential)
 	}
-	defer root.CloseMemfds()
 	root.operationContext = ctx
 	if credential == "" {
 		if root.IsEnabled() {
@@ -218,6 +225,11 @@ func (p *zrokProvider) Authorize(name, credential string) tunnelResult {
 }
 
 func (p *zrokProvider) Status(name string) tunnelResult {
+	if p.serving != nil {
+		if failed := p.serving.failure.Load(); failed != nil {
+			return *failed
+		}
+	}
 	ctx, finish := p.beginOperation()
 	defer finish()
 	if ctx.Err() != nil {
@@ -233,7 +245,6 @@ func (p *zrokProvider) Status(name string) tunnelResult {
 	if err != nil {
 		return zrokFailure("secure_store_error", "status.load_environment", err, nil)
 	}
-	defer root.CloseMemfds()
 	root.operationContext = ctx
 	if !root.IsEnabled() {
 		return failure("not_authorized")
@@ -248,6 +259,11 @@ func (p *zrokProvider) Status(name string) tunnelResult {
 }
 
 func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) (result tunnelResult) {
+	if p.serving != nil {
+		if failed := p.serving.failure.Load(); failed != nil {
+			return *failed
+		}
+	}
 	ctx, finish := p.beginOperation()
 	defer finish()
 	if ctx.Err() != nil {
@@ -272,7 +288,6 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 	if err != nil {
 		return zrokFailure("secure_store_error", "start.load_environment", err, nil)
 	}
-	defer root.CloseMemfds()
 	root.operationContext = ctx
 	if !root.IsEnabled() {
 		return failure("not_authorized")
@@ -282,7 +297,7 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 		return zrokFailure("secure_store_error", "start.load_previous_share", loadErr, root)
 	}
 	if staleShare != nil {
-		if err := sdk.DeleteShare(root, &sdk.Share{Token: staleShare.Token}); err != nil {
+		if err := deleteZrokShare(root, &sdk.Share{Token: staleShare.Token}); err != nil {
 			return zrokOperationFailure(ctx, "provider_unavailable", "start.delete_previous_share", err, root, staleShare.Token)
 		}
 		if err := deleteSecret(zrokShareKey); err != nil {
@@ -319,8 +334,8 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 		return result
 	}
 	if address == "" {
-		result := zrokFailureReason("zrok_share_failed", "start.create_share_response", "response contained no HTTPS public endpoint", root, share.Token)
-		if err := withZrokCleanupContext(root, func() error { return sdk.DeleteShare(root, share) }); err != nil {
+		result := zrokFailureReason("zrok_endpoint_failed", "start.create_share_response", "response contained no HTTPS public endpoint", root, share.Token)
+		if err := withZrokCleanupContext(root, func() error { return deleteZrokShare(root, share) }); err != nil {
 			result = zrokSecondary(result, "start.delete_share_without_endpoint", err, root, share.Token)
 			if persistErr := persistZrokShare(&storedZrokShare{Token: share.Token}); persistErr != nil {
 				result = zrokSecondary(result, "start.persist_share_cleanup_reference", persistErr, root, share.Token)
@@ -332,7 +347,7 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 	p.share = &storedZrokShare{Token: share.Token, Address: address}
 	if err := persistZrokShare(p.share); err != nil {
 		result := zrokFailure("secure_store_error", "start.persist_share", err, root, share.Token)
-		if cleanupErr := withZrokCleanupContext(root, func() error { return sdk.DeleteShare(root, share) }); cleanupErr != nil {
+		if cleanupErr := withZrokCleanupContext(root, func() error { return deleteZrokShare(root, share) }); cleanupErr != nil {
 			result = zrokSecondary(result, "start.delete_share_after_persist_failure", cleanupErr, root, share.Token)
 			if persistErr := persistZrokShare(p.share); persistErr != nil {
 				result = zrokSecondary(result, "start.persist_share_cleanup_reference", persistErr, root, share.Token)
@@ -342,10 +357,17 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 		}
 		return result
 	}
-	listener, err := sdk.NewListener(share.Token, root)
+	listener, zctx, err := openZrokListener(share.Token)
+	if zctx != nil {
+		defer func() {
+			if p.zitiContext != zctx {
+				zctx.Close()
+			}
+		}()
+	}
 	if err != nil {
-		result := zrokOperationFailure(ctx, "provider_unavailable", "start.open_share_listener", err, root, share.Token)
-		if cleanupErr := withZrokCleanupContext(root, func() error { return sdk.DeleteShare(root, share) }); cleanupErr == nil {
+		result := zrokOperationFailure(ctx, "zrok_identity_listener_failed", "start.open_share_listener", err, root, share.Token)
+		if cleanupErr := withZrokCleanupContext(root, func() error { return deleteZrokShare(root, share) }); cleanupErr == nil {
 			if removeErr := deleteSecret(zrokShareKey); removeErr == nil {
 				p.share = nil
 			} else {
@@ -358,18 +380,18 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 	}
 	if ctx.Err() != nil {
 		if err := listener.Close(); err != nil {
-			result := zrokOperationFailure(ctx, "provider_unavailable", "start.open_share_listener", ctx.Err(), root, share.Token)
+			result := zrokOperationFailure(ctx, "zrok_identity_listener_failed", "start.open_share_listener", ctx.Err(), root, share.Token)
 			return zrokSecondary(result, "start.close_listener_after_cancellation", err, root, share.Token)
 		}
-		return zrokOperationFailure(ctx, "provider_unavailable", "start.open_share_listener", ctx.Err(), root, share.Token)
+		return zrokOperationFailure(ctx, "zrok_identity_listener_failed", "start.open_share_listener", ctx.Err(), root, share.Token)
 	}
-	proxy, err := newLoopbackProxy(localPort)
+	proxy, err := newLoopbackProxy(localPort, "zrok", p.instanceID)
 	if err != nil {
 		result := zrokFailure("invalid_port", "start.create_loopback_proxy", err, root, share.Token)
 		if closeErr := listener.Close(); closeErr != nil {
 			result = zrokSecondary(result, "start.close_listener_after_proxy_failure", closeErr, root, share.Token)
 		}
-		if cleanupErr := withZrokCleanupContext(root, func() error { return sdk.DeleteShare(root, share) }); cleanupErr == nil {
+		if cleanupErr := withZrokCleanupContext(root, func() error { return deleteZrokShare(root, share) }); cleanupErr == nil {
 			if removeErr := deleteSecret(zrokShareKey); removeErr == nil {
 				p.share = nil
 			} else {
@@ -383,13 +405,14 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 	server := &http.Server{
 		Handler:           http.Handler(proxy),
 		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          newDiscardLogger(),
+		ErrorLog:          log.New(diagnosticWriter{"zrok", "http generation=" + p.instanceID}, "", 0),
 	}
 	p.listener = listener
+	p.zitiContext = zctx
 	p.httpServer = server
 	p.name = name
 	p.address = address
-	go func() { _ = server.Serve(listener) }()
+	p.serving = serveTunnel("zrok", p.instanceID, server, listener)
 	return tunnelResult{State: "serving", Address: address}
 }
 
@@ -417,7 +440,6 @@ func (p *zrokProvider) Stop() tunnelResult {
 		result := zrokFailure("secure_store_error", "stop.load_environment", err, nil)
 		return zrokSecondary(result, "stop.close_listener", stopErr, nil)
 	}
-	defer root.CloseMemfds()
 	root.operationContext = ctx
 	share := p.share
 	if share == nil {
@@ -433,7 +455,7 @@ func (p *zrokProvider) Stop() tunnelResult {
 	}
 	if share != nil {
 		if err := withZrokCleanupContext(root, func() error {
-			return sdk.DeleteShare(root, &sdk.Share{Token: share.Token})
+			return deleteZrokShare(root, &sdk.Share{Token: share.Token})
 		}); err != nil {
 			result := zrokOperationFailure(ctx, "provider_unavailable", "stop.delete_share", err, root, share.Token)
 			return zrokSecondary(result, "stop.close_listener", stopErr, root, share.Token)
@@ -480,7 +502,6 @@ func (p *zrokProvider) Revoke(_ string) tunnelResult {
 		result := zrokFailure("secure_store_error", "revoke.load_environment", err, nil)
 		return zrokSecondary(result, "revoke.close_listener", stopErr, nil)
 	}
-	defer root.CloseMemfds()
 	root.operationContext = ctx
 	share, shareErr := p.share, error(nil)
 	if share == nil {
@@ -494,8 +515,11 @@ func (p *zrokProvider) Revoke(_ string) tunnelResult {
 		result := failureWithReason("provider_unavailable", "revoke.delete_share", "active share exists without an enabled environment", share.Token)
 		return zrokSecondary(result, "revoke.close_listener", stopErr, root, share.Token)
 	}
+	environmentAbsent := false
 	if share != nil {
-		if err := sdk.DeleteShare(root, &sdk.Share{Token: share.Token}); err != nil {
+		err := deleteZrokShare(root, &sdk.Share{Token: share.Token})
+		environmentAbsent = errors.Is(err, errZrokEnvironmentMissing)
+		if err != nil && !environmentAbsent {
 			result := zrokOperationFailure(ctx, "provider_unavailable", "revoke.delete_share", err, root, share.Token)
 			return zrokSecondary(result, "revoke.close_listener", stopErr, root, share.Token)
 		}
@@ -505,7 +529,7 @@ func (p *zrokProvider) Revoke(_ string) tunnelResult {
 		}
 		p.share = nil
 	}
-	if root.IsEnabled() {
+	if root.IsEnabled() && !environmentAbsent {
 		env := &sdk.Environment{Host: root.environmentHost, ZitiIdentity: root.Environment().ZitiIdentity}
 		if err := sdk.DisableEnvironment(env, root); err != nil {
 			result := zrokOperationFailure(ctx, "provider_unavailable", "revoke.disable_environment", err, root)
@@ -525,6 +549,10 @@ func (p *zrokProvider) Revoke(_ string) tunnelResult {
 }
 
 func (p *zrokProvider) stopServing() error {
+	if p.serving != nil {
+		p.serving.expected.Store(true)
+		p.serving = nil
+	}
 	var cleanupErr error
 	if p.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -540,6 +568,10 @@ func (p *zrokProvider) stopServing() error {
 		}
 		p.listener = nil
 	}
+	if p.zitiContext != nil {
+		p.zitiContext.Close()
+		p.zitiContext = nil
+	}
 	return cleanupErr
 }
 
@@ -548,12 +580,10 @@ func (p *zrokProvider) discardAfterFailure() {
 }
 
 type memoryRoot struct {
-	mu               sync.Mutex
 	metadata         env_core.Metadata
 	config           *env_core.Config
 	environment      *env_core.Environment
 	environmentHost  string
-	identityFiles    []*os.File
 	operationContext context.Context
 }
 
@@ -572,14 +602,14 @@ func loadMemoryRoot() (*memoryRoot, error) {
 	defer wipeBytes(data)
 	var stored storedZrokEnvironment
 	if err := json.Unmarshal(data, &stored); err != nil {
-		return nil, errors.New("encrypted environment data is malformed")
+		return nil, fmt.Errorf("encrypted environment data is malformed: %w", err)
 	}
 	if stored.AccountToken == "" || stored.ZitiIdentity == "" || stored.ApiEndpoint != zrokAPIEndpoint || stored.Host == "" {
 		return nil, errors.New("encrypted environment data is incomplete")
 	}
 	identity, err := readSecret(zrokIdentityKey)
 	if err != nil {
-		return nil, errors.New("encrypted Ziti identity is unavailable")
+		return nil, fmt.Errorf("encrypted Ziti identity is unavailable: %w", err)
 	}
 	defer wipeBytes(identity)
 	if len(identity) == 0 {
@@ -592,16 +622,6 @@ func loadMemoryRoot() (*memoryRoot, error) {
 	}
 	root.environmentHost = stored.Host
 	return root, nil
-}
-
-func (r *memoryRoot) CloseMemfds() {
-	r.mu.Lock()
-	files := r.identityFiles
-	r.identityFiles = nil
-	r.mu.Unlock()
-	for _, file := range files {
-		_ = file.Close()
-	}
 }
 
 func (r *memoryRoot) persistEnvironment() error {
@@ -627,7 +647,6 @@ func (r *memoryRoot) SetEnvironmentInMemory(environment *env_core.Environment) {
 
 func (r *memoryRoot) Metadata() *env_core.Metadata { return &r.metadata }
 func (r *memoryRoot) Obliterate() error {
-	r.CloseMemfds()
 	return deleteSecretPrefix(zrokSecretPrefix)
 }
 func (r *memoryRoot) HasConfig() (bool, error) { return r.config != nil, nil }
@@ -675,36 +694,69 @@ func (r *memoryRoot) DeleteEnvironment() error {
 func (*memoryRoot) PublicIdentityName() string      { return "public" }
 func (*memoryRoot) EnvironmentIdentityName() string { return "environment" }
 func (r *memoryRoot) ZitiIdentityNamed(name string) (string, error) {
-	if name != r.EnvironmentIdentityName() {
-		return "", errors.New("unknown encrypted Ziti identity")
-	}
-	config, err := readSecret(zrokIdentityKey)
-	if err != nil {
-		return "", err
-	}
-	defer wipeBytes(config)
-	fd, err := unix.MemfdCreate("byd-zrok-identity", unix.MFD_CLOEXEC)
-	if err != nil {
-		return "", errors.New("in-memory identity file is unavailable")
-	}
-	file := os.NewFile(uintptr(fd), "byd-zrok-identity")
-	if file == nil {
-		_ = unix.Close(fd)
-		return "", errors.New("in-memory identity file is unavailable")
-	}
-	if _, err := file.Write(config); err != nil {
-		_ = file.Close()
-		return "", errors.New("could not load encrypted identity")
-	}
-	if _, err := file.Seek(0, 0); err != nil {
-		_ = file.Close()
-		return "", errors.New("could not load encrypted identity")
-	}
-	r.mu.Lock()
-	r.identityFiles = append(r.identityFiles, file)
-	r.mu.Unlock()
-	return fmt.Sprintf("/proc/self/fd/%d", fd), nil
+	return "", errors.New("identity paths are unsupported; use the owned in-memory Ziti context")
 }
+
+func openZrokListener(token string) (edge.Listener, ziti.Context, error) {
+	data, err := readSecret(zrokIdentityKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read Ziti identity: %w", err)
+	}
+	defer wipeBytes(data)
+	var config ziti.Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, nil, fmt.Errorf("decode Ziti identity: %w", err)
+	}
+	ctx, err := ziti.NewContext(&config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create Ziti context: %w", err)
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			ctx.Close()
+		}
+	}()
+	listener, err := ctx.ListenWithOptions(token, &ziti.ListenOptions{
+		ConnectTimeout: 30 * time.Second, WaitForNEstablishedListeners: 1,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen Ziti: %w", err)
+	}
+	owned = true
+	return listener, ctx, nil
+}
+
+var errZrokEnvironmentMissing = errors.New("zrok environment no longer exists")
+
+func deleteZrokShare(root *memoryRoot, share *sdk.Share) error {
+	err := sdk.DeleteShare(root, share)
+	var absent *restShare.UnshareNotFound
+	if !errors.As(err, &absent) {
+		return err
+	}
+	// The same 404 also means a missing environment; verify it before continuing.
+	client, clientErr := root.Client()
+	if clientErr != nil {
+		return errors.Join(err, clientErr)
+	}
+	response, lookupErr := client.Metadata.Overview(metadata.NewOverviewParams(),
+		httptransport.APIKeyAuth("X-TOKEN", "header", root.Environment().AccountToken))
+	if lookupErr != nil {
+		return errors.Join(err, lookupErr)
+	}
+	if response == nil || response.Payload == nil {
+		return err
+	}
+	for _, entry := range response.Payload.Environments {
+		if entry != nil && entry.Environment != nil && entry.Environment.ZID == root.Environment().ZitiIdentity {
+			nativeDiagnostic("zrok", "unshare", "authenticated share already absent; environment exists")
+			return nil
+		}
+	}
+	return errZrokEnvironmentMissing
+}
+
 func (r *memoryRoot) SaveZitiIdentityNamed(name, data string) error {
 	if name != r.EnvironmentIdentityName() || data == "" {
 		return errors.New("invalid encrypted Ziti identity")

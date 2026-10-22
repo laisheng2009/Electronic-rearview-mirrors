@@ -44,7 +44,7 @@
     <string name="cameras_error_tailscale_https">"Не вдалося запустити приватний HTTPS-доступ Tailscale. Перевірте MagicDNS, HTTPS і мережеве підключення."</string>
     <string name="cameras_error_tailscale_funnel">"Не вдалося запустити Tailscale Funnel. Перевірте дозвіл Funnel в обліковому записі, HTTPS і мережеве підключення."</string>
     <string name="cameras_error_zrok_enable">"Не вдалося зареєструвати авто в Zrok. Перевірте токен, доступ до облікового запису та мережеве підключення."</string>
-    <string name="cameras_error_zrok_share">"Не вдалося створити посилання Zrok. Перевірте доступність назви підключення, доступ до облікового запису та мережеве підключення."</string>
+    <string name="cameras_error_zrok_share">"Не вдалося створити посилання Zrok. Перевірте доступ до облікового запису та мережу; подробиці — у діагностичних логах."</string>
     <string name="cameras_account_token">"Токен облікового запису"</string>
     <string name="cameras_connection_name">"Назва підключення"</string>
     <string name="cameras_access">"Доступ до перегляду"</string>
@@ -79,7 +79,7 @@
     <string name="cameras_error_encoder_unavailable">"Апаратне кодування відео недоступне."</string>
     <string name="cameras_error_connection">"Не вдалося встановити з’єднання для перегляду. Перевірте авторизацію та мережу."</string>
     <string name="cameras_error_helper">"Внутрішня служба перегляду або камер недоступна. Це не помилка авторизації акаунта."</string>
-    <string name="cameras_error_secret">"Не вдалося прочитати або зберегти захищені облікові дані. Повторно авторизуйте цей пристрій."</string>
+    <string name="cameras_error_secret">"Не вдалося прочитати або зберегти зашифровані дані доступу. Подробиці — у діагностичних логах."</string>
     <string name="motion_notice">"Робота залежить від доступних компонентів авто. Потрібні можливості перевіряються під час роботи; помилки та їхні причини записуються в журнал."</string>
     <string name="motion_enable">"Показувати попередження при виявленні руху"</string>
     <string name="motion_timing">"Авто вимкнене • очікування 2,5 с • показ 10 с; повторна детекція продовжує показ."</string>
@@ -155,4 +155,10 @@
     <string name="motion_video_title">"Відео виявленого руху"</string>
     <string name="motion_video_enable">"Зберігати відео при виявленні руху"</string>
     <string name="cameras_error_name">"Некоректна назва підключення. Використовуйте 1–63 малі латинські літери, цифри або дефіси; без дефіса на початку й у кінці."</string>
+    <string name="cameras_error_provider_start">"Сервіс не завершив запуск. Повторіть без відкликання доступу; подробиці — у діагностичних логах."</string>
+    <string name="cameras_error_identity">"Не вдалося завантажити збережену identity Zrok або відкрити її слухач. Подробиці — у діагностичних логах."</string>
+    <string name="cameras_error_environment">"Середовища Zrok більше немає в обліковому записі. Відкличте цей збережений доступ і авторизуйтеся знову."</string>
+    <string name="cameras_error_endpoint">"Zrok не повернув придатної HTTPS-адреси перегляду. Подробиці — у діагностичних логах."</string>
+    <string name="cameras_error_listener">"Слухач перегляду несподівано зупинився. Підключіться повторно; подробиці — у діагностичних логах."</string>
+    <string name="cameras_error_timeout">"Сервіс не завершив підключення за відведений час. Повторіть або перевірте мережу."</string>
 </resources>

@@ -22,6 +22,10 @@ public final class FragmentedVideoWindow extends OutputStream {
     private long sequence;
     private double nextDuration = 2.0;
     private boolean closed;
+    private final Runnable onReady;
+    public FragmentedVideoWindow() { this(() -> {}); }
+    public FragmentedVideoWindow(Runnable onReady) { this.onReady = onReady; }
+    public synchronized boolean isReady() { return initialization != null && !segments.isEmpty(); }
 
     private static final class Segment {
         final long id;
@@ -91,6 +95,7 @@ public final class FragmentedVideoWindow extends OutputStream {
                 segments.add(new Segment(sequence++, nextDuration, fragment.toByteArray()));
                 while (segments.size() > MAX_SEGMENTS) segments.removeFirst();
                 fragment = null;
+                if (sequence == 1) onReady.run();
                 break;
             case "free":
             case "mfra":

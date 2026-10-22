@@ -22,6 +22,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Independent shell-UID owner of remote camera viewing and its native network runtime. */
 public final class CameraViewingShellMain {
+    public static void logViewingEvent(String stage, String provider, String detail) {
+        AvasRecoveryJournal.event(new File("/data/local/tmp"), "bydextend_viewing-events.jsonl",
+                "viewing_event", "source", "viewing_helper", "stage", stage,
+                "provider", provider, "details", detail);
+    }
+
     public static void main(String[] args) {
         String stage = "arguments";
         try {

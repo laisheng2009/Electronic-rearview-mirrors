@@ -44,7 +44,7 @@
     <string name="cameras_error_tailscale_https">"无法启动 Tailscale 私密 HTTPS 访问。请检查 MagicDNS、HTTPS 和网络连接。"</string>
     <string name="cameras_error_tailscale_funnel">"无法启动 Tailscale Funnel。请检查账户的 Funnel 权限、HTTPS 和网络连接。"</string>
     <string name="cameras_error_zrok_enable">"无法向 Zrok 注册车辆。请检查账户令牌、账户访问权限和网络连接。"</string>
-    <string name="cameras_error_zrok_share">"无法创建 Zrok 查看链接。请检查连接名称是否可用、账户访问权限和网络连接。"</string>
+    <string name="cameras_error_zrok_share">"无法创建 Zrok 查看链接。请检查账户访问权限和网络；详情见诊断日志。"</string>
     <string name="cameras_account_token">"账户令牌"</string>
     <string name="cameras_connection_name">"连接名称"</string>
     <string name="cameras_access">"查看权限"</string>
@@ -79,7 +79,7 @@
     <string name="cameras_error_encoder_unavailable">"硬件视频编码不可用。"</string>
     <string name="cameras_error_connection">"无法建立查看连接。请检查授权和网络。"</string>
     <string name="cameras_error_helper">"内部查看或摄像头服务不可用。这不是账户授权错误。"</string>
-    <string name="cameras_error_secret">"无法读取或保存安全凭据。请重新授权此设备。"</string>
+    <string name="cameras_error_secret">"无法读取或保存加密访问数据。详情见诊断日志。"</string>
     <string name="motion_notice">"功能取决于车辆可用的组件。运行时会检查所需能力，并将错误及其原因写入日志。"</string>
     <string name="motion_enable">"检测到移动时显示警示"</string>
     <string name="motion_timing">"车辆关闭 • 等待2.5秒 • 显示10秒；再次检测到移动时延长显示。"</string>
@@ -155,4 +155,10 @@
     <string name="motion_video_title">"移动事件录像"</string>
     <string name="motion_video_enable">"检测到移动时保存视频"</string>
     <string name="cameras_error_name">"连接名称无效。请使用 1–63 个小写英文字母、数字或连字符，开头和结尾不能是连字符。"</string>
+    <string name="cameras_error_provider_start">"服务未能完成启动。无需撤销访问即可重试；详情见诊断日志。"</string>
+    <string name="cameras_error_identity">"无法加载保存的 Zrok 身份或打开其监听器。详情见诊断日志。"</string>
+    <string name="cameras_error_environment">"账户中已不存在此 Zrok 环境。请撤销此保存的访问并重新授权。"</string>
+    <string name="cameras_error_endpoint">"Zrok 未返回可用的 HTTPS 查看地址。详情见诊断日志。"</string>
+    <string name="cameras_error_listener">"查看监听器意外停止。请重新连接；详情见诊断日志。"</string>
+    <string name="cameras_error_timeout">"服务未能在时限内完成连接。请重试或检查网络。"</string>
 </resources>

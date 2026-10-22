@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,12 +46,13 @@ func init() {
 }
 
 type tunnelResult struct {
-	State       string `json:"state"`
-	Address     string `json:"address,omitempty"`
-	LoginURL    string `json:"loginUrl,omitempty"`
-	ErrorCode   string `json:"errorCode,omitempty"`
-	ErrorDetail string `json:"errorDetail,omitempty"`
-	Diagnostic  string `json:"diagnostic,omitempty"`
+	State          string `json:"state"`
+	Address        string `json:"address,omitempty"`
+	LoginURL       string `json:"loginUrl,omitempty"`
+	ErrorCode      string `json:"errorCode,omitempty"`
+	ErrorDetail    string `json:"errorDetail,omitempty"`
+	Diagnostic     string `json:"diagnostic,omitempty"`
+	NetworkFailure bool   `json:"networkFailure,omitempty"`
 }
 
 type tunnelProvider interface {
@@ -297,8 +300,10 @@ func lookupProvider(key, kind, operation string) *registeredProvider {
 		switch kind {
 		case "tailscale":
 			provider = newTailscaleProvider(runtimeDir)
+			provider.(*tailscaleProvider).instanceID = strings.SplitN(key, "\x00", 2)[1]
 		case "zrok":
 			provider = newZrokProvider(runtimeDir)
+			provider.(*zrokProvider).instanceID = strings.SplitN(key, "\x00", 2)[1]
 		}
 		entry = &registeredProvider{provider: provider}
 		providers[key] = entry
@@ -409,6 +414,7 @@ func camera_tunnel_free(value *C.char) {
 }
 
 var errSecretMissing = errors.New("secret missing")
+var errSecureStore = errors.New("secure store failure")
 
 func readSecret(key string) ([]byte, error) {
 	cKey := C.CString(key)
@@ -424,7 +430,7 @@ func readSecret(key string) ([]byte, error) {
 			C.camera_secret_clear(unsafe.Pointer(value), length)
 			C.free(unsafe.Pointer(value))
 		}
-		return nil, errors.New("secure store read failed")
+		return nil, fmt.Errorf("read: %w", errSecureStore)
 	}
 	defer func() {
 		C.camera_secret_clear(unsafe.Pointer(value), length)
@@ -445,7 +451,7 @@ func writeSecret(key string, value []byte) error {
 		}()
 	}
 	if C.camera_secret_put(cKey, (*C.char)(cValue), C.size_t(len(value))) == 0 {
-		return errors.New("secure store write failed")
+		return fmt.Errorf("write: %w", errSecureStore)
 	}
 	return nil
 }
@@ -454,7 +460,7 @@ func deleteSecret(key string) error {
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
 	if C.camera_secret_remove(cKey) == 0 {
-		return errors.New("secure store remove failed")
+		return fmt.Errorf("remove: %w", errSecureStore)
 	}
 	return nil
 }
@@ -463,7 +469,7 @@ func deleteSecretPrefix(prefix string) error {
 	cPrefix := C.CString(prefix)
 	defer C.free(unsafe.Pointer(cPrefix))
 	if C.camera_secret_remove_prefix(cPrefix) == 0 {
-		return errors.New("secure store remove failed")
+		return fmt.Errorf("remove prefix: %w", errSecureStore)
 	}
 	return nil
 }
@@ -501,11 +507,59 @@ func failure(code string) tunnelResult {
 }
 
 func failureWithDiagnostic(code, stage string, err error, secrets ...string) tunnelResult {
+	if errors.Is(err, errSecureStore) {
+		code = "secure_store_error"
+	}
 	result := failure(code)
+	var networkError *net.OpError
+	var dnsError *net.DNSError
+	result.NetworkFailure = (errors.As(err, &networkError) && networkError.Net != "") || errors.As(err, &dnsError)
 	if err != nil {
 		result.ErrorDetail = nativeErrorDetail(stage, err, secrets...)
 	}
 	return result
+}
+
+// The serving goroutine reports failure, but never mutates a newer provider run.
+type servingRun struct {
+	expected atomic.Bool
+	failure  atomic.Pointer[tunnelResult]
+}
+
+func serveTunnel(kind, id string, server *http.Server, listener net.Listener) *servingRun {
+	run := &servingRun{}
+	go func() {
+		err := server.Serve(listener)
+		if run.expected.Load() || errors.Is(err, http.ErrServerClosed) {
+			return
+		}
+		if err == nil {
+			err = errors.New("listener exited unexpectedly")
+		}
+		result := failureWithDiagnostic("listener_failed", "serve", err)
+		run.failure.Store(&result)
+		nativeDiagnostic(kind, "serve generation="+id, result.ErrorDetail)
+		instance, value := C.CString(id), C.CString(encodeResult(result))
+		defer C.free(unsafe.Pointer(instance))
+		defer C.free(unsafe.Pointer(value))
+		C.camera_tunnel_event(instance, value)
+	}()
+	return run
+}
+
+func nativeDiagnostic(provider, stage, detail string) {
+	p, s, d := C.CString(provider), C.CString(stage), C.CString(safeNativeText(detail))
+	defer C.free(unsafe.Pointer(p))
+	defer C.free(unsafe.Pointer(s))
+	defer C.free(unsafe.Pointer(d))
+	C.camera_tunnel_diagnostic(p, s, d)
+}
+
+type diagnosticWriter struct{ provider, stage string }
+
+func (w diagnosticWriter) Write(data []byte) (int, error) {
+	nativeDiagnostic(w.provider, w.stage, string(data))
+	return len(data), nil
 }
 
 func failureWithReason(code, stage, reason string, secrets ...string) tunnelResult {

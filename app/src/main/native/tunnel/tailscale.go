@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +27,8 @@ const (
 )
 
 type tailscaleProvider struct {
+	instanceID      string
+	serving         *servingRun
 	runtimeDir      string
 	server          *tsnet.Server
 	listener        net.Listener
@@ -111,6 +112,11 @@ func (p *tailscaleProvider) Authorize(name, credential string) tunnelResult {
 }
 
 func (p *tailscaleProvider) Status(name string) tunnelResult {
+	if p.serving != nil {
+		if result := p.serving.failure.Load(); result != nil {
+			return *result
+		}
+	}
 	ctx, finish := p.beginOperation()
 	defer finish()
 	if ctx.Err() != nil {
@@ -189,6 +195,11 @@ func (p *tailscaleProvider) Start(name string, localPort int, public bool, priva
 	if !public && privateProxyCredential == "" {
 		return failure("private_credential_missing")
 	}
+	if p.serving != nil {
+		if failed := p.serving.failure.Load(); failed != nil {
+			return *failed
+		}
+	}
 	if p.httpServer != nil {
 		if p.name == name && p.public == public {
 			return tunnelResult{State: "serving", Address: p.address}
@@ -224,7 +235,7 @@ func (p *tailscaleProvider) Start(name string, localPort int, public bool, priva
 		}
 		return failureWithDiagnostic("tailscale_https_failed", "start.listen_tls", err, privateProxyCredential)
 	}
-	proxy, err := newLoopbackProxy(localPort)
+	proxy, err := newLoopbackProxy(localPort, "tailscale", p.instanceID)
 	if err != nil {
 		result := failureWithDiagnostic("invalid_port", "start.local_proxy", err, privateProxyCredential)
 		return addSecondaryDiagnostic(result, "start.close_listener_after_proxy_failure", listener.Close(), privateProxyCredential)
@@ -236,14 +247,14 @@ func (p *tailscaleProvider) Start(name string, localPort int, public bool, priva
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          newDiscardLogger(),
+		ErrorLog:          log.New(diagnosticWriter{"tailscale", "https generation=" + p.instanceID}, "", 0),
 	}
 	p.listener = listener
 	p.httpServer = server
 	p.address = address
 	p.public = public
 	p.name = name
-	go func() { _ = server.Serve(listener) }()
+	p.serving = serveTunnel("tailscale", p.instanceID, server, listener)
 	return tunnelResult{State: "serving", Address: address}
 }
 
@@ -376,13 +387,17 @@ func (p *tailscaleProvider) Revoke(name string) tunnelResult {
 	if cleanupErr != nil {
 		return failureWithDiagnostic("provider_unavailable", "revoke.close_server", cleanupErr)
 	}
-	if err := deleteSecretPrefix(tailscaleStatePrefix); err != nil {
+	if err := deleteSecretPrefix("tunnel.tailscale."); err != nil {
 		return failureWithDiagnostic("secure_store_error", "revoke.delete_state", err)
 	}
 	return tunnelResult{State: "revoked"}
 }
 
 func (p *tailscaleProvider) stopServing() error {
+	if p.serving != nil {
+		p.serving.expected.Store(true)
+		p.serving = nil
+	}
 	var cleanupErr error
 	if p.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -442,7 +457,19 @@ func (p *tailscaleProvider) NetworkChanged() {
 type tailscaleEncryptedStateStore struct{}
 
 func (tailscaleEncryptedStateStore) ReadState(id ipn.StateKey) ([]byte, error) {
-	value, err := readSecret(tailscaleStatePrefix + string(id))
+	key := tailscaleStorageKey(string(id))
+	value, err := readSecret(key)
+	// Only keys accepted by the old store can contain an existing identity.
+	legacy := tailscaleStatePrefix + string(id)
+	if errorsIsSecretMissing(err) && legacyStateKey.MatchString(legacy) {
+		value, err = readSecret(legacy)
+		if err == nil {
+			if writeErr := writeSecret(key, value); writeErr != nil {
+				wipeBytes(value)
+				return nil, fmt.Errorf("migrate Tailscale state: %w", writeErr)
+			}
+		}
+	}
 	if errorsIsSecretMissing(err) {
 		return nil, ipn.ErrStateNotExist
 	}
@@ -453,7 +480,7 @@ func (tailscaleEncryptedStateStore) ReadState(id ipn.StateKey) ([]byte, error) {
 }
 
 func (tailscaleEncryptedStateStore) WriteState(id ipn.StateKey, value []byte) error {
-	return writeSecret(tailscaleStatePrefix+string(id), value)
+	return writeSecret(tailscaleStorageKey(string(id)), value)
 }
 
 func localHTTPServerAvailable(port int) bool {
@@ -465,7 +492,7 @@ func localHTTPServerAvailable(port int) bool {
 	return true
 }
 
-func newLoopbackProxy(port int) (*httputil.ReverseProxy, error) {
+func newLoopbackProxy(port int, provider, generation string) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
 	if err != nil {
 		return nil, err
@@ -489,8 +516,9 @@ func newLoopbackProxy(port int) (*httputil.ReverseProxy, error) {
 		request.Host = externalHost
 	}
 	proxy.Transport = transport
-	proxy.ErrorLog = newDiscardLogger()
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+	proxy.ErrorLog = log.New(diagnosticWriter{provider, "proxy generation=" + generation}, "", 0)
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		nativeDiagnostic(provider, "loopback generation="+generation, nativeErrorDetail("forward", err))
 		http.Error(w, "camera stream unavailable", http.StatusBadGateway)
 	}
 	return proxy, nil
@@ -523,10 +551,6 @@ func httpsAddress(host string) string {
 		return ""
 	}
 	return "https://" + host
-}
-
-func newDiscardLogger() *log.Logger {
-	return log.New(io.Discard, "", 0)
 }
 
 func errorsIsSecretMissing(err error) bool { return errors.Is(err, errSecretMissing) }

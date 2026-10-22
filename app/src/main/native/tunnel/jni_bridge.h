@@ -12,4 +12,7 @@ int camera_tunnel_set_runtime_dir(char *path);
 void camera_tunnel_network_changed(void);
 void camera_tunnel_log_panic(const char *operation, const char *stage, const char *location, const char *detail);
 
+void camera_tunnel_event(const char *instance, const char *result);
+void camera_tunnel_diagnostic(const char *provider, const char *stage, const char *detail);
+
 #endif

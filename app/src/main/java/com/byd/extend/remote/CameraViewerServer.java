@@ -41,11 +41,13 @@ public final class CameraViewerServer implements AutoCloseable {
         boolean admitted(String session);
         boolean current(String session);
         void disconnected(String session);
+        void failed(Throwable failure);
         void live(String session, int direction);
         void archive(String session, boolean leave);
         JSONObject status();
         JSONObject presentation();
         void firstFrame(String session, String mode);
+        void playbackError(String session, String category);
         FragmentedVideoWindow video();
         CameraViewerArchive recordings() throws Exception;
         byte[] resource(String name) throws IOException;
@@ -109,7 +111,10 @@ public final class CameraViewerServer implements AutoCloseable {
                 expireSession();
             }
         } catch (IOException failure) {
-            if (!closed) CameraViewingDiagnostics.failure("viewer_listener", "shared", failure);
+            if (!closed) {
+                CameraViewingDiagnostics.failure("viewer_listener", "shared", failure);
+                stream.failed(failure);
+            }
         }
     }
 
@@ -286,13 +291,21 @@ public final class CameraViewerServer implements AutoCloseable {
                 int direction = direction(bodyObject(request.body).optString("view", "composition"));
                 closePlayback(request.session);
                 stream.live(request.session, direction);
-                serveJson(socket, false, reply, stream.status());
+                json(socket, reply, 200, "preparing", null);
                 return;
             case "/diagnostic":
                 if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
                 JSONObject diagnostic = bodyObject(request.body);
                 String event = diagnostic.optString("event", "");
                 String mode = diagnostic.optString("mode", "");
+                if ("playback_error".equals(event)) {
+                    String category = diagnostic.optString("category", "");
+                    if (!Set.of("load", "decode", "play", "hls").contains(category)) {
+                        json(socket, reply, 400, "invalid_event", null); return;
+                    }
+                    stream.playbackError(request.session, category);
+                    json(socket, reply, 200, "ok", null); return;
+                }
                 if (!"first_frame".equals(event) || !("live".equals(mode) || "archive".equals(mode))) {
                     json(socket, reply, 400, "invalid_event", null);
                     return;
@@ -320,17 +333,22 @@ public final class CameraViewerServer implements AutoCloseable {
         }
 
         FragmentedVideoWindow window = stream.video();
+        if (window == null && isRead(request.method)
+                && (request.path.equals("/live.m3u8") || request.path.equals("/init.mp4"))) {
+            json(socket, reply, 503, "preparing", null);
+            return;
+        }
         if (window != null) {
             if (request.path.equals("/live.m3u8") && isRead(request.method)) {
                 String playlist = window.playlist();
-                if (playlist == null) json(socket, reply, 404, "not_found", null);
+                if (playlist == null) json(socket, reply, 503, "preparing", null);
                 else serveText(socket, request.method.equals("HEAD"), reply,
                         "application/vnd.apple.mpegurl", playlist);
                 return;
             }
             if (request.path.equals("/init.mp4") && isRead(request.method)) {
                 byte[] bytes = window.initialization();
-                if (bytes == null) json(socket, reply, 404, "not_found", null);
+                if (bytes == null) json(socket, reply, 503, "preparing", null);
                 else serveBytes(socket, request.method.equals("HEAD"), reply, "video/mp4", bytes, null);
                 return;
             }

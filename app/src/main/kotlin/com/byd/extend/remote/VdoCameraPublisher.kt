@@ -41,7 +41,7 @@ internal class VdoCameraPublisher(
         fun onViewerConnected(sessionId: String)
         fun onViewerDisconnected(sessionId: String)
         fun onSessionError(sessionId: String, stage: String, failure: Throwable)
-        fun onError(encoderUnavailable: Boolean)
+        fun onError(encoderUnavailable: Boolean, networkFailure: Boolean)
     }
 
     private data class Resources(
@@ -377,7 +377,10 @@ internal class VdoCameraPublisher(
             notifyErrorUnlessClosed(encoderUnavailable = true)
         } catch (failure: Exception) {
             CameraViewingDiagnostics.failure("publisher_open", "vdo", failure, password)
-            notifyErrorUnlessClosed(encoderUnavailable = false)
+            notifyErrorUnlessClosed(encoderUnavailable = false, networkFailure =
+                generateSequence<Throwable>(failure) { it.cause }.take(16).any {
+                    it is java.net.SocketException || it is java.net.UnknownHostException || it is java.net.SocketTimeoutException
+                })
         } finally {
             val disposeSdk: VdoNinja?
             val disposeFactory: PeerConnectionFactory?
@@ -477,9 +480,14 @@ internal class VdoCameraPublisher(
                 )
             }
             VdoEvents.RECONNECT_FAILED -> {
+                val cause = event.failure ?: IllegalStateException("signaling reconnect exhausted")
                 CameraViewingDiagnostics.failure("signaling_reconnect", "vdo",
-                    IllegalStateException(event.message ?: "signaling reconnect exhausted"), password)
-                notifyErrorUnlessClosed(encoderUnavailable = false)
+                    cause, password)
+                notifyErrorUnlessClosed(encoderUnavailable = false, networkFailure =
+                    generateSequence(cause) { it.cause }.take(16).any {
+                        it is java.net.SocketException || it is java.net.UnknownHostException ||
+                            it is java.net.SocketTimeoutException
+                    })
             }
             VdoEvents.ERROR -> CameraViewingDiagnostics.failure("sdk_event", "vdo",
                 IllegalStateException(event.message ?: "SDK error without message"), password)
@@ -504,8 +512,8 @@ internal class VdoCameraPublisher(
         if (!closed) runCatching { listener.onViewerDisconnected(sessionId) }
     }
 
-    private fun notifyErrorUnlessClosed(encoderUnavailable: Boolean) {
-        if (!closed) runCatching { listener.onError(encoderUnavailable) }
+    private fun notifyErrorUnlessClosed(encoderUnavailable: Boolean, networkFailure: Boolean = false) {
+        if (!closed) runCatching { listener.onError(encoderUnavailable, networkFailure) }
     }
 
     private fun sessionHash(sessionId: String): String = Crypto.generateHash(sessionId, 16)

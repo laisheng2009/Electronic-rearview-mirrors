@@ -16,6 +16,39 @@ import static org.junit.Assert.*;
 public class FragmentedVideoWindowTest {
     private static final String FIXTURE = "/com/byd/extend/remote/fragmented_test.mp4";
 
+    @Test public void readinessWaitsForTheWholeFirstFragmentAndSignalsOnlyOnce() throws Exception {
+        byte[] bytes;
+        try (InputStream input = getClass().getResourceAsStream(FIXTURE)) {
+            assertNotNull(input);
+            bytes = input.readAllBytes();
+        }
+        java.util.concurrent.atomic.AtomicInteger notifications = new java.util.concurrent.atomic.AtomicInteger();
+        FragmentedVideoWindow window = new FragmentedVideoWindow(notifications::incrementAndGet);
+        int offset = 0;
+        while (!"mdat".equals(boxType(bytes, offset))) {
+            int length = boxSize(bytes, offset);
+            window.write(bytes, offset, length);
+            offset += length;
+            assertFalse(window.isReady());
+            assertNull(window.playlist());
+        }
+        int payload = boxSize(bytes, offset);
+        window.write(bytes, offset, payload - 1);
+        assertFalse(window.isReady());
+        assertEquals(0, notifications.get());
+        window.write(bytes, offset + payload - 1, 1);
+        assertTrue(window.isReady());
+        assertNotNull(window.initialization());
+        assertNotNull(window.segment(0));
+        assertEquals(1, notifications.get());
+        offset += payload;
+        window.write(bytes, offset, bytes.length - offset);
+        window.close();
+        assertEquals(1, notifications.get());
+        window.clear();
+        assertFalse(window.isReady());
+    }
+
     @Test public void splitsFfmpegFragmentedMp4AcrossArbitraryOutputWrites() throws Exception {
         WindowResult result = splitFixture();
 

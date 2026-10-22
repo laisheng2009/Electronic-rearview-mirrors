@@ -118,4 +118,29 @@ class EncryptedFileSecretStoreTest {
     }
 
     private fun testKey(seed: Int): ByteArray = ByteArray(32) { (seed + it).toByte() }
+
+    @Test
+    fun persistsMappedSdkKeysAndEmptyStateWithoutDroppingLegacyIdentity() {
+        val root = temporary.newFolder("sdk-keys")
+        val key = testKey(7)
+        val legacy = "tunnel.tailscale.state._machinekey"
+        val mapped = listOf("_machinekey", "_serve/profile").map { raw ->
+            "tunnel.tailscale.sdk." + java.security.MessageDigest.getInstance("SHA-256")
+                .digest(raw.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }
+        }
+        val store = EncryptedFileSecretStore(root, "owner-1001")
+        store.provision("tailscale", key, emptyMap())
+        val identity = "existing-identity".toByteArray()
+        store.putNative(legacy, identity)
+        store.putNative(mapped[0], checkNotNull(store.getNative(legacy)))
+        store.putNative(mapped[1], byteArrayOf())
+        val reopened = EncryptedFileSecretStore(root, "owner-1001")
+        reopened.provision("tailscale", key, emptyMap())
+        assertArrayEquals(identity, reopened.getNative(legacy))
+        assertArrayEquals(identity, reopened.getNative(mapped[0]))
+        assertArrayEquals(byteArrayOf(), reopened.getNative(mapped[1]))
+        reopened.removePrefixNative("tunnel.tailscale.")
+        mapped.forEach { assertNull(reopened.getNative(it)) }
+        assertNull(reopened.getNative(legacy))
+    }
 }

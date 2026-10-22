@@ -248,7 +248,7 @@ class VdoNinja @JvmOverloads constructor(
             }
             onClose = { intentional -> emit(VdoEvent(VdoEvents.DISCONNECTED, intentional = intentional)) }
             onReconnecting = { attempt -> emit(VdoEvent(VdoEvents.RECONNECTING, attempt = attempt)) }
-            onReconnectFailed = { emit(VdoEvent(VdoEvents.RECONNECT_FAILED)) }
+            onReconnectFailed = { cause -> emit(VdoEvent(VdoEvents.RECONNECT_FAILED, failure = cause)) }
             onMessage = ::handleSignal
         }
     }

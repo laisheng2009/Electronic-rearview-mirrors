@@ -245,6 +245,7 @@ internal fun FormScope.CameraViewingScreen(
     val phase = state.phase
     val blocked = chargeState.isBlocked()
     val fieldsLocked = state.authorized || state.revocationPending || state.busy
+    val accessSettingsLocked = state.revocationPending || state.busy
     LaunchedEffect(state.revocationPending, phase, state.error) {
         if (!state.revocationPending || phase == "revoke_pending" || state.error != null) {
             revokeSubmitted = false
@@ -260,7 +261,7 @@ internal fun FormScope.CameraViewingScreen(
     val validationError = if (authInputsLoaded)
         editsForAuthorization.authorizationError(state.config.tailscalePublic) else null
     val canAuthorize = state.config.enabled && !state.busy && !state.revocationPending &&
-        authInputsLoaded && (state.authorized || validationError == null)
+        authInputsLoaded && validationError == null
     val canCancel = state.busy && !state.revocationPending
     val shareable = !streamIdDirty && !passwordDirty && !tokenDirty && !state.viewerUrl.isNullOrBlank()
     val phaseStatus = when {
@@ -313,7 +314,7 @@ internal fun FormScope.CameraViewingScreen(
                     Segmented(listOf(strings.motionText(R.string.cameras_private),
                         strings.motionText(R.string.cameras_public)),
                         if (state.config.tailscalePublic) 1 else 0, colors, Modifier.fillMaxWidth(),
-                        enabled = { !fieldsLocked }) {
+                        enabled = { !accessSettingsLocked }) {
                         clearFocusForAction()
                         submit(public = it == 1)
                     }
@@ -339,7 +340,7 @@ internal fun FormScope.CameraViewingScreen(
                 if (state.config.tailscalePublic) row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
                         colors, secret = true, revealed = revealPassword,
-                        enabled = passwordLoaded && !fieldsLocked,
+                        enabled = passwordLoaded && !accessSettingsLocked,
                         revealDescription = strings.motionText(if (revealPassword) R.string.cameras_secret_hide
                             else R.string.cameras_secret_show),
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
@@ -374,7 +375,7 @@ internal fun FormScope.CameraViewingScreen(
                 row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
                         colors, secret = true, revealed = revealPassword,
-                        enabled = passwordLoaded && !fieldsLocked,
+                        enabled = passwordLoaded && !accessSettingsLocked,
                         revealDescription = strings.motionText(if (revealPassword) R.string.cameras_secret_hide
                             else R.string.cameras_secret_show),
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {
@@ -398,7 +399,7 @@ internal fun FormScope.CameraViewingScreen(
                 row("password") {
                     ConnectionField(strings.motionText(R.string.cameras_viewer_password), passwordDraft,
                         colors, secret = true, revealed = revealPassword,
-                        enabled = passwordLoaded && !fieldsLocked,
+                        enabled = passwordLoaded && !accessSettingsLocked,
                         revealDescription = strings.motionText(if (revealPassword) R.string.cameras_secret_hide
                             else R.string.cameras_secret_show),
                         onReveal = { revealPassword = !revealPassword }, onValueChange = {

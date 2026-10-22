@@ -64,6 +64,18 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             CameraTunnelProvider.notifyNetworkChanged()
             execute { if (activeNetwork == network) activeNetwork = null }
         }
+        override fun onCapabilitiesChanged(network: Network, capabilities: android.net.NetworkCapabilities) {
+            if (!capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
+                !capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return
+            execute {
+                if (activeNetwork != network || !enabled) return@execute
+                profiles.values.filter { it.retryOnNetwork && it.run == null && it.authorized && !it.pendingRevoke }
+                    .forEach { p ->
+                        p.retryOnNetwork = false
+                        try { connect(p, false) } catch (failure: Exception) { failed(p, failure) }
+                    }
+            }
+        }
         override fun onLinkPropertiesChanged(network: Network, properties: android.net.LinkProperties) {
             CameraTunnelProvider.notifyNetworkChanged()
             execute {
@@ -80,6 +92,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         var authorizationRequest = 0L
         var run: Run? = null
         var generation = 0L
+        var retryOnNetwork = false
         val authorized get() = config.optBoolean("authorized")
         val pendingRevoke get() = config.optBoolean("revocationPending")
     }
@@ -124,6 +137,14 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                         .put("revocationPending", false)
                         .put("viewerLocale", locale).put("viewerTheme", theme)
                         .put("revocationEpoch", profile.config.optLong("revocationEpoch"))
+                    save(profile)
+                } else {
+                    val input = payload.getJSONObject("profile")
+                    val updated = JSONObject(profile.config.toString())
+                        .put("public", profile.method == "tailscale" && input.optBoolean("public"))
+                        .put("password", input.getString("password"))
+                    validate(profile.method, updated)
+                    profile.config = updated
                     save(profile)
                 }
                 connect(profile, true)
@@ -265,6 +286,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         if (p.method == "vdo") { start(p, run); return }
         val provider = CameraTunnelProvider(context, p.method, p.config.getString("name"), store,
             nativeDirectory, nativeLibrary).also { run.provider = it }
+        provider.observeFailures { result -> execute(p, run) { providerResult(p, run, result) } }
         p.phase = "authorizing"
         val accept: (CameraTunnelResult) -> Unit = { result -> execute(p, run) { providerResult(p, run, result) } }
         if (p.authorized || p.config.optBoolean("legacyIdentity")) provider.status(accept)
@@ -273,7 +295,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
 
     private fun providerResult(p: Profile, run: Run, result: CameraTunnelResult) {
         result.errorCode?.let { throw RuntimeFailure(it,
-            IllegalStateException(result.errorDetail ?: "native provider returned $it without detail")) }
+            IllegalStateException(result.errorDetail ?: "native provider returned $it without detail"), result.networkFailure) }
         for (address in listOfNotNull(result.address, result.loginUrl)) {
             val uri = URI(address)
             require(uri.scheme == "https" && !uri.host.isNullOrBlank() && uri.userInfo == null)
@@ -320,8 +342,8 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                             p.config.optString("password"))
                         disconnected(p, run, sessionId)
                     }
-                    override fun onError(encoderUnavailable: Boolean) = execute(p, run) {
-                        throw RuntimeFailure(if (encoderUnavailable) "encoder_unavailable" else "connection_failed")
+                    override fun onError(encoderUnavailable: Boolean, networkFailure: Boolean) = execute(p, run) {
+                        throw RuntimeFailure(if (encoderUnavailable) "encoder_unavailable" else "connection_failed", networkFailure = networkFailure)
                     }
                 }, { id -> serialized { admit(p, run, id) } }, { id ->
                     execute(p, run) { disconnected(p, run, id) }
@@ -332,6 +354,9 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                 override fun admitted(session: String) = serialized { admit(p, run, session) }
                 override fun current(session: String) = current(run, session)
                 override fun disconnected(session: String) = execute(p, run) { disconnected(p, run, session) }
+                override fun failed(failure: Throwable) = execute(p, run) {
+                    throw RuntimeFailure("listener_failed", failure)
+                }
                 override fun live(session: String, direction: Int) = execute(p, run) {
                     if (current(run, session)) live(p, run, session, direction)
                 }
@@ -357,6 +382,9 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                     }
                 }
                 override fun recordings() = archive
+                override fun playbackError(session: String, category: String) = execute(p, run) {
+                    viewer?.takeIf { current(run, session) }?.let { sessionEvent("browser_playback_error", it, "category=$category") }
+                }
                 override fun video() = run.encoder?.window
                 override fun resource(name: String) = context.assets.open("camera-view/$name").use { it.readBytes() }
             })
@@ -436,7 +464,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         if (!ready) { retryPreparation(p, run); return }
         if (run.video && sourceRun === run && sourceAttached) {
             camera.updateOutput(null, active.direction)
-            p.phase = "connected"
+            p.phase = if (run.publisher != null || run.encoder?.window?.isReady == true) "connected" else "preparing"
             return
         }
         val previous = sourceRun
@@ -445,8 +473,13 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                 execute(p, run) { viewer?.takeIf { it.run === run }?.let {
                     sessionEvent(event, it, "frames=$frames bytes=$bytes")
                 } }
-            }) { failure ->
-                execute(p, run) { streamFailure(p, run, failure) }
+            }, { encoder -> execute(p, run) {
+                if (sourceRun === run && run.encoder === encoder && run.video && viewer?.mode == "live") {
+                    p.phase = "connected"
+                    viewer?.let { sessionEvent("playable_media_ready", it) }
+                }
+            } }) { encoder, failure ->
+                execute(p, run) { if (run.encoder === encoder) streamFailure(p, run, failure) }
             }.also { run.encoder = it }.start()
             if (sourceAttached) camera.updateOutput(surface, active.direction)
             else {
@@ -456,7 +489,14 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             }
             sourceRun = run
             if (previous != null && previous !== run) closeEncoder(previous)
-            run.video = true; p.phase = "connected"
+            run.video = true
+            p.phase = if (run.publisher != null || run.encoder?.window?.isReady == true) "connected" else "preparing"
+            run.encoder?.let { encoder ->
+                owner.schedule({ execute(p, run) {
+                    if (run.encoder === encoder && run.video && !encoder.window.isReady)
+                        streamFailure(p, run, RuntimeFailure("media_start_timeout"))
+                } }, (run.deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0), TimeUnit.MILLISECONDS)
+            }
             sessionEvent("source_ready", active, "view=${VIEWS[active.direction + 1]}")
         } catch (failure: Exception) {
             // A timed-out GL change may still be queued. Detach before releasing either encoder.
@@ -525,6 +565,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         run.publisher?.stopVideo(); run.encoder?.close(); run.encoder = null; run.video = false
     }
     private fun stop(p: Profile) {
+        p.retryOnNetwork = false
         val run = p.run
         p.generation++
         if (run != null) {
@@ -610,7 +651,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         // The authentication token is never logged; this digest correlates only diagnostics.
         val reference = java.security.MessageDigest.getInstance("SHA-256").digest(active.session.toByteArray())
             .take(6).joinToString("") { "%02x".format(it.toInt() and 255) }
-        android.util.Log.i("CameraViewing", "event=$event provider=${active.profile.method} session=$reference $extra")
+        CameraViewingDiagnostics.detail(event, active.profile.method, "session=$reference $extra")
     }
     private fun failed(p: Profile?, failure: Exception) {
         val code = ((failure as? RuntimeFailure)?.code ?: if (failure is SecurityException)
@@ -625,6 +666,11 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             }
             p.phase = if (p.pendingRevoke) "revoke_pending" else "error"
             p.error = code
+            val capabilities = connectivity.getNetworkCapabilities(connectivity.activeNetwork)
+            val offlineTimeout = code in setOf("tailscale_operation_timeout", "zrok_operation_timeout") &&
+                capabilities?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) != true
+            p.retryOnNetwork = enabled && p.authorized && !p.pendingRevoke &&
+                ((failure as? RuntimeFailure)?.networkFailure == true || offlineTimeout)
         }
     }
     override fun close() {
@@ -638,7 +684,8 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         }.get(30, TimeUnit.SECONDS)
         owner.shutdown()
     }
-    private class RuntimeFailure(val code: String, cause: Throwable? = null) : Exception(code, cause)
+    private class RuntimeFailure(val code: String, cause: Throwable? = null,
+        val networkFailure: Boolean = false) : Exception(code, cause)
     companion object {
         private val METHODS = listOf("vdo", "tailscale", "zrok")
         private val VIEWS = listOf("composition", "front", "rear", "left", "right")

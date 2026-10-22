@@ -349,6 +349,14 @@ public final class CameraHelperService extends Service {
         if (service != null) service.lifecycle("calls_event", "stage", stage, "details", details);
     }
 
+    public static void logViewingEvent(Context context, String stage, String provider, String details) {
+        CameraHelperService service = activeInstance;
+        if (service != null) service.lifecycle("viewing_event", "stage", stage,
+                "provider", provider, "details", details);
+        else AvasRecoveryJournal.event(context, "viewing_event", "stage", stage,
+                "provider", provider, "details", details);
+    }
+
     static void logMusicKeyDecision(int key, String reason, String foreground) {
         CameraHelperService service = activeInstance;
         if (service != null) service.lifecycle("music_media_key_ingress",

@@ -118,7 +118,22 @@ try {
         ""
     ) -join $newline
     $patched = $patched.Insert($networkInsert, $networkMethod)
+    $resetError = 'fmt.Errorf("tsnet.Up: clearing serve config: %w", err)'
+    if (-not $patched.Contains($resetError)) { throw "Pinned Serve error wrapper changed." }
+    $patched = $patched.Replace($resetError, 'fmt.Errorf("tsnet.Up: clearing serve config: %w", srvResetErr)')
     [IO.File]::WriteAllText($patchedTsnet, $patched, [Text.UTF8Encoding]::new($false))
+
+    $localCertPath = Join-Path $patchedTsnetModule "ipn\localapi\cert.go"
+    $localCert = [IO.File]::ReadAllText($localCertPath)
+    $certConstraint = '//go:build !ios && !android && !js && !ts_omit_acme'
+    if (-not $localCert.Contains($certConstraint)) { throw "Pinned LocalAPI cert constraint changed." }
+    [IO.File]::WriteAllText($localCertPath, $localCert.Replace($certConstraint,
+        '//go:build !ios && !js && !ts_omit_acme'), [Text.UTF8Encoding]::new($false))
+    $stubPath = Join-Path $patchedTsnetModule "ipn\localapi\disabled_stubs.go"
+    $stub = [IO.File]::ReadAllText($stubPath)
+    if (-not $stub.Contains('//go:build ios || android || js')) { throw "Pinned cert stub constraint changed." }
+    [IO.File]::WriteAllText($stubPath, $stub.Replace('//go:build ios || android || js',
+        '//go:build ios || js'), [Text.UTF8Encoding]::new($false))
 
     $certSource = [IO.File]::ReadAllText($certStoreSource)
     $certMethodStart = "func (b *LocalBackend) getCertStore() (certStore, error) {"

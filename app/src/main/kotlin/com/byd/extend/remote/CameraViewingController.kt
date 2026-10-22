@@ -47,8 +47,11 @@ class CameraViewingController private constructor(private val context: Context) 
     private val mutable = MutableStateFlow(CameraViewingState(readConfig()))
     val state: StateFlow<CameraViewingState> = mutable.asStateFlow()
     private var client: CameraViewingShellClient? = null
+    private var runtimeActive = false
+    private var helperRecoveryAvailable = true
     private val snapshots = linkedMapOf<String, JSONObject>()
     init {
+        CameraViewingDiagnostics.initializeApp(context)
         displaySettings.registerOnSharedPreferenceChangeListener(displayObserver)
         execute("initial_state") { refresh() }
     }
@@ -82,7 +85,7 @@ class CameraViewingController private constructor(private val context: Context) 
         val phase = current?.optString("phase", "idle") ?: "idle"
         mutable.value = CameraViewingState(
             config = if ((authorized || pending) && current != null) config.copy(
-                streamId = current.optString("name"), tailscalePublic = current.optBoolean("public")) else config,
+                streamId = current.optString("name")) else config,
             phase = phase, viewerUrl = current?.nullable("viewerUrl"),
             authorizationUrl = current?.nullable("authorizationUrl"),
             error = (current?.nullable("error") ?: backendError)?.let { context.getString(errorResource(it)) },
@@ -106,8 +109,11 @@ class CameraViewingController private constructor(private val context: Context) 
         if (!wasLocked) {
             edits.streamId?.let { editor.putString("draft_${method}_name", it) }
             if (regenerate) editor.putString("draft_${method}_name", CameraViewingEdits.newName(method))
+        }
+        if (snapshots[method]?.optBoolean("revocationPending") != true) {
             tailscalePublic?.let { editor.putBoolean("draft_tailscale_public", it) }
-            for ((field, value) in listOf("password" to edits.password, "token" to edits.token)) if (value != null) {
+            for ((field, value) in listOf("password" to edits.password, "token" to edits.token))
+                if (value != null && (!wasLocked || field == "password")) {
                 val bytes = value.toByteArray()
                 try { secrets.put("draft.camera.$method.$field", bytes) } finally { bytes.fill(0) }
             }
@@ -124,8 +130,10 @@ class CameraViewingController private constructor(private val context: Context) 
         else if (enabled == false && preferences.getBoolean("helper_provisioned", false))
             accept(ensureClient(false).request("configure", presentationPayload().put("enabled", false)))
         if (authorize) {
+            helperRecoveryAvailable = true
             val payload = profilePayload(method)
-            if (!wasLocked) {
+            if (wasLocked) payload.put("name", snapshots[method]?.optString("name") ?: state.value.identity)
+            run {
                 val authorizationEdits = CameraViewingEdits(method, payload.getString("name"),
                     payload.getString("password"), payload.getString("token"))
                 val validation = authorizationEdits.authorizationError(payload.getBoolean("public"))
@@ -159,6 +167,12 @@ class CameraViewingController private constructor(private val context: Context) 
                     snapshots.values.forEach { it.put("phase", "error").put("error", "helper_unavailable")
                         .put("viewerUrl", JSONObject.NULL).put("authorizationUrl", JSONObject.NULL) }
                     refresh()
+                    connected.close()
+                    if (runtimeActive && helperRecoveryAvailable && CameraChargeSettings.isRemoteViewingEnabled(context)) {
+                        helperRecoveryAvailable = false
+                        CameraViewingDiagnostics.detail("helper_death_recovery", "shared", "attempt=1")
+                        prepareBackend(ensureClient())
+                    }
                 }
             }
         }
@@ -240,11 +254,14 @@ class CameraViewingController private constructor(private val context: Context) 
     }
 
     fun runtimeStarted() = execute("runtime_started") {
+        runtimeActive = true
+        helperRecoveryAvailable = true
         if (CameraChargeSettings.isRemoteViewingEnabled(context)) prepareBackend(ensureClient())
     }
-    fun runtimeStopped() = execute("runtime_stopped") { client?.close(); client = null; backendError = null }
+    fun runtimeStopped() = execute("runtime_stopped") { runtimeActive = false; client?.close(); client = null; backendError = null }
     fun explicitShutdown() = explicitShutdown(Runnable {})
     fun explicitShutdown(onComplete: Runnable) = execute("shutdown") {
+        runtimeActive = false
         try { (client ?: if (preferences.getBoolean("helper_provisioned", false)) ensureClient(false) else null)
             ?.request("shutdown", JSONObject()) }
         finally { client?.close(); client = null; main.post(onComplete) }
@@ -294,6 +311,13 @@ class CameraViewingController private constructor(private val context: Context) 
             "tailscale_funnel_failed" -> R.string.cameras_error_tailscale_funnel
             "zrok_enable_failed" -> R.string.cameras_error_zrok_enable
             "zrok_share_failed" -> R.string.cameras_error_zrok_share
+            "zrok_endpoint_failed" -> R.string.cameras_error_endpoint
+            "zrok_identity_listener_failed" -> R.string.cameras_error_identity
+            "zrok_environment_missing" -> R.string.cameras_error_environment
+            "listener_failed" -> R.string.cameras_error_listener
+            "tailscale_operation_timeout", "zrok_operation_timeout" -> R.string.cameras_error_timeout
+            "tailscale_start_failed", "tailscale_up_failed", "tailscale_status_failed",
+            "tailscale_local_client_failed", "tailscale_backend_stopped", "tailscale_backend_state_unknown" -> R.string.cameras_error_provider_start
             "camera_unavailable" -> R.string.cameras_error_camera_unavailable
             "camera_backend_unavailable", "helper_unavailable" -> R.string.cameras_error_helper
             "encoder_unavailable" -> R.string.cameras_error_encoder_unavailable

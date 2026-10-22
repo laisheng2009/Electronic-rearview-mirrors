@@ -18,6 +18,7 @@ data class CameraTunnelResult(
     val errorCode: String? = null,
     val errorDetail: String? = null,
     val diagnostic: String? = null,
+    val networkFailure: Boolean = false,
 )
 
 /** Serialized app-facing facade for the userspace Tailscale and embedded Zrok providers. */
@@ -42,6 +43,20 @@ class CameraTunnelProvider(
     private val executor: ExecutorService = providerExecutor(kind)
     private val lifecycleLock = Any()
     private var closeRequested = false
+    private var eventListener: ((CameraTunnelResult) -> Unit)? = null
+
+    fun observeFailures(callback: (CameraTunnelResult) -> Unit) {
+        eventListener = callback
+        NativeTunnelBridge.observe(instanceId) { raw ->
+            executor.execute {
+                if (!isCloseRequested()) {
+                    val result = parseResult(raw)
+                    logNativeResult("serve", result)
+                    eventListener?.invoke(result)
+                }
+            }
+        }
+    }
 
     fun authorize(credential: String? = null, callback: (CameraTunnelResult) -> Unit) = submit(
         operation = "authorize",
@@ -151,6 +166,7 @@ class CameraTunnelProvider(
             if (closeRequested) return
             closeRequested = true
         }
+        NativeTunnelBridge.unobserve(instanceId)
         if (nativeConfiguration != null) {
             try {
                 NativeTunnelBridge.nativeCancel(kind, instanceId)
@@ -204,7 +220,11 @@ class CameraTunnelProvider(
             CameraViewingDiagnostics.detail("native_${operation}_response generation=$instanceId", kind,
                 detail, *knownSecrets)
         }
-        if (result.state != "error") return
+        if (result.state != "error") {
+            if (operation != "status") CameraViewingDiagnostics.detail("native_$operation generation=$instanceId",
+                kind, "state=${result.state}")
+            return
+        }
         val code = CameraViewingDiagnostics.safeText(result.errorCode ?: "missing", *knownSecrets)
         val detail = CameraViewingDiagnostics.safeText(result.errorDetail ?: "native error without detail", *knownSecrets)
         CameraViewingDiagnostics.detail("native_$operation generation=$instanceId", kind, "code=$code cause=$detail")
@@ -263,6 +283,7 @@ class CameraTunnelProvider(
                 errorCode = value.optString("errorCode").takeIf(String::isNotBlank),
                 errorDetail = value.optString("errorDetail").takeIf(String::isNotBlank),
                 diagnostic = value.optString("diagnostic").takeIf(String::isNotBlank),
+                networkFailure = value.optBoolean("networkFailure"),
             )
         }
 

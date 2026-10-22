@@ -44,7 +44,7 @@
     <string name="cameras_error_tailscale_https">"Could not start private Tailscale HTTPS access. Check MagicDNS, HTTPS and network connectivity."</string>
     <string name="cameras_error_tailscale_funnel">"Could not start Tailscale Funnel. Check the account’s Funnel permission, HTTPS and network connectivity."</string>
     <string name="cameras_error_zrok_enable">"Could not register the vehicle with Zrok. Check the account token, account access and network connectivity."</string>
-    <string name="cameras_error_zrok_share">"Could not create the Zrok viewing link. Check connection-name availability, account access and network connectivity."</string>
+    <string name="cameras_error_zrok_share">"Could not create the Zrok viewing link. Check account access and the network; details are in diagnostic logs."</string>
     <string name="cameras_account_token">"Account token"</string>
     <string name="cameras_connection_name">"Connection name"</string>
     <string name="cameras_access">"Viewing access"</string>
@@ -79,7 +79,7 @@
     <string name="cameras_error_encoder_unavailable">"Hardware video encoding is unavailable."</string>
     <string name="cameras_error_connection">"Could not establish the viewing connection. Check authorization and network access."</string>
     <string name="cameras_error_helper">"The internal viewing or camera service is unavailable. This is not an account authorization error."</string>
-    <string name="cameras_error_secret">"Secure credentials could not be read or saved. Authorize this device again."</string>
+    <string name="cameras_error_secret">"Could not read or save encrypted access data. Details are in diagnostic logs."</string>
     <string name="motion_notice">"Operation depends on the available vehicle components. Required capabilities are checked at runtime; failures and their causes are logged."</string>
     <string name="motion_enable">"Show a warning when motion is detected"</string>
     <string name="motion_timing">"Vehicle off • wait 2.5 s • show for 10 s; repeated detection extends the display."</string>
@@ -155,4 +155,10 @@
     <string name="motion_video_title">"Motion-triggered video"</string>
     <string name="motion_video_enable">"Save video when motion is detected"</string>
     <string name="cameras_error_name">"Invalid connection name. Use 1–63 lowercase Latin letters, digits or hyphens; no hyphen at either end."</string>
+    <string name="cameras_error_provider_start">"The provider could not complete startup. Retry without revoking access; details are in diagnostic logs."</string>
+    <string name="cameras_error_identity">"Could not load the saved Zrok identity or open its listener. Details are in diagnostic logs."</string>
+    <string name="cameras_error_environment">"The Zrok environment no longer exists in the account. Revoke this saved access and authorize again."</string>
+    <string name="cameras_error_endpoint">"Zrok returned no usable HTTPS viewing address. Details are in diagnostic logs."</string>
+    <string name="cameras_error_listener">"The viewing listener stopped unexpectedly. Reconnect; details are in diagnostic logs."</string>
+    <string name="cameras_error_timeout">"The provider did not finish connecting within the time limit. Retry or check the network."</string>
 </resources>

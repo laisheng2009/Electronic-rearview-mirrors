@@ -85,6 +85,9 @@
   };
   const cameraLabels = Object.fromEntries(cameras.map((key) => [key, text[key]]));
   let hlsScriptPromise;
+  let actionGeneration = 0;
+  let mediaGeneration = 0;
+  let controlQueue = Promise.resolve();
   let liveFrameToken = 0;
   let archiveFrameToken = 0;
   let archiveResizeObserver = null;
@@ -137,8 +140,11 @@
   };
 
   async function api(path, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
     const response = await fetch(path, {
-      credentials: 'same-origin', cache: 'no-store', ...options,
+      credentials: 'same-origin', cache: 'no-store', ...options, signal: controller.signal,
       headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) }
     });
     const bodyText = await response.text();
@@ -151,8 +157,15 @@
       throw failure;
     }
     return body;
+    } finally { clearTimeout(timeout); }
   }
-  const post = (path, body = {}) => api(path, { method: 'POST', body: JSON.stringify(body) });
+  const post = (path, body = {}) => {
+    const send = () => api(path, { method: 'POST', body: JSON.stringify(body) });
+    if (!['/live', '/archive/open', '/archive/close', '/stop', '/session'].includes(path)) return send();
+    const pending = controlQueue.then(send, send);
+    controlQueue = pending.catch(() => {});
+    return pending;
+  };
 
   function pageHeader() {
     return `<header class="head"><span class="brandmark">${icon('camera')}</span><div><div class="brand">BYD Extend</div><div class="subtitle">${escapeHtml(text.subtitle)} · ${escapeHtml(provider)}</div></div></header>`;
@@ -338,6 +351,7 @@
     const key = mainKey();
     if (!force && key === state.mainKey) return;
     state.mainKey = key;
+    stopLiveMedia();
     disconnectArchiveResizeObserver();
     app.classList.toggle('has-player', state.mode === 'archive' && Boolean(state.selectedRecord));
     if (state.replaced || state.status === 'ended') main.innerHTML = liveGate();
@@ -361,23 +375,27 @@
   }
 
   async function loadArchive() {
+    const action = actionGeneration;
     state.archiveLoading = true;
     state.archiveError = false;
     renderMain(true);
     try {
       const result = await api('/archive');
+      if (action !== actionGeneration || state.mode !== 'archive') return;
       const catalog = normalizeArchive(result);
       state.recordings = catalog.recordings;
       state.selectedDay = catalog.latest || todayKey();
       state.month = state.selectedDay.slice(0, 7);
       state.archiveLoaded = true;
     } catch (failure) {
+      if (action !== actionGeneration) return;
       if (failure.statusCode === 401) handleUnauthorized(failure);
       else {
         console.warn('Could not load camera archive catalog', failure);
         state.archiveError = true;
       }
     } finally {
+      if (action !== actionGeneration) return;
       state.archiveLoading = false;
       renderMain(true);
     }
@@ -385,10 +403,12 @@
 
   async function openArchive() {
     if (state.mode === 'archive') return;
-    if (!await closeArchivePlayer()) return;
+    const action = ++actionGeneration;
+    if (!await closeArchivePlayer() || action !== actionGeneration) return;
     stopLiveMedia();
     try {
       const result = await post('/archive/open');
+      if (action !== actionGeneration) return;
       state.mode = 'archive';
       rememberMode('archive');
       state.status = result.status || 'ready';
@@ -398,6 +418,7 @@
       renderMain(true);
       if (!state.archiveLoaded) await loadArchive();
     } catch (failure) {
+      if (action !== actionGeneration) return;
       if (failure.statusCode === 401) handleUnauthorized(failure);
       else {
         console.warn('Could not enter camera archive', failure);
@@ -413,6 +434,8 @@
 
   async function startLive(view = state.view) {
     if (state.replaced) return;
+    if (!state.authenticated) { await signIn(); return; }
+    const action = ++actionGeneration;
     state.mode = 'live';
     rememberMode('live');
     state.view = cameras.includes(view) ? view : 'composition';
@@ -426,12 +449,14 @@
     renderMain(true);
     try {
       const result = await post('/live', { view: state.view });
+      if (action !== actionGeneration) return;
       state.status = result.status === 'ready' || !result.status ? 'preparing' : result.status;
       if (['error', 'ended'].includes(state.status)) state.wantsLive = false;
       renderMain(true);
       if (state.status === 'connected') startLiveMedia();
       updateStatusBar();
     } catch (failure) {
+      if (action !== actionGeneration) return;
       if (failure.statusCode === 401) handleUnauthorized(failure);
       else {
         console.warn('Could not start live camera view', failure);
@@ -454,8 +479,9 @@
   }
 
   async function openRecording(id) {
+    const action = ++actionGeneration;
     if (!state.recordings.some((record) => record.id === id)) return;
-    if (!await closeArchivePlayer()) return;
+    if (!await closeArchivePlayer() || action !== actionGeneration) return;
     if (state.replaced) return;
     state.selectedRecord = id;
     state.archiveView = 'composition';
@@ -466,11 +492,16 @@
   }
 
   async function closeArchivePlayer({ leave = false } = {}) {
+    const action = actionGeneration;
     const video = document.getElementById('archive-video');
     if (!state.selectedRecord && !video && !leave) return true;
     if (video) video.pause();
-    try { await post('/archive/close', leave ? { leave: true } : {}); }
+    try {
+      await post('/archive/close', leave ? { leave: true } : {});
+      if (action !== actionGeneration) return false;
+    }
     catch (failure) {
+      if (action !== actionGeneration) return false;
       if (failure.statusCode === 401) handleUnauthorized(failure);
       else {
         console.warn('Could not close camera archive playback', failure);
@@ -660,17 +691,25 @@
   async function startLiveMedia() {
     const video = document.getElementById('live-video');
     if (!video || video.dataset.started === 'true' || state.liveFailed) return;
+    const generation = ++mediaGeneration;
+    const current = () => generation === mediaGeneration && video.isConnected &&
+      state.authenticated && !state.replaced && state.mode === 'live' && state.wantsLive;
     video.dataset.started = 'true';
     reportFirstFrame(video, 'live');
-    const fail = (cause) => {
-      if (cause) console.error('Live video playback failed', cause);
-      state.liveFailed = true;
-      state.wantsLive = false;
-      state.status = 'error';
+    const fail = (cause, category = 'play') => {
+      if (!current()) return;
+      console.warn('Live playback failed', category, cause?.name || cause?.type || 'media');
+      ++actionGeneration;
+      clearInterval(state.poll); state.poll = null;
+      state.liveFailed = true; state.wantsLive = false; state.status = 'error';
+      // Stop is submitted now, using this session; diagnostics cannot delay cleanup.
+      post('/diagnostic', { event: 'playback_error', category }).catch(() => {});
+      post('/stop').catch(() => {});
+      state.authenticated = false;
       stopLiveMedia();
       renderMain(true);
     };
-    video.onerror = (event) => fail(event.target?.error || event);
+    video.onerror = () => fail(video.error, video.error?.code === 3 ? 'decode' : 'load');
     try {
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = '/live.m3u8';
@@ -678,17 +717,21 @@
         return;
       }
       const Hls = await loadHlsLibrary();
-      if (!Hls || !Hls.isSupported()) throw new Error('HLS playback is not supported');
+      if (!current()) return;
+      if (!Hls || !Hls.isSupported()) { fail(null, 'hls'); return; }
       const hls = new Hls({ liveSyncDurationCount: 2, maxBufferLength: 8 });
       state.hls = hls;
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (current()) video.play().catch((error) => fail(error));
+      });
+      hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) fail(data, 'hls'); });
       hls.loadSource('/live.m3u8');
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(fail));
-      hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) fail(data); });
     } catch (failure) { fail(failure); }
   }
 
   function stopLiveMedia() {
+    mediaGeneration++;
     liveFrameToken++;
     if (state.hls) {
       state.hls.destroy();
@@ -705,6 +748,7 @@
   }
 
   function handleUnauthorized(failure) {
+    actionGeneration++;
     stopLiveMedia();
     const video = document.getElementById('archive-video');
     if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
@@ -721,9 +765,11 @@
 
   async function pollStatus() {
     if (!state.authenticated || state.replaced) return;
+    const action = actionGeneration;
     try {
       const previous = state.status;
       const data = await api('/status');
+      if (action !== actionGeneration || !state.authenticated) return;
       if (data.status === 'replaced') {
         handleUnauthorized({ body: { status: 'replaced' } });
         return;
@@ -742,18 +788,22 @@
       updateStatusBar();
       renderMain();
     } catch (failure) {
+      if (action !== actionGeneration || !state.authenticated) return;
       if (failure.statusCode === 401) handleUnauthorized(failure);
       else console.warn('Camera viewer status poll failed', failure);
     }
   }
 
   async function endSession() {
+    const action = ++actionGeneration;
     clearInterval(state.poll);
     state.poll = null;
     stopLiveMedia();
     await closeArchivePlayer();
+    if (action !== actionGeneration) return;
     try { await post('/stop'); }
     catch (failure) { console.warn('Could not stop camera viewer session', failure); }
+    if (action !== actionGeneration) return;
     state.authenticated = false;
     state.replaced = false;
     state.status = 'ended';
@@ -769,6 +819,7 @@
   }
 
   async function signIn() {
+    ++actionGeneration;
     clearInterval(state.poll);
     state.poll = null;
     state.authenticated = false;
@@ -836,8 +887,9 @@
     if (action === 'tab') {
       if (button.dataset.mode === 'archive') await openArchive();
       else {
+        const action = ++actionGeneration;
         const wasArchive = state.mode === 'archive';
-        if (!await closeArchivePlayer({ leave: wasArchive })) return;
+        if (!await closeArchivePlayer({ leave: wasArchive }) || action !== actionGeneration) return;
         if (state.replaced) return;
         state.mode = 'live';
         rememberMode('live');
@@ -862,6 +914,7 @@
     }
     if (action === 'record') { await openRecording(button.dataset.id); return; }
     if (action === 'date') {
+      ++actionGeneration;
       if (state.selectedRecord && !await closeArchivePlayer()) return;
       state.selectedDay = button.dataset.day;
       state.month = state.selectedDay.slice(0, 7);
@@ -870,6 +923,7 @@
       return;
     }
     if (action === 'month') {
+      ++actionGeneration;
       if (state.selectedRecord && !await closeArchivePlayer()) return;
       state.month = addMonth(state.month, Number(button.dataset.delta));
       state.selectedDay = `${state.month}-01`;
@@ -878,6 +932,7 @@
       return;
     }
     if (action === 'back') {
+      ++actionGeneration;
       if (!await closeArchivePlayer()) return;
       state.mainKey = '';
       renderMain(true);

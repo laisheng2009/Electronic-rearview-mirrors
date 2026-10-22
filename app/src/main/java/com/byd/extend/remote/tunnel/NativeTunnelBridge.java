@@ -2,10 +2,27 @@ package com.byd.extend.remote.tunnel;
 
 import com.byd.extend.remote.security.TunnelSecretStore;
 import java.io.File;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
+import com.byd.extend.remote.CameraViewingDiagnostics;
 
 /** Narrow JNI boundary for the pinned userspace tunnel implementations. */
 public final class NativeTunnelBridge {
     private static String loadedLibraryPath;
+    private static final ConcurrentHashMap<String, Consumer<String>> listeners = new ConcurrentHashMap<>();
+
+    public static void observe(String id, Consumer<String> listener) { listeners.put(id, listener); }
+    public static void unobserve(String id) { listeners.remove(id); }
+    public static void onNativeEvent(String id, String result) {
+        Consumer<String> listener = listeners.get(id);
+        if (listener != null) listener.accept(result);
+    }
+    public static void onNativeDiagnostic(String provider, String stage, String detail) {
+        CameraViewingDiagnostics.detail(stage, provider, detail);
+    }
+    public static void onStoreFailure(String operation, Throwable failure) {
+        CameraViewingDiagnostics.failure("native_store_" + operation, "private_store", failure);
+    }
 
     private NativeTunnelBridge() {}
 

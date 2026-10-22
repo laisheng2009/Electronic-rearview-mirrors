@@ -13,6 +13,8 @@ extern void camera_tunnel_network_changed(void);
 extern void camera_tunnel_cancel(char *provider, char *instance_id);
 
 static JavaVM *g_vm;
+static jclass g_bridge;
+static jmethodID g_event, g_diagnostic, g_store_failure;
 static jobject g_secret_store;
 static jmethodID g_get_secret;
 static jmethodID g_put_secret;
@@ -43,6 +45,45 @@ static void release_env(int attached) {
 
 static jstring new_string(JNIEnv *env, const char *value) {
     return (*env)->NewStringUTF(env, value == NULL ? "" : value);
+}
+
+static void report_store_exception(JNIEnv *env, const char *operation) {
+    jthrowable failure = (*env)->ExceptionOccurred(env);
+    if (failure == NULL) return;
+    (*env)->ExceptionClear(env);
+    if (g_bridge != NULL && g_store_failure != NULL) {
+        jstring stage = new_string(env, operation);
+        (*env)->CallStaticVoidMethod(env, g_bridge, g_store_failure, stage, failure);
+        (*env)->DeleteLocalRef(env, stage);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    }
+    (*env)->DeleteLocalRef(env, failure);
+}
+
+void camera_tunnel_event(const char *instance, const char *result) {
+    int attached = 0;
+    JNIEnv *env = get_env(&attached);
+    if (env == NULL) return;
+    if (g_bridge != NULL && g_event != NULL) {
+        jstring id = new_string(env, instance), value = new_string(env, result);
+        (*env)->CallStaticVoidMethod(env, g_bridge, g_event, id, value);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        (*env)->DeleteLocalRef(env, id); (*env)->DeleteLocalRef(env, value);
+    }
+    release_env(attached);
+}
+
+void camera_tunnel_diagnostic(const char *provider, const char *stage, const char *detail) {
+    int attached = 0;
+    JNIEnv *env = get_env(&attached);
+    if (env == NULL) return;
+    if (g_bridge != NULL && g_diagnostic != NULL) {
+        jstring p = new_string(env, provider), s = new_string(env, stage), d = new_string(env, detail);
+        (*env)->CallStaticVoidMethod(env, g_bridge, g_diagnostic, p, s, d);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        (*env)->DeleteLocalRef(env, p); (*env)->DeleteLocalRef(env, s); (*env)->DeleteLocalRef(env, d);
+    }
+    release_env(attached);
 }
 
 int camera_secret_get(const char *key, char **out_value, size_t *out_length) {
@@ -92,7 +133,7 @@ int camera_secret_get(const char *key, char **out_value, size_t *out_length) {
     } else if ((*env)->ExceptionCheck(env)) {
         result_status = -1;
     }
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    report_store_exception(env, "read");
     if (result != NULL) {
         jsize result_length = (*env)->GetArrayLength(env, result);
         if (result_length > 0 && !(*env)->ExceptionCheck(env)) {
@@ -137,7 +178,7 @@ int camera_secret_put(const char *key, const char *value, size_t length) {
         (*env)->CallVoidMethod(env, local_store, method, key_string, bytes);
     }
     int success = !(*env)->ExceptionCheck(env);
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    report_store_exception(env, "write");
     if (bytes != NULL) {
         if (length != 0) {
             jbyte *data = (*env)->GetByteArrayElements(env, bytes, NULL);
@@ -173,7 +214,7 @@ int camera_secret_remove(const char *key) {
     jstring key_string = new_string(env, key);
     (*env)->CallVoidMethod(env, local_store, method, key_string);
     int success = !(*env)->ExceptionCheck(env);
-    if (!success) (*env)->ExceptionClear(env);
+    if (!success) report_store_exception(env, "remove");
     (*env)->DeleteLocalRef(env, key_string);
     (*env)->DeleteLocalRef(env, local_store);
     release_env(attached);
@@ -199,7 +240,7 @@ int camera_secret_remove_prefix(const char *prefix) {
     jstring prefix_string = new_string(env, prefix);
     (*env)->CallVoidMethod(env, local_store, method, prefix_string);
     int success = !(*env)->ExceptionCheck(env);
-    if (!success) (*env)->ExceptionClear(env);
+    if (!success) report_store_exception(env, "remove_prefix");
     (*env)->DeleteLocalRef(env, prefix_string);
     (*env)->DeleteLocalRef(env, local_store);
     release_env(attached);
@@ -238,8 +279,14 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 JNIEXPORT jboolean JNICALL
 Java_com_byd_extend_remote_tunnel_NativeTunnelBridge_nativeInitialize(
     JNIEnv *env, jclass clazz, jobject secret_store, jstring runtime_directory) {
-    (void)clazz;
     if (secret_store == NULL || runtime_directory == NULL) return JNI_FALSE;
+    if (g_bridge == NULL) {
+        g_bridge = (*env)->NewGlobalRef(env, clazz);
+        g_event = (*env)->GetStaticMethodID(env, clazz, "onNativeEvent", "(Ljava/lang/String;Ljava/lang/String;)V");
+        g_diagnostic = (*env)->GetStaticMethodID(env, clazz, "onNativeDiagnostic", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+        g_store_failure = (*env)->GetStaticMethodID(env, clazz, "onStoreFailure", "(Ljava/lang/String;Ljava/lang/Throwable;)V");
+        if ((*env)->ExceptionCheck(env)) return JNI_FALSE;
+    }
     jclass store_class = (*env)->GetObjectClass(env, secret_store);
     if (store_class == NULL) return JNI_FALSE;
     jmethodID get_secret = (*env)->GetMethodID(env, store_class, "getNative", "(Ljava/lang/String;)[B");
