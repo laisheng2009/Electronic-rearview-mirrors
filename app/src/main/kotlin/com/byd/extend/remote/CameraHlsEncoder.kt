@@ -27,8 +27,6 @@ internal class CameraHlsEncoder(
     private var muxer: FragmentedMp4Muxer? = null
     private var track = -1
     private var firstPts = -1L
-    private var fragmentStart = -1L
-    private var lastPts = 0L
     private var frames = 0L
     private var bytes = 0L
     private var lastStatisticsNs = 0L
@@ -89,14 +87,9 @@ internal class CameraHlsEncoder(
                                 val output = encoder.getOutputBuffer(index) ?: error("Missing H.264 output")
                                 output.position(info.offset); output.limit(info.offset + info.size)
                                 val active = muxer ?: error("H.264 payload before format")
-                                if (firstPts < 0) { firstPts = info.presentationTimeUs; fragmentStart = 0 }
+                                if (firstPts < 0) firstPts = info.presentationTimeUs
                                 val pts = info.presentationTimeUs - firstPts
                                 val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-                                if (key && pts - fragmentStart >= 2_000_000) {
-                                    window.nextFragmentDuration((pts - fragmentStart) / 1_000_000.0)
-                                    fragmentStart = pts
-                                }
-                                lastPts = pts
                                 active.writeSampleData(track, output.slice(),
                                     BufferInfo(pts, info.size, if (key) C.BUFFER_FLAG_KEY_FRAME else 0))
                                 frames++; bytes += info.size
@@ -113,7 +106,6 @@ internal class CameraHlsEncoder(
         } catch (error: Throwable) { if (!stopped.get()) failed(this, error) }
         finally {
             runCatching {
-                if (lastPts > fragmentStart) window.nextFragmentDuration((lastPts - fragmentStart) / 1_000_000.0)
                 muxer?.close()
             }.onFailure { CameraViewingDiagnostics.failure("hls_muxer_close", "shared", it) }
             muxer = null

@@ -353,7 +353,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             val server = CameraViewerServer(p.config.optString("password"), privateProof, object : CameraViewerServer.Stream {
                 override fun admitted(session: String) = serialized { admit(p, run, session) }
                 override fun current(session: String) = current(run, session)
-                override fun disconnected(session: String) = execute(p, run) { disconnected(p, run, session) }
+                override fun disconnected(session: String, reason: String) = execute(p, run) { disconnected(p, run, session, reason) }
                 override fun failed(failure: Throwable) = execute(p, run) {
                     throw RuntimeFailure("listener_failed", failure)
                 }
@@ -382,9 +382,6 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                     }
                 }
                 override fun recordings() = archive
-                override fun playbackError(session: String, category: String) = execute(p, run) {
-                    viewer?.takeIf { current(run, session) }?.let { sessionEvent("browser_playback_error", it, "category=$category") }
-                }
                 override fun video() = run.encoder?.window
                 override fun resource(name: String) = context.assets.open("camera-view/$name").use { it.readBytes() }
             })
@@ -541,9 +538,10 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             }
         }
     }
-    private fun disconnected(p: Profile, run: Run, id: String) {
+    private fun disconnected(p: Profile, run: Run, id: String, reason: String = "origin=vdo_disconnect") {
         val active = viewer?.takeIf { current(run, id) } ?: return
-        sessionEvent("ended", active)
+        if (reason.startsWith("origin=playback_error")) sessionEvent("browser_playback_error", active, reason)
+        sessionEvent("ended", active, reason)
         run.viewer = false
         closeVideo()
         lease.release(active); viewer = null

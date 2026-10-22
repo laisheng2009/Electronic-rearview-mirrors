@@ -311,10 +311,10 @@
     const duration = Number(record.durationMs);
     if (!Number.isFinite(duration) || duration <= 0 || !Array.isArray(record.events)) return '';
     return record.events.map((event) => {
-      if (!Number.isFinite(event.startMs) || !Number.isFinite(event.endMs) || event.endMs <= event.startMs) return '';
+      if (!Number.isFinite(event.startMs) || !Number.isFinite(event.endMs) || event.endMs < event.startMs || event.endMs < 0 || event.startMs > duration) return '';
       const start = Math.max(0, Math.min(100, event.startMs / duration * 100));
       const end = Math.max(start, Math.min(100, event.endMs / duration * 100));
-      return `<span class="marker${event.level === 'red' ? ' red' : ''}" style="left:${start}%;width:${end - start}%" aria-hidden="true"></span>`;
+      return `<span class="marker${event.level === 'red' ? ' red' : ''}" style="left:min(${start}%,calc(100% - 2px));width:max(2px,${end - start}%)" aria-hidden="true"></span>`;
     }).join('');
   }
 
@@ -702,9 +702,10 @@
       ++actionGeneration;
       clearInterval(state.poll); state.poll = null;
       state.liveFailed = true; state.wantsLive = false; state.status = 'error';
-      // Stop is submitted now, using this session; diagnostics cannot delay cleanup.
-      post('/diagnostic', { event: 'playback_error', category }).catch(() => {});
-      post('/stop').catch(() => {});
+      // The cause and teardown travel together; a separate request races session invalidation.
+      post('/stop', { origin: 'playback_error', category, mediaCode: video.error?.code,
+        exception: cause?.error?.name || cause?.name, hlsType: cause?.type, hlsDetails: cause?.details,
+        fragment: cause?.frag?.sn, httpStatus: cause?.response?.code }).catch(() => {});
       state.authenticated = false;
       stopLiveMedia();
       renderMain(true);
@@ -801,7 +802,7 @@
     stopLiveMedia();
     await closeArchivePlayer();
     if (action !== actionGeneration) return;
-    try { await post('/stop'); }
+    try { await post('/stop', { origin: 'manual' }); }
     catch (failure) { console.warn('Could not stop camera viewer session', failure); }
     if (action !== actionGeneration) return;
     state.authenticated = false;
@@ -1012,7 +1013,7 @@
     clearInterval(state.poll);
     disconnectArchiveResizeObserver();
     stopLiveMedia();
-    if (state.authenticated && navigator.sendBeacon) navigator.sendBeacon('/stop', new Blob(['{}'], { type: 'application/json' }));
+    if (state.authenticated && navigator.sendBeacon) navigator.sendBeacon('/stop', new Blob(['{"origin":"pagehide"}'], { type: 'application/json' }));
   });
 
   renderLogin();

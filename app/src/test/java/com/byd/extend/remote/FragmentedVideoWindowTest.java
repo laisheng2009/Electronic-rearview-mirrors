@@ -115,7 +115,6 @@ public class FragmentedVideoWindowTest {
         }
 
         FragmentedVideoWindow window = new FragmentedVideoWindow();
-        window.nextFragmentDuration(0.5);
         int[] chunks = {1, 7, 2, 19, 4093, 3, 257, 11};
         int offset = 0;
         int chunk = 0;

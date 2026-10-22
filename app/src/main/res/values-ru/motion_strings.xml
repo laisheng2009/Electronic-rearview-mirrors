@@ -68,6 +68,9 @@
     <string name="cameras_revoke">"Отозвать доступ"</string>
     <string name="cameras_retry_revoke">"Повторить отзыв"</string>
     <string name="cameras_retry_connection">"Повторить подключение"</string>
+    <string name="cameras_apply_connection">"Применить подключение"</string>
+    <string name="cameras_access_changes_pending">"Изменения не применены"</string>
+    <string name="cameras_error_tailscale_funnel_permission">"Устройство автомобиля в Tailscale не получило разрешение Funnel. Разрешите атрибут funnel для его аккаунта или тега в политике Tailscale и повторите подключение."</string>
     <string name="cameras_access_authorized">"Для этого провайдера разрешён один доступ. Чтобы заменить учётную запись или доступ, сначала отзовите его."</string>
     <string name="cameras_access_identity">"Сохранённая идентичность доступа: %1$s"</string>
     <string name="cameras_revoke_pending">"Удалённый отзыв ещё не завершён. Повторите его перед новой авторизацией."</string>

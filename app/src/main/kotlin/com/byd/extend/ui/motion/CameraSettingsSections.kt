@@ -263,9 +263,11 @@ internal fun FormScope.CameraViewingScreen(
     val canAuthorize = state.config.enabled && !state.busy && !state.revocationPending &&
         authInputsLoaded && validationError == null
     val canCancel = state.busy && !state.revocationPending
-    val shareable = !streamIdDirty && !passwordDirty && !tokenDirty && !state.viewerUrl.isNullOrBlank()
+    val pendingAccess = state.accessChangesPending || state.authorized && passwordDirty
+    val shareable = !pendingAccess && !streamIdDirty && !passwordDirty && !tokenDirty && !state.viewerUrl.isNullOrBlank()
     val phaseStatus = when {
         state.revocationPending -> strings.motionText(R.string.cameras_revoke_pending)
+        pendingAccess -> strings.motionText(R.string.cameras_access_changes_pending)
         blocked || phase == "low_battery" -> strings.motionText(R.string.cameras_status_low_battery)
         phase == "approval_pending" -> strings.motionText(R.string.cameras_status_approval_pending)
         phase == "authorizing" || phase == "starting" -> strings.motionText(R.string.cameras_status_authorizing)
@@ -278,6 +280,7 @@ internal fun FormScope.CameraViewingScreen(
     }
     val phaseTone = when {
         state.revocationPending -> StatusTone.Warning
+        pendingAccess -> StatusTone.Warning
         blocked || phase in setOf("low_battery", "authorizing", "starting", "approval_pending", "connecting", "preparing") -> StatusTone.Warning
         phase == "connected" -> StatusTone.Ok
         phase == "error" -> StatusTone.Error
@@ -410,7 +413,7 @@ internal fun FormScope.CameraViewingScreen(
                 }
             }
         }
-        if (!state.revocationPending && (!state.authorized || phase == "error" || phase == "idle" || canCancel)) row("provider-actions") {
+        if (!state.revocationPending && (!state.authorized || pendingAccess || phase == "error" || phase == "idle" || canCancel)) row("provider-actions") {
             Column(horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp,
@@ -425,6 +428,7 @@ internal fun FormScope.CameraViewingScreen(
                         }
                     }
                     ActionButton(strings.motionText(if (canCancel) R.string.cancel
+                        else if (pendingAccess) R.string.cameras_apply_connection
                         else if (state.authorized) R.string.cameras_retry_connection
                         else R.string.cameras_authorize), colors, Modifier.weight(1f),
                         enabled = canAuthorize || canCancel) {
@@ -458,7 +462,7 @@ internal fun FormScope.CameraViewingScreen(
         if (state.authorized && state.identity.isNullOrBlank()) row("identity") {
             Text(strings.motionText(R.string.cameras_access_authorized), color = colors.muted, fontSize = 13.sp)
         }
-        state.viewerUrl?.let { viewerUrl -> row("viewer-url") {
+        state.viewerUrl?.takeUnless { pendingAccess }?.let { viewerUrl -> row("viewer-url") {
             Text(viewerUrl, color = colors.muted, fontSize = 12.sp)
         } }
         if (state.viewerUrl.isNullOrBlank()) row("link-pending") {

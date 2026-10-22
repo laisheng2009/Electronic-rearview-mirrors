@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Locale;
 
-/** Bounded in-memory HLS window. Media3 creates every MP4 box; this only splits complete boxes. */
+/** Bounded HLS window with independently addressable, timed fMP4 fragments. */
 public final class FragmentedVideoWindow extends OutputStream {
     private static final int MAX_BOX = 8 * 1024 * 1024;
     private static final int MAX_SEGMENTS = 4;
@@ -16,11 +16,11 @@ public final class FragmentedVideoWindow extends OutputStream {
     private String boxType;
     private ByteArrayOutputStream box;
     private final ByteArrayOutputStream init = new ByteArrayOutputStream();
-    private ByteArrayOutputStream fragment;
+    private byte[] fragment;
+    private final HlsFragment hls = new HlsFragment();
     private byte[] initialization;
     private final ArrayDeque<Segment> segments = new ArrayDeque<>();
     private long sequence;
-    private double nextDuration = 2.0;
     private boolean closed;
     private final Runnable onReady;
     public FragmentedVideoWindow() { this(() -> {}); }
@@ -34,12 +34,6 @@ public final class FragmentedVideoWindow extends OutputStream {
         Segment(long id, double duration, byte[] bytes) {
             this.id = id; this.duration = duration; this.bytes = bytes;
         }
-    }
-
-    public synchronized void nextFragmentDuration(double seconds) {
-        if (!Double.isFinite(seconds) || seconds <= 0 || seconds > 30)
-            throw new IllegalArgumentException("Invalid video fragment duration");
-        nextDuration = seconds;
     }
 
     @Override public void write(int value) throws IOException { write(new byte[]{(byte) value}, 0, 1); }
@@ -78,21 +72,24 @@ public final class FragmentedVideoWindow extends OutputStream {
             case "moov":
                 if (initialization != null || init.size() + bytes.length > 1024 * 1024)
                     throw new IOException("Invalid video initialization");
+                if ("ftyp".equals(type)) bytes = HlsFragment.compatibleBrands(bytes);
+                else hls.initialize(bytes);
                 init.write(bytes);
                 if ("moov".equals(type)) initialization = init.toByteArray();
                 break;
             case "moof":
                 if (initialization == null || fragment != null)
                     throw new IOException("Invalid video fragment order");
-                fragment = new ByteArrayOutputStream();
-                fragment.write(bytes);
+                fragment = bytes;
                 break;
             case "mdat":
                 if (fragment == null) throw new IOException("Video payload without fragment");
-                if (fragment.size() + bytes.length > MAX_BOX)
+                if (fragment.length + bytes.length > MAX_BOX)
                     throw new IOException("Video fragment exceeds memory budget");
-                fragment.write(bytes);
-                segments.add(new Segment(sequence++, nextDuration, fragment.toByteArray()));
+                HlsFragment.Result normalized = hls.normalize(fragment, bytes.length - 8);
+                ByteArrayOutputStream output = new ByteArrayOutputStream(normalized.moof.length + bytes.length);
+                output.write(normalized.moof); output.write(bytes);
+                segments.add(new Segment(sequence++, normalized.seconds, output.toByteArray()));
                 while (segments.size() > MAX_SEGMENTS) segments.removeFirst();
                 fragment = null;
                 if (sequence == 1) onReady.run();

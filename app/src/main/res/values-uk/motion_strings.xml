@@ -68,6 +68,9 @@
     <string name="cameras_revoke">"Відкликати доступ"</string>
     <string name="cameras_retry_revoke">"Повторити відкликання"</string>
     <string name="cameras_retry_connection">"Повторити підключення"</string>
+    <string name="cameras_apply_connection">"Застосувати підключення"</string>
+    <string name="cameras_access_changes_pending">"Зміни не застосовано"</string>
+    <string name="cameras_error_tailscale_funnel_permission">"Пристрій авто в Tailscale не отримав дозвіл Funnel. Дозвольте атрибут funnel для його акаунта або тегу в політиці Tailscale та повторіть підключення."</string>
     <string name="cameras_access_authorized">"Для цього провайдера авторизовано один доступ. Щоб замінити обліковий запис або доступ, спершу відкличте його."</string>
     <string name="cameras_access_identity">"Збережена ідентичність доступу: %1$s"</string>
     <string name="cameras_revoke_pending">"Відкликання на сервері ще не завершено. Повторіть відкликання перед новою авторизацією."</string>

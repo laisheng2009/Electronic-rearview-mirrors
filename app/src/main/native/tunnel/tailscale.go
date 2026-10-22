@@ -231,7 +231,7 @@ func (p *tailscaleProvider) Start(name string, localPort int, public bool, priva
 			return tailscaleOperationFailure(ctx, "tailscale_listen_failed", "start.listen", err, privateProxyCredential)
 		}
 		if public {
-			return failureWithDiagnostic("tailscale_funnel_failed", "start.listen_funnel", err, privateProxyCredential)
+			return failureWithDiagnostic(funnelFailureCode(err), "start.listen_funnel", err, privateProxyCredential)
 		}
 		return failureWithDiagnostic("tailscale_https_failed", "start.listen_tls", err, privateProxyCredential)
 	}

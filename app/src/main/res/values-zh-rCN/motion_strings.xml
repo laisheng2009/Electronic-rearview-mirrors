@@ -68,6 +68,9 @@
     <string name="cameras_revoke">"撤销访问"</string>
     <string name="cameras_retry_revoke">"重试撤销"</string>
     <string name="cameras_retry_connection">"重试连接"</string>
+    <string name="cameras_apply_connection">"应用连接设置"</string>
+    <string name="cameras_access_changes_pending">"更改尚未应用"</string>
+    <string name="cameras_error_tailscale_funnel_permission">"车辆的 Tailscale 节点尚未获得 Funnel 权限。请在 Tailscale 策略中为其账户或标签启用 funnel 节点属性，然后重试。"</string>
     <string name="cameras_access_authorized">"此服务提供方当前授权了一个访问身份。替换账户或访问前，请先撤销。"</string>
     <string name="cameras_access_identity">"已保存的访问身份：%1$s"</string>
     <string name="cameras_revoke_pending">"远程撤销仍未完成。请先重试撤销，再进行授权。"</string>

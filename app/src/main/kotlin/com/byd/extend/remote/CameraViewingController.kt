@@ -25,7 +25,7 @@ data class CameraViewingState(val config: CameraViewingConfig, val phase: String
     val passwordConfigured: Boolean = false, val tokenConfigured: Boolean = false,
     val authorizationRequest: Long = 0, val authorized: Boolean = false,
     val revocationPending: Boolean = false, val identity: String? = null,
-    val busy: Boolean = false, val fieldError: String? = null)
+    val busy: Boolean = false, val fieldError: String? = null, val accessChangesPending: Boolean = false)
 
 /** UI/draft facade; providers and camera lifetimes belong to the independent shell process. */
 class CameraViewingController private constructor(private val context: Context) {
@@ -83,10 +83,12 @@ class CameraViewingController private constructor(private val context: Context) 
         val authorized = current?.optBoolean("authorized") ?: shadow(method, "authorized")
         val pending = current?.optBoolean("revocationPending") ?: shadow(method, "revocationPending")
         val phase = current?.optString("phase", "idle") ?: "idle"
+        val accessChangesPending = authorized && (preferences.getBoolean("draft_${method}_access_changed", false) ||
+            method == "tailscale" && current != null && config.tailscalePublic != current.optBoolean("public"))
         mutable.value = CameraViewingState(
             config = if ((authorized || pending) && current != null) config.copy(
                 streamId = current.optString("name")) else config,
-            phase = phase, viewerUrl = current?.nullable("viewerUrl"),
+            phase = phase, viewerUrl = if (accessChangesPending) null else current?.nullable("viewerUrl"),
             authorizationUrl = current?.nullable("authorizationUrl"),
             error = (current?.nullable("error") ?: backendError)?.let { context.getString(errorResource(it)) },
             passwordConfigured = secret(method, "password").isNotEmpty(),
@@ -95,7 +97,8 @@ class CameraViewingController private constructor(private val context: Context) 
             authorized = authorized, revocationPending = pending,
             identity = current?.nullable("identity") ?: if (authorized || pending)
                 preferences.getString("${method}_identity", null) else null,
-            busy = phase in setOf("authorizing", "starting", "approval_pending", "connecting", "revoking"))
+            busy = phase in setOf("authorizing", "starting", "approval_pending", "connecting", "revoking"),
+            accessChangesPending = accessChangesPending)
     }
 
     /** Focus loss, keyboard dismissal and provider selection commit drafts only. */
@@ -114,6 +117,8 @@ class CameraViewingController private constructor(private val context: Context) 
             tailscalePublic?.let { editor.putBoolean("draft_tailscale_public", it) }
             for ((field, value) in listOf("password" to edits.password, "token" to edits.token))
                 if (value != null && (!wasLocked || field == "password")) {
+                if (wasLocked && field == "password" && value != secret(method, field))
+                    editor.putBoolean("draft_${method}_access_changed", true)
                 val bytes = value.toByteArray()
                 try { secrets.put("draft.camera.$method.$field", bytes) } finally { bytes.fill(0) }
             }
@@ -148,6 +153,9 @@ class CameraViewingController private constructor(private val context: Context) 
             }
             accept(ensureClient().request(if (wasLocked) "reconnect" else "authorize",
                 JSONObject().put("transport", method).put("profile", payload)))
+            // A successful request acknowledges applying this draft, not provider readiness.
+            check(preferences.edit().putBoolean("draft_${method}_access_changed", false).commit())
+            refresh()
             client?.let { prepareBackend(it) }
         }
     }
@@ -243,6 +251,7 @@ class CameraViewingController private constructor(private val context: Context) 
                 secrets.removePrefix("draft.camera.$method."); secrets.removePrefix("camera.$method.")
                 secrets.removePrefix("tunnel.$method.")
                 editor.putString("draft_${method}_name", item.optString("name"))
+                    .putBoolean("draft_${method}_access_changed", false)
                     .putLong("${method}_revocationEpoch", item.optLong("revocationEpoch"))
             }
             snapshots[method] = JSONObject(item.toString())
@@ -309,6 +318,7 @@ class CameraViewingController private constructor(private val context: Context) 
             "invalid_port", "private_credential_missing", "invalid_request" -> R.string.cameras_error_local_viewer
             "tailscale_https_failed" -> R.string.cameras_error_tailscale_https
             "tailscale_funnel_failed" -> R.string.cameras_error_tailscale_funnel
+            "tailscale_funnel_not_allowed" -> R.string.cameras_error_tailscale_funnel_permission
             "zrok_enable_failed" -> R.string.cameras_error_zrok_enable
             "zrok_share_failed" -> R.string.cameras_error_zrok_share
             "zrok_endpoint_failed" -> R.string.cameras_error_endpoint

@@ -229,7 +229,8 @@ public final class MotionDetectorShellMain {
         final IBinder.DeathRecipient death;
         final Runnable timeout;
         volatile boolean cancelled;
-        boolean ownsSession, ownsReader, ownsRecording, finishing, completing;
+        boolean ownsSession, ownsReader, ownsRecording, ownsNative, finishing, completing;
+        String previousState;
         int stage = MotionCheckupClient.ACCESS;
         ManualCheck(String id, IBinder owner, ResultReceiver results, MotionConfig recordingConfig) {
             this.id = id; this.owner = owner; this.results = results;
@@ -944,17 +945,6 @@ public final class MotionDetectorShellMain {
         }
         control.postDelayed(check.timeout, Math.max(0L, check.deadline - SystemClock.elapsedRealtime()));
         try {
-            if (teardownPending && !lastError.isEmpty()) {
-                completeCheck(check, MotionCheckupClient.ERROR, "cleanup_pending", lastError, false);
-                return;
-            }
-            if (eligible || attached || recorder != null || warning || warningClosing || warningWindowPending
-                    || workerBinding || teardownPending || shuttingDown || sessionRuntime.arming() || sessionRuntime.armed()
-                    || sessionId != null && !prepared && !"error".equals(state)) {
-                completeCheck(check, MotionCheckupClient.NOT_CHECKED, "busy",
-                        "Active or preparing Motion resources are left unchanged; try after they finish", true);
-                return;
-            }
             requireCheckPowerOn();
             if (!checkLive(check)) {
                 completeCheck(check, MotionCheckupClient.NOT_CHECKED, "cancelled", "Check-up ended during Power read", true);
@@ -963,9 +953,30 @@ public final class MotionDetectorShellMain {
             checkResult(check, MotionCheckupClient.OK, "access_ok", "Authenticated shell worker; Power=ON", false);
             check.stage = MotionCheckupClient.DETECTOR;
             checkResult(check, MotionCheckupClient.RUNNING, "", "", false);
+            if (teardownPending && !lastError.isEmpty()) {
+                completeCheck(check, MotionCheckupClient.ERROR, "cleanup_pending", lastError, false);
+                return;
+            }
+            if (eligible || attached || recorder != null || warning || warningClosing || warningWindowPending
+                    || workerBinding || teardownPending || shuttingDown || sessionRuntime.arming() || sessionRuntime.armed()
+                    || sessionId != null && !prepared && !"error".equals(state)
+                        && (config == null || config.motionEnabled() || !workerBound)) {
+                completeCheck(check, MotionCheckupClient.NOT_CHECKED, "busy",
+                        "Active or preparing Motion resources are left unchanged; try after they finish", true);
+                return;
+            }
+            if (cameraChargeState.isBlocked()) {
+                completeCheck(check, MotionCheckupClient.NOT_CHECKED, "charge_blocked",
+                        "Shared camera charge protection is active", true);
+                return;
+            }
             if (sessionId != null) {
-                if (!prepared) throw new IllegalStateException(lastError);
-                startCheckFrames(check);
+                if (prepared) startCheckFrames(check);
+                else {
+                    check.ownsNative = true;
+                    check.previousState = state;
+                    prepareSession(sessionId);
+                }
             } else {
                 // Ephemeral disabled config is never persisted or published to the app observer.
                 check.ownsSession = true;
@@ -1008,6 +1019,14 @@ public final class MotionDetectorShellMain {
             } else {
                 if (check.ownsRecording) released = stopRecording("manual_check_finished");
                 if (check.ownsReader) released &= detachAndCloseReader(false);
+                if (released && check.ownsNative) {
+                    deleteNative();
+                    prepared = false;
+                    if (!teardownPending && !shuttingDown) {
+                        state = cameraChargeState.isBlocked() ? "charge_blocked" : check.previousState;
+                        sendStatus(sessionId, state, "Temporary detector released; saved camera configuration is unchanged");
+                    }
+                }
             }
             if (!released) {
                 status = MotionCheckupClient.ERROR;
@@ -1191,6 +1210,11 @@ public final class MotionDetectorShellMain {
         }
         attachPendingUiOnControl(id);
         if (config == null) return;
+        ManualCheck check = manualCheck;
+        if (check != null && check.ownsSession && check.id.equals(id)) {
+            prepareSession(id);
+            return;
+        }
         if (!config.motionEnabled()) {
             state = cameraChargeState.isBlocked() ? "charge_blocked" : "viewing_only";
             sendStatus(id, state, cameraChargeState.isBlocked()
@@ -1318,7 +1342,14 @@ public final class MotionDetectorShellMain {
 
     private void prepareSession(String id) {
         if (!sameSession(id)) return;
-        if (config == null || !config.motionEnabled() || cameraChargeState.isBlocked()) {
+        ManualCheck pendingCheck = manualCheck;
+        boolean checkOwnsPreparation = pendingCheck != null && (pendingCheck.ownsSession || pendingCheck.ownsNative);
+        if (config == null || !config.motionEnabled() && !checkOwnsPreparation || cameraChargeState.isBlocked()) {
+            if (checkOwnsPreparation) {
+                completeCheck(pendingCheck, MotionCheckupClient.NOT_CHECKED, "charge_blocked",
+                        "Shared camera charge protection is active", true);
+                return;
+            }
             if (config != null && config.remoteViewingEnabled && !cameraChargeState.isBlocked()) {
                 state = "viewing_only";
                 sendStatus(id, state, "Motion detection remains off for remote-only configuration");
@@ -1328,8 +1359,7 @@ public final class MotionDetectorShellMain {
             }
             return;
         }
-        ManualCheck pendingCheck = manualCheck;
-        if (pendingCheck != null && pendingCheck.ownsSession && !checkLive(pendingCheck)) {
+        if (checkOwnsPreparation && !checkLive(pendingCheck)) {
             completeCheck(pendingCheck, MotionCheckupClient.NOT_CHECKED, "cancelled",
                     "Check-up ended while the camera host was binding", true);
             return;
@@ -1365,7 +1395,7 @@ public final class MotionDetectorShellMain {
             sendPrepared(id);
             sendStatus(id, "prepared", "OEM artifacts and native init accepted; awaiting fresh shell telemetry");
             ManualCheck check = manualCheck;
-            if (check != null && check.ownsSession && check.id.equals(id)) startCheckFrames(check);
+            if (check != null && checkOwnsPreparation) startCheckFrames(check);
             else if (sessionRuntime.armed()) setEligibleOnControl(id, true);
             else if (!sessionRuntime.arming()) holdCpu(false);
             updateCameraDemand();
@@ -2357,7 +2387,10 @@ public final class MotionDetectorShellMain {
         boolean deliberate = !eligible && reason.equals(deliberatelyDetachedProducerReason)
                 && ("motion_detector_idle".equals(reason) || "motion_recording_stop".equals(reason)
                     || "source_demand_idle".equals(reason));
-        if (deliberate || !sameSession(id) || shuttingDown) return;
+        boolean viewingIdle = producerClosed && "source_demand_idle".equals(reason)
+                && !eligible && !attached && recorder == null && manualCheck == null
+                && config != null && !config.motionEnabled();
+        if (deliberate || viewingIdle || !sameSession(id) || shuttingDown) return;
         ManualCheck check = manualCheck;
         if (check != null) {
             if (producerClosed && check.ownsReader) detachAndCloseReader(true);
@@ -2842,7 +2875,7 @@ public final class MotionDetectorShellMain {
     private void fail(String id, String stage, Throwable error) {
         if (!sameSession(id)) return;
         ManualCheck check = manualCheck;
-        if (check != null && (check.ownsSession || check.ownsReader)) {
+        if (check != null && (check.ownsSession || check.ownsReader || check.ownsNative)) {
             completeCheck(check, MotionCheckupClient.ERROR, "check_failed", stage + ": " + summary(error), true);
             return;
         }

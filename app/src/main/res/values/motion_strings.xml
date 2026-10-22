@@ -68,6 +68,9 @@
     <string name="cameras_revoke">"Revoke access"</string>
     <string name="cameras_retry_revoke">"Retry revoke"</string>
     <string name="cameras_retry_connection">"Retry connection"</string>
+    <string name="cameras_apply_connection">"Apply connection settings"</string>
+    <string name="cameras_access_changes_pending">"Changes not applied"</string>
+    <string name="cameras_error_tailscale_funnel_permission">"This vehicle’s Tailscale node has not received Funnel permission. Allow the funnel node attribute for its account or tag in the Tailscale policy, then retry."</string>
     <string name="cameras_access_authorized">"This provider has one authorized access. Revoke it to replace the account or access."</string>
     <string name="cameras_access_identity">"Saved access identity: %1$s"</string>
     <string name="cameras_revoke_pending">"Remote revocation is still pending. Retry it before authorizing again."</string>

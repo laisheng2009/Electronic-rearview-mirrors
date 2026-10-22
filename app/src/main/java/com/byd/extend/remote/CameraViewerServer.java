@@ -40,14 +40,13 @@ public final class CameraViewerServer implements AutoCloseable {
     public interface Stream {
         boolean admitted(String session);
         boolean current(String session);
-        void disconnected(String session);
+        void disconnected(String session, String reason);
         void failed(Throwable failure);
         void live(String session, int direction);
         void archive(String session, boolean leave);
         JSONObject status();
         JSONObject presentation();
         void firstFrame(String session, String mode);
-        void playbackError(String session, String category);
         FragmentedVideoWindow video();
         CameraViewerArchive recordings() throws Exception;
         byte[] resource(String name) throws IOException;
@@ -127,7 +126,7 @@ public final class CameraViewerServer implements AutoCloseable {
         if (expired == null) return;
         closePlayback(expired);
         closeSessionSockets(expired, null);
-        try { stream.disconnected(expired); }
+        try { stream.disconnected(expired, "origin=heartbeat_timeout"); }
         catch (RuntimeException failure) {
             CameraViewingDiagnostics.failure("viewer_expired_cleanup", "shared", failure);
         }
@@ -250,7 +249,7 @@ public final class CameraViewerServer implements AutoCloseable {
         switch (request.path) {
             case "/stop":
                 if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
-                stop(request.session, socket);
+                stop(request.session, socket, ViewerStopReason.describe(bodyObject(request.body)));
                 json(socket, reply, 200, "ended", expiredCookie());
                 return;
             case "/status":
@@ -298,14 +297,6 @@ public final class CameraViewerServer implements AutoCloseable {
                 JSONObject diagnostic = bodyObject(request.body);
                 String event = diagnostic.optString("event", "");
                 String mode = diagnostic.optString("mode", "");
-                if ("playback_error".equals(event)) {
-                    String category = diagnostic.optString("category", "");
-                    if (!Set.of("load", "decode", "play", "hls").contains(category)) {
-                        json(socket, reply, 400, "invalid_event", null); return;
-                    }
-                    stream.playbackError(request.session, category);
-                    json(socket, reply, 200, "ok", null); return;
-                }
                 if (!"first_frame".equals(event) || !("live".equals(mode) || "archive".equals(mode))) {
                     json(socket, reply, 400, "invalid_event", null);
                     return;
@@ -406,7 +397,7 @@ public final class CameraViewerServer implements AutoCloseable {
             // A timeout before commit leaves the old viewer untouched. If commit already ran,
             // release the unacknowledged new owner instead of leaking its live source.
             if (!accepted && !Objects.equals(previous, session)) {
-                try { stop(session, socket); }
+                try { stop(session, socket, "origin=admission_failed"); }
                 catch (RuntimeException cleanupFailure) {
                     CameraViewingDiagnostics.failure("viewer_admission_cleanup", "shared", cleanupFailure);
                 }
@@ -447,11 +438,11 @@ public final class CameraViewerServer implements AutoCloseable {
         return true;
     }
 
-    private void stop(String session, Socket responseSocket) {
+    private void stop(String session, Socket responseSocket, String reason) {
         closePlayback(session);
         if (access.release(session)) {
             closeSessionSockets(session, responseSocket);
-            stream.disconnected(session);
+            stream.disconnected(session, reason);
         }
     }
 
@@ -833,7 +824,7 @@ public final class CameraViewerServer implements AutoCloseable {
         for (SessionPlayback playback : active) closePlayback(playback);
         requests.shutdownNow();
         if (released) {
-            try { stream.disconnected(current); }
+            try { stream.disconnected(current, "origin=server_shutdown"); }
             catch (RuntimeException failure) {
                 CameraViewingDiagnostics.failure("viewer_shutdown_cleanup", "shared", failure);
             }
