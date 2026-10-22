@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -248,7 +247,7 @@ func (p *zrokProvider) Status(name string) tunnelResult {
 	return tunnelResult{State: "authorized"}
 }
 
-func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) tunnelResult {
+func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) (result tunnelResult) {
 	ctx, finish := p.beginOperation()
 	defer finish()
 	if ctx.Err() != nil {
@@ -301,6 +300,13 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 	if err != nil {
 		return zrokOperationFailure(ctx, "zrok_share_failed", "start.create_share", err, root)
 	}
+	var endpoints []string
+	if share != nil {
+		endpoints = share.FrontendEndpoints
+	}
+	address, diagnostic := firstHttpsEndpoint(endpoints)
+	// Carry response shape through success, cancellation and later listener/cleanup failures.
+	defer func() { result.Diagnostic = "stage=start.create_share_response " + diagnostic }()
 	if share == nil || share.Token == "" {
 		return zrokFailureReason("zrok_share_failed", "start.create_share", "response missing share token", root)
 	}
@@ -312,7 +318,6 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 		}
 		return result
 	}
-	address := firstHttpsEndpoint(share.FrontendEndpoints)
 	if address == "" {
 		result := zrokFailureReason("zrok_share_failed", "start.create_share_response", "response contained no HTTPS public endpoint", root, share.Token)
 		if err := withZrokCleanupContext(root, func() error { return sdk.DeleteShare(root, share) }); err != nil {
@@ -747,14 +752,4 @@ func persistZrokShare(share *storedZrokShare) error {
 	}
 	defer wipeBytes(data)
 	return writeSecret(zrokShareKey, data)
-}
-
-func firstHttpsEndpoint(endpoints []string) string {
-	for _, endpoint := range endpoints {
-		parsed, err := url.Parse(strings.TrimSpace(endpoint))
-		if err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil {
-			return parsed.String()
-		}
-	}
-	return ""
 }

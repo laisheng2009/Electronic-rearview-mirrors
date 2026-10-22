@@ -49,6 +49,7 @@ type tunnelResult struct {
 	LoginURL    string `json:"loginUrl,omitempty"`
 	ErrorCode   string `json:"errorCode,omitempty"`
 	ErrorDetail string `json:"errorDetail,omitempty"`
+	Diagnostic  string `json:"diagnostic,omitempty"`
 }
 
 type tunnelProvider interface {

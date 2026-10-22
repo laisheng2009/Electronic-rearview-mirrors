@@ -159,15 +159,15 @@ func (p *tailscaleProvider) waitForStatus(ctx context.Context, stage string, sec
 		return tunnelResult{State: "login_required", LoginURL: status.AuthURL}
 	}
 	switch status.BackendState {
-	case string(ipn.NeedsLogin):
+	case ipn.NeedsLogin.String():
 		return tunnelResult{State: "login_required"}
-	case string(ipn.NeedsMachineAuth):
+	case ipn.NeedsMachineAuth.String():
 		return tunnelResult{State: "approval_pending"}
-	case string(ipn.Running):
+	case ipn.Running.String():
 		return tunnelResult{State: "authorized", Address: tailscaleAddress(status)}
-	case string(ipn.NoState), string(ipn.Starting):
+	case ipn.NoState.String(), ipn.Starting.String():
 		return tunnelResult{State: "starting"}
-	case string(ipn.Stopped):
+	case ipn.Stopped.String():
 		return failureWithReason("tailscale_backend_stopped", stage+".client_status", "backend_state=Stopped", secrets...)
 	default:
 		return failureWithReason("tailscale_backend_state_unknown", stage+".client_status", "backend_state="+status.BackendState, secrets...)
