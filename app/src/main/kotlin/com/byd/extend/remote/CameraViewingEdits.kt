@@ -67,7 +67,7 @@ class CameraViewingEdits(
             require(streamId.isNotEmpty())
             require(CameraViewingEdits("vdo", streamId).validatedName() == streamId)
             // Prompt in the browser; never put the viewer secret into copy/QR URLs.
-            return "https://vdo.ninja/?view=$streamId&password"
+            return "https://vdo.ninja/?view=$streamId&password&hangupbutton"
         }
     }
 }

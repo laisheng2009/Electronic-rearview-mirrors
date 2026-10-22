@@ -79,7 +79,7 @@ class CameraViewingEditsTest {
             CameraViewingEdits("zrok", "my-car", "view1", "t".repeat(4097)).authorizationError())
     }
 
-    @Test fun viewerLinkKeepsTheSdkIdAndRequestsPasswordWithoutExposingIt() {
+    @Test fun viewerLinkKeepsTheSdkIdAndRequestsPasswordAndHangupWithoutExposingSecrets() {
         val name = CameraViewingEdits.newName("vdo")
         val link = URI(CameraViewingEdits.vdoViewerUrl(name))
         assertEquals("https", link.scheme)
@@ -89,7 +89,7 @@ class CameraViewingEditsTest {
             val parts = parameter.split('=', limit = 2)
             parts.first() to parts.getOrElse(1) { "" }
         }
-        assertEquals(mapOf("view" to Sanitize.streamId(name), "password" to ""), query)
+        assertEquals(mapOf("view" to Sanitize.streamId(name), "password" to "", "hangupbutton" to ""), query)
         assertThrows(IllegalArgumentException::class.java) {
             CameraViewingEdits.vdoViewerUrl("old-invalid-id")
         }
