@@ -19,6 +19,8 @@ public class ViewerAccessTest {
         ViewerAccess access = new ViewerAccess("1", null);
 
         assertFalse(access.authenticate("incorrect", null));
+        assertFalse(access.authenticate("", "claimed-tailnet-proof"));
+        assertFalse(access.authenticate("incorrect", "claimed-tailnet-proof"));
         assertTrue(access.authenticate("1", null));
         assertFalse(access.occupied());
     }

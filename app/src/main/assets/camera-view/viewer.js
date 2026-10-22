@@ -1,4 +1,6 @@
 (() => {
+  const WEB_REVISION = 2;
+  const REVISION_HEADER = 'X-Byd-Viewer-Revision';
   const app = document.getElementById('app');
   const bootstrapNode = document.getElementById('viewer-bootstrap');
   const fallbackBootstrap = { locale: 'en', theme: 'dark', provider: 'tailscale', passwordRequired: true };
@@ -22,7 +24,8 @@
       yellowEvents: 'Yellow events', redEvents: 'Red events', duration: 'Duration', allRecordings: 'All recordings',
       play: 'Play', pause: 'Pause', restart: 'Restart', previous: 'Previous recording', next: 'Next recording', position: 'Playback position', speed: 'Playback speed',
       previousMonth: 'Previous month', nextMonth: 'Next month',
-      streamError: 'Live video could not be played.', noScript: 'JavaScript is required to view cameras.'
+      streamError: 'Live video could not be played.', noScript: 'JavaScript is required to view cameras.',
+      updateRequired: 'The viewer has changed. Refresh this page to continue.'
     },
     uk: {
       title: 'Віддалені камери', subtitle: 'Захищений перегляд камер', loginTitle: 'Доступ до камер', loginHint: 'Увійдіть, щоб переглядати камери й записи.', password: 'Пароль', signIn: 'Продовжити',
@@ -36,7 +39,8 @@
       yellowEvents: 'Жовті події', redEvents: 'Червоні події', duration: 'Тривалість', allRecordings: 'Усі записи',
       play: 'Відтворити', pause: 'Пауза', restart: 'З початку', previous: 'Попередній запис', next: 'Наступний запис', position: 'Позиція відтворення', speed: 'Швидкість відтворення',
       previousMonth: 'Попередній місяць', nextMonth: 'Наступний місяць',
-      streamError: 'Не вдалося відтворити відео наживо.', noScript: 'Для перегляду камер потрібен JavaScript.'
+      streamError: 'Не вдалося відтворити відео наживо.', noScript: 'Для перегляду камер потрібен JavaScript.',
+      updateRequired: 'Версія переглядача змінилася. Оновіть сторінку, щоб продовжити.'
     },
     ru: {
       title: 'Удалённые камеры', subtitle: 'Защищённый просмотр камер', loginTitle: 'Доступ к камерам', loginHint: 'Войдите, чтобы смотреть камеры и записи.', password: 'Пароль', signIn: 'Продолжить',
@@ -50,7 +54,8 @@
       yellowEvents: 'Жёлтые события', redEvents: 'Красные события', duration: 'Длительность', allRecordings: 'Все записи',
       play: 'Воспроизвести', pause: 'Пауза', restart: 'С начала', previous: 'Предыдущая запись', next: 'Следующая запись', position: 'Позиция воспроизведения', speed: 'Скорость воспроизведения',
       previousMonth: 'Предыдущий месяц', nextMonth: 'Следующий месяц',
-      streamError: 'Не удалось воспроизвести видео в эфире.', noScript: 'Для просмотра камер требуется JavaScript.'
+      streamError: 'Не удалось воспроизвести видео в эфире.', noScript: 'Для просмотра камер требуется JavaScript.',
+      updateRequired: 'Версия просмотрщика изменилась. Обновите страницу, чтобы продолжить.'
     },
     zh: {
       title: '远程摄像头', subtitle: '安全摄像头查看器', loginTitle: '摄像头访问', loginHint: '登录以查看摄像头和录像。', password: '密码', signIn: '继续',
@@ -64,7 +69,8 @@
       yellowEvents: '黄色事件', redEvents: '红色事件', duration: '时长', allRecordings: '全部录像',
       play: '播放', pause: '暂停', restart: '重新开始', previous: '上一段录像', next: '下一段录像', position: '播放位置', speed: '播放速度',
       previousMonth: '上个月', nextMonth: '下个月',
-      streamError: '无法播放实时视频。', noScript: '查看摄像头需要启用 JavaScript。'
+      streamError: '无法播放实时视频。', noScript: '查看摄像头需要启用 JavaScript。',
+      updateRequired: '查看器已更新。请刷新页面以继续。'
     }
   }[locale];
   const cameras = ['composition', 'front', 'rear', 'left', 'right'];
@@ -91,6 +97,34 @@
   let liveFrameToken = 0;
   let archiveFrameToken = 0;
   let archiveResizeObserver = null;
+  let contractBlocked = false;
+
+  function checkRevision(revision, fromServer = false) {
+    if (contractBlocked) return false;
+    if (Number(revision) === WEB_REVISION) {
+      if (fromServer) {
+        try { sessionStorage.removeItem('viewer.contractReload'); } catch { /* Optional tab storage. */ }
+      }
+      return true;
+    }
+    contractBlocked = true;
+    ++actionGeneration;
+    clearInterval(state.poll); state.poll = null;
+    state.authenticated = false;
+    stopLiveMedia();
+    const archiveVideo = document.getElementById('archive-video');
+    if (archiveVideo) { archiveVideo.pause(); archiveVideo.removeAttribute('src'); archiveVideo.load(); }
+    renderLogin(text.updateRequired);
+    // One reload per target revision; unavailable storage must not create a reload loop.
+    const target = /^[1-9][0-9]{0,5}$/.test(String(revision)) ? String(revision) : 'legacy';
+    try {
+      if (sessionStorage.getItem('viewer.contractReload') !== target) {
+        sessionStorage.setItem('viewer.contractReload', target);
+        window.location.reload();
+      }
+    } catch { /* Keep the explicit refresh message when tab storage is unavailable. */ }
+    return false;
+  }
 
   document.documentElement.lang = locale;
   document.documentElement.dataset.theme = ['dark', 'light'].includes(bootstrap.theme) ? bootstrap.theme : 'dark';
@@ -140,13 +174,16 @@
   };
 
   async function api(path, options = {}) {
+    if (contractBlocked) throw new Error('viewer_update_required');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
     const response = await fetch(path, {
       credentials: 'same-origin', cache: 'no-store', ...options, signal: controller.signal,
-      headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) }
+      headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}),
+        [REVISION_HEADER]: String(WEB_REVISION) }
     });
+    if (!checkRevision(response.headers.get(REVISION_HEADER), true)) throw new Error('viewer_update_required');
     const bodyText = await response.text();
     let body = {};
     try { body = bodyText ? JSON.parse(bodyText) : {}; } catch { body = {}; }
@@ -172,8 +209,11 @@
   }
 
   function renderLogin(message = '') {
-    app.classList.remove('is-expanded');
-    app.classList.remove('has-player');
+    app.classList.remove('is-expanded', 'has-player');
+    if (contractBlocked) {
+      app.innerHTML = `${pageHeader()}<div class="login-wrap"><section class="login-card" role="alert"><p>${escapeHtml(text.updateRequired)}</p></section></div>`;
+      return;
+    }
     app.innerHTML = `${pageHeader()}<div class="login-wrap"><section class="login-card" aria-labelledby="login-title"><h1 id="login-title">${escapeHtml(text.loginTitle)}</h1><p>${escapeHtml(text.loginHint)}</p><form id="login-form">${bootstrap.passwordRequired ? `<label>${escapeHtml(text.password)}<input id="password" type="password" maxlength="1024" autocomplete="off" required></label>` : ''}<p class="error-note" id="login-error" role="alert">${escapeHtml(message)}</p><button class="primary" type="submit">${escapeHtml(text.signIn)}</button></form></section></div>`;
   }
 
@@ -209,6 +249,7 @@
   }
 
   function renderShell() {
+    if (contractBlocked) { renderLogin(); return; }
     app.classList.remove('is-expanded');
     app.classList.remove('has-player');
     app.innerHTML = `${pageHeader()}<div class="statusrow"><div class="connection" id="connection" data-state="ready" role="status"><span class="dot"></span><span id="connection-label"></span></div><button class="quiet" type="button" data-action="end">${icon('stop')}${escapeHtml(text.end)}</button></div><nav class="nav" aria-label="${escapeHtml(text.title)}"><button type="button" data-action="tab" data-mode="live" aria-pressed="true">${icon('video')}${escapeHtml(text.live)}</button><button type="button" data-action="tab" data-mode="archive" aria-pressed="false">${icon('archive')}${escapeHtml(text.archive)}</button></nav><main class="content" id="main-panel"></main>`;
@@ -346,6 +387,7 @@
   }
 
   function renderMain(force = false) {
+    if (contractBlocked) { renderLogin(); return; }
     const main = document.getElementById('main-panel');
     if (!main) return;
     const key = mainKey();
@@ -710,7 +752,7 @@
       // The cause and teardown travel together; a separate request races session invalidation.
       post('/stop', { origin: 'playback_error', category, mediaCode: video.error?.code,
         exception: cause?.error?.name || cause?.name, hlsType: cause?.type, hlsDetails: cause?.details,
-        fragment: cause?.frag?.sn, httpStatus: cause?.response?.code }).catch(() => {});
+        fragment: cause?.frag?.sn, httpStatus: cause?.response?.code, clientRevision: WEB_REVISION }).catch(() => {});
       state.authenticated = false;
       stopLiveMedia();
       renderMain(true);
@@ -725,7 +767,8 @@
       const Hls = await loadHlsLibrary();
       if (!current()) return;
       if (!Hls || !Hls.isSupported()) { fail(null, 'hls'); return; }
-      const hls = new Hls({ liveSyncDurationCount: 2, maxBufferLength: 8 });
+      const hls = new Hls({ liveSyncDurationCount: 2, maxBufferLength: 8,
+        xhrSetup: (xhr) => xhr.setRequestHeader(REVISION_HEADER, String(WEB_REVISION)) });
       state.hls = hls;
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (current()) video.play().catch((error) => fail(error));
@@ -1029,5 +1072,7 @@
     if (state.authenticated && navigator.sendBeacon) navigator.sendBeacon('/stop', new Blob(['{"origin":"pagehide"}'], { type: 'application/json' }));
   });
 
-  renderLogin();
+  if (checkRevision(bootstrap.webRevision)) {
+    renderLogin();
+  }
 })();

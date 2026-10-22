@@ -167,11 +167,12 @@ internal fun FormScope.MotionIntegrationScreen(
         Spacer(Modifier.height(12.dp))
     }
     row("camera-tabs") {
-        Segmented(listOf(R.string.cameras_tablet, R.string.cameras_recording, R.string.cameras_viewing)
-            .map { strings.motionText(it) }, tab, colors, Modifier.fillMaxWidth()) {
+        val tabOrder = listOf(2, 0, 1)
+        Segmented(listOf(R.string.cameras_viewing, R.string.cameras_tablet, R.string.cameras_recording)
+            .map { strings.motionText(it) }, tabOrder.indexOf(tab), colors, Modifier.fillMaxWidth()) {
             focus.clearFocus()
-            tab = it
-            uiSession.selectMotionCameraTab(it)
+            tab = tabOrder[it]
+            uiSession.selectMotionCameraTab(tab)
         }
         Spacer(Modifier.height(12.dp))
     }

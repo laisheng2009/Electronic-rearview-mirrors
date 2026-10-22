@@ -66,6 +66,7 @@ public final class CameraViewerServer implements AutoCloseable {
     private final Map<String, Set<Socket>> sessionSockets = new HashMap<>();
     private final Map<Socket, String> socketSessions = new HashMap<>();
     private volatile boolean closed;
+    private volatile String[] sessionRevision = {null, "unknown"};
     private long lastAuthenticationNs = System.nanoTime() - 1_000_000_000L;
 
     public CameraViewerServer(String password, String privateProxyProof, Stream stream) throws IOException {
@@ -228,6 +229,12 @@ public final class CameraViewerServer implements AutoCloseable {
             return;
         }
 
+        String clientRevision = request.fields.get(ViewerStopReason.REVISION_HEADER.toLowerCase(Locale.ROOT));
+        if (clientRevision != null && !clientRevision.equals(Integer.toString(ViewerStopReason.WEB_REVISION))) {
+            json(socket, reply, 409, "viewer_update_required", null);
+            return;
+        }
+
         if (request.path.equals("/session") && request.method.equals("POST")) {
             admit(socket, request, reply);
             return;
@@ -246,6 +253,7 @@ public final class CameraViewerServer implements AutoCloseable {
         }
 
         if (!authorized(request.session, socket, reply)) return;
+        if (clientRevision != null) sessionRevision = new String[] {request.session, ViewerStopReason.revision(clientRevision)};
         switch (request.path) {
             case "/stop":
                 if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
@@ -254,7 +262,8 @@ public final class CameraViewerServer implements AutoCloseable {
                 return;
             case "/status":
                 if (!isRead(request.method)) { methodNotAllowed(socket, reply); return; }
-                serveJson(socket, request.method.equals("HEAD"), reply, stream.status());
+                serveJson(socket, request.method.equals("HEAD"), reply,
+                        stream.status().put("webRevision", ViewerStopReason.WEB_REVISION));
                 return;
             case "/viewer.css":
             case "/viewer.js":
@@ -345,14 +354,29 @@ public final class CameraViewerServer implements AutoCloseable {
                 String number = mediaPath.substring(9, mediaPath.length() - 4);
                 try {
                     byte[] bytes = window.segment(Long.parseLong(number));
-                    if (bytes == null) json(socket, reply, 404, "not_found", null);
+                    if (bytes == null) mediaNotFound(socket, request, reply, window);
                     else serveBytes(socket, request.method.equals("HEAD"), reply, "video/iso.segment", bytes, null);
                 } catch (NumberFormatException malformed) {
-                    json(socket, reply, 404, "not_found", null);
+                    mediaNotFound(socket, request, reply, window);
                 }
                 return;
             }
         }
+        mediaNotFound(socket, request, reply, window);
+    }
+
+    private void mediaNotFound(Socket socket, Request request, Reply reply, FragmentedVideoWindow window)
+            throws IOException {
+        JSONObject presentation = stream.presentation();
+        String provider = presentation.optString("provider");
+        String mode = presentation.optString("accessMode");
+        String[] revision = sessionRevision;
+        String clientRevision = Objects.equals(revision[0], request.session) ? revision[1] : "unknown";
+        CameraViewingDiagnostics.detail("viewer_media_404", provider.equals("tailscale") ? "tailscale" : "zrok",
+                "accessMode=" + (mode.equals("serve") ? "serve" : mode.equals("funnel") ? "funnel" : "public")
+                        + " run=" + presentation.optLong("run") + " "
+                        + ViewerStopReason.mediaRequest(request.path, window == null ? null : window.getPlaylistPath(),
+                        clientRevision));
         json(socket, reply, 404, "not_found", null);
     }
 
@@ -408,6 +432,7 @@ public final class CameraViewerServer implements AutoCloseable {
         try {
             bootstrap = new JSONObject(bootstrap.toString());
             bootstrap.put("passwordRequired", passwordRequired);
+            bootstrap.put("webRevision", ViewerStopReason.WEB_REVISION);
         } catch (JSONException failure) {
             throw new IOException("Cannot encode camera viewer presentation", failure);
         }
@@ -768,6 +793,7 @@ public final class CameraViewerServer implements AutoCloseable {
         String headers = "HTTP/1.1 " + status + " " + reason(status) + "\r\n"
                 + "Content-Type: " + mime + "\r\n"
                 + "Content-Length: " + length + "\r\n"
+                + ViewerStopReason.REVISION_HEADER + ": " + ViewerStopReason.WEB_REVISION + "\r\n"
                 + "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
                 + "Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n"
                 + "Content-Security-Policy: default-src 'self'; script-src 'self'; "

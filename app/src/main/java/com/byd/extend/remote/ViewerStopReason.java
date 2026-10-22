@@ -4,6 +4,8 @@ import org.json.JSONObject;
 
 /** Only bounded browser codes, never messages, media URLs or credentials. */
 public final class ViewerStopReason {
+    public static final int WEB_REVISION = 2;
+    public static final String REVISION_HEADER = "X-Byd-Viewer-Revision";
     private ViewerStopReason() {}
 
     public static String describe(JSONObject value) {
@@ -18,7 +20,33 @@ public final class ViewerStopReason {
         number(result, value, "mediaCode", 1, 4);
         number(result, value, "fragment", 0, Integer.MAX_VALUE);
         number(result, value, "httpStatus", 100, 599);
+        number(result, value, "clientRevision", 1, 1_000_000);
         return result.toString();
+    }
+
+    public static String revision(String value) {
+        return value != null && value.matches("[1-9][0-9]{0,5}|1000000") ? value : "unknown";
+    }
+
+    /** Classify actual requests without retaining URLs, credentials or stream identifiers. */
+    public static String mediaRequest(String path, String currentPlaylist, String clientRevision) {
+        String resource = path;
+        String generation = "unknown";
+        if (path.startsWith("/media/")) {
+            java.util.regex.Matcher match = java.util.regex.Pattern.compile(
+                    "^/media/([0-9a-f-]{36})(/.*)$").matcher(path);
+            if (match.matches()) {
+                resource = match.group(2);
+                String playlist = "/media/" + match.group(1) + "/live.m3u8";
+                generation = currentPlaylist == null ? "none" : playlist.equals(currentPlaylist) ? "current" : "stale";
+            } else generation = "invalid";
+        }
+        String kind = resource.equals("/live.m3u8") ? "playlist"
+                : resource.equals("/init.mp4") ? "init"
+                : resource.matches("/segment/[0-9]{1,19}\\.m4s") ? "segment" : "other";
+        if (generation.equals("unknown") && !kind.equals("other")) generation = "legacy";
+        return "resource=" + kind + " generation=" + generation
+                + " clientRevision=" + revision(clientRevision) + " serverRevision=" + WEB_REVISION;
     }
 
     private static void number(StringBuilder result, JSONObject value, String key, long min, long max) {

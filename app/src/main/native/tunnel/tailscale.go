@@ -269,7 +269,7 @@ func (p *tailscaleProvider) listen(ctx context.Context, public bool) (net.Listen
 		var listener net.Listener
 		var err error
 		if public {
-			listener, err = server.ListenFunnel("tcp", ":443", tsnet.FunnelOnly())
+			listener, err = server.ListenFunnel("tcp", ":443")
 		} else {
 			listener, err = server.ListenTLS("tcp", ":443")
 		}
@@ -408,7 +408,7 @@ func (p *tailscaleProvider) stopServing() error {
 		p.httpServer = nil
 	}
 	if p.listener != nil {
-		if err := p.listener.Close(); err != nil {
+		if err := p.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("close tunnel listener: %w", err))
 		}
 		p.listener = nil

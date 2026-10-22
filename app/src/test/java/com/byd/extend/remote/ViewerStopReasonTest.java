@@ -19,4 +19,33 @@ public class ViewerStopReasonTest {
         assertFalse(ViewerStopReason.describe(cause).contains("httpStatus="));
         assertEquals("origin=pagehide", ViewerStopReason.describe(new JSONObject().put("origin", "pagehide")));
     }
+
+    @Test public void classifiesLegacyCurrentAndStaleMediaWithoutExposingIdentifiers() {
+        FragmentedVideoWindow current = new FragmentedVideoWindow();
+        FragmentedVideoWindow retired = new FragmentedVideoWindow();
+        String playlist = current.getPlaylistPath();
+        assertEquals("resource=playlist generation=legacy clientRevision=unknown serverRevision=2",
+                ViewerStopReason.mediaRequest("/live.m3u8", playlist, null));
+        assertEquals("resource=playlist generation=current clientRevision=2 serverRevision=2",
+                ViewerStopReason.mediaRequest(playlist, playlist, "2"));
+        assertEquals("resource=playlist generation=stale clientRevision=1 serverRevision=2",
+                ViewerStopReason.mediaRequest(retired.getPlaylistPath(), playlist, "1"));
+        assertEquals("resource=init generation=current clientRevision=2 serverRevision=2",
+                ViewerStopReason.mediaRequest(playlist.replace("live.m3u8", "init.mp4"), playlist, "2"));
+        assertEquals("resource=segment generation=current clientRevision=2 serverRevision=2",
+                ViewerStopReason.mediaRequest(playlist.replace("live.m3u8", "segment/7.m4s"), playlist, "2"));
+        assertEquals("resource=playlist generation=none clientRevision=2 serverRevision=2",
+                ViewerStopReason.mediaRequest(playlist, null, "2"));
+        assertEquals("resource=other generation=invalid clientRevision=unknown serverRevision=2",
+                ViewerStopReason.mediaRequest("/media/secret/private?password=secret", playlist, "secret\r\nforged"));
+    }
+
+    @Test public void browserRevisionIsNumericAndBounded() throws Exception {
+        JSONObject cause = new JSONObject().put("origin", "playback_error").put("clientRevision", 2);
+        assertEquals("origin=playback_error clientRevision=2", ViewerStopReason.describe(cause));
+        for (Object invalid : new Object[] {-1, 2.5, 1_000_001, "secret"}) {
+            cause.put("clientRevision", invalid);
+            assertEquals("origin=playback_error", ViewerStopReason.describe(cause));
+        }
+    }
 }

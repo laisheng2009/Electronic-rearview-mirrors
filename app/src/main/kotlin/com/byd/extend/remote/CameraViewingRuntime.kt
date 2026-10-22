@@ -97,6 +97,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         val pendingRevoke get() = config.optBoolean("revocationPending")
     }
     private class Run(val generation: Long) {
+        var accessMode = "public"
         var provider: CameraTunnelProvider? = null
         var publisher: VdoCameraPublisher? = null
         var server: CameraViewerServer? = null
@@ -326,6 +327,12 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
 
     private fun start(p: Profile, run: Run) {
         p.phase = "connecting"; p.login = null
+        val accessMode = if (p.method == "tailscale") {
+            if (p.config.optBoolean("public")) "funnel" else "serve"
+        } else "public"
+        run.accessMode = accessMode
+        CameraViewingDiagnostics.detail("provider_start", p.method,
+            "run=${run.generation} accessMode=$accessMode")
         if (p.method == "vdo") {
             run.publisher = VdoCameraPublisher(context, p.config.getString("name"), p.config.getString("password"),
                 object : VdoCameraPublisher.Listener {
@@ -381,6 +388,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                         .put("playlist", if (playable) window!!.playlistPath else "")
                 }
                 override fun presentation() = JSONObject().put("locale", locale).put("theme", theme).put("provider", p.method)
+                    .put("accessMode", accessMode).put("run", run.generation)
                 override fun firstFrame(session: String, mode: String) = execute(p, run) {
                     val active = viewer?.takeIf { current(run, session) } ?: return@execute
                     if (mode == "live" && !active.firstLiveFrame || mode == "archive" && !active.firstArchiveFrame) {
@@ -671,7 +679,8 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         // The authentication token is never logged; this digest correlates only diagnostics.
         val reference = java.security.MessageDigest.getInstance("SHA-256").digest(active.session.toByteArray())
             .take(6).joinToString("") { "%02x".format(it.toInt() and 255) }
-        CameraViewingDiagnostics.detail(event, active.profile.method, "session=$reference $extra")
+        CameraViewingDiagnostics.detail(event, active.profile.method,
+            "session=$reference run=${active.run.generation} accessMode=${active.run.accessMode} $extra")
     }
     private fun failed(p: Profile?, failure: Exception) {
         val code = ((failure as? RuntimeFailure)?.code ?: if (failure is SecurityException)
