@@ -16,6 +16,33 @@ import static org.junit.Assert.*;
 public class FragmentedVideoWindowTest {
     private static final String FIXTURE = "/com/byd/extend/remote/fragmented_test.mp4";
 
+    @Test public void newViewCannotServePreviousGenerationResourcesOrInheritReadiness() throws Exception {
+        byte[] bytes;
+        try (InputStream input = getClass().getResourceAsStream(FIXTURE)) {
+            assertNotNull(input);
+            bytes = input.readAllBytes();
+        }
+        FragmentedVideoWindow oldView = new FragmentedVideoWindow();
+        oldView.write(bytes);
+        assertTrue(oldView.isReady());
+        FragmentedVideoWindow nextView = new FragmentedVideoWindow(oldView.getRequest(), () -> {});
+        String oldBase = oldView.getPlaylistPath().replace("live.m3u8", "");
+        String nextBase = nextView.getPlaylistPath().replace("live.m3u8", "");
+        for (String resource : new String[]{"live.m3u8", "init.mp4", "segment/0.m4s"}) {
+            assertNull(nextView.resourcePath(oldBase + resource));
+            assertNull(oldView.resourcePath(nextBase + resource));
+            assertEquals("/" + resource, nextView.resourcePath(nextBase + resource));
+        }
+        assertFalse(nextView.isReady());
+        assertNull(nextView.playlist());
+        assertNull(nextView.segment(0));
+        nextView.write(bytes);
+        assertTrue(nextView.isReady());
+        oldView.clear();
+        assertTrue(nextView.isReady());
+        assertNotNull(nextView.segment(0));
+    }
+
     @Test public void readinessWaitsForTheWholeFirstFragmentAndSignalsOnlyOnce() throws Exception {
         byte[] bytes;
         try (InputStream input = getClass().getResourceAsStream(FIXTURE)) {

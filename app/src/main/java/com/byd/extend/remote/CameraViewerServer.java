@@ -42,7 +42,7 @@ public final class CameraViewerServer implements AutoCloseable {
         boolean current(String session);
         void disconnected(String session, String reason);
         void failed(Throwable failure);
-        void live(String session, int direction);
+        void live(String session, int direction, String request);
         void archive(String session, boolean leave);
         JSONObject status();
         JSONObject presentation();
@@ -289,8 +289,9 @@ public final class CameraViewerServer implements AutoCloseable {
                 if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
                 int direction = direction(bodyObject(request.body).optString("view", "composition"));
                 closePlayback(request.session);
-                stream.live(request.session, direction);
-                json(socket, reply, 200, "preparing", null);
+                String liveRequest = java.util.UUID.randomUUID().toString();
+                stream.live(request.session, direction, liveRequest);
+                serveJson(socket, false, reply, new JSONObject().put("status", "preparing").put("request", liveRequest));
                 return;
             case "/diagnostic":
                 if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
@@ -324,28 +325,24 @@ public final class CameraViewerServer implements AutoCloseable {
         }
 
         FragmentedVideoWindow window = stream.video();
-        if (window == null && isRead(request.method)
-                && (request.path.equals("/live.m3u8") || request.path.equals("/init.mp4"))) {
-            json(socket, reply, 503, "preparing", null);
-            return;
-        }
-        if (window != null) {
-            if (request.path.equals("/live.m3u8") && isRead(request.method)) {
+        String mediaPath = window == null ? null : window.resourcePath(request.path);
+        if (mediaPath != null) {
+            if (mediaPath.equals("/live.m3u8") && isRead(request.method)) {
                 String playlist = window.playlist();
                 if (playlist == null) json(socket, reply, 503, "preparing", null);
                 else serveText(socket, request.method.equals("HEAD"), reply,
                         "application/vnd.apple.mpegurl", playlist);
                 return;
             }
-            if (request.path.equals("/init.mp4") && isRead(request.method)) {
+            if (mediaPath.equals("/init.mp4") && isRead(request.method)) {
                 byte[] bytes = window.initialization();
                 if (bytes == null) json(socket, reply, 503, "preparing", null);
                 else serveBytes(socket, request.method.equals("HEAD"), reply, "video/mp4", bytes, null);
                 return;
             }
-            if (request.path.startsWith("/segment/") && request.path.endsWith(".m4s")
+            if (mediaPath.startsWith("/segment/") && mediaPath.endsWith(".m4s")
                     && isRead(request.method)) {
-                String number = request.path.substring(9, request.path.length() - 4);
+                String number = mediaPath.substring(9, mediaPath.length() - 4);
                 try {
                     byte[] bytes = window.segment(Long.parseLong(number));
                     if (bytes == null) json(socket, reply, 404, "not_found", null);
@@ -689,6 +686,7 @@ public final class CameraViewerServer implements AutoCloseable {
     private static String operationName(String path) {
         if (path.equals("/session")) return "session";
         if (path.equals("/live")) return "live";
+        if (path.startsWith("/media/")) return "live_media";
         if (path.startsWith("/archive/video/")) return "archive_video";
         if (path.startsWith("/archive/thumbnail/")) return "archive_thumbnail";
         if (path.startsWith("/archive")) return "archive";

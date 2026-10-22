@@ -6,6 +6,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Locale;
+import java.util.UUID;
 
 /** Bounded HLS window with independently addressable, timed fMP4 fragments. */
 public final class FragmentedVideoWindow extends OutputStream {
@@ -23,8 +24,20 @@ public final class FragmentedVideoWindow extends OutputStream {
     private long sequence;
     private boolean closed;
     private final Runnable onReady;
-    public FragmentedVideoWindow() { this(() -> {}); }
-    public FragmentedVideoWindow(Runnable onReady) { this.onReady = onReady; }
+    private final String id = UUID.randomUUID().toString();
+    private final String request;
+    public FragmentedVideoWindow() { this(UUID.randomUUID().toString(), () -> {}); }
+    public FragmentedVideoWindow(Runnable onReady) { this(UUID.randomUUID().toString(), onReady); }
+    public FragmentedVideoWindow(String request, Runnable onReady) {
+        this.request = UUID.fromString(request).toString();
+        this.onReady = onReady;
+    }
+    public String getRequest() { return request; }
+    public String getPlaylistPath() { return "/media/" + id + "/live.m3u8"; }
+    public String resourcePath(String path) {
+        String prefix = "/media/" + id;
+        return path.startsWith(prefix + "/") ? path.substring(prefix.length()) : null;
+    }
     public synchronized boolean isReady() { return initialization != null && !segments.isEmpty(); }
 
     private static final class Segment {

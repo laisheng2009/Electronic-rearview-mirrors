@@ -101,6 +101,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         var publisher: VdoCameraPublisher? = null
         var server: CameraViewerServer? = null
         @Volatile var encoder: CameraHlsEncoder? = null
+        var retiringEncoder: CameraHlsEncoder? = null
         var viewer = false
         var video = false
         var preparing = false
@@ -111,6 +112,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     private class Viewer(val profile: Profile, val run: Run, val session: String) {
         @Volatile var mode = "pending"
         @Volatile var direction = -1
+        @Volatile var request = ""
         var firstLiveFrame = false
         var firstArchiveFrame = false
     }
@@ -357,8 +359,8 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                 override fun failed(failure: Throwable) = execute(p, run) {
                     throw RuntimeFailure("listener_failed", failure)
                 }
-                override fun live(session: String, direction: Int) = execute(p, run) {
-                    if (current(run, session)) live(p, run, session, direction)
+                override fun live(session: String, direction: Int, request: String) = execute(p, run) {
+                    if (current(run, session)) live(p, run, session, direction, request)
                 }
                 override fun archive(session: String, leave: Boolean) = execute(p, run) {
                     if (current(run, session)) {
@@ -368,10 +370,15 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                 }
                 override fun status(): JSONObject {
                     val active = viewer?.takeIf { it.run === run }
-                    return JSONObject().put("status", p.phase)
+                    val request = active?.request ?: ""
+                    val window = run.encoder?.window
+                    val playable = window != null && window.request == request && window.isReady
+                    return JSONObject().put("status", if (p.phase == "connected" && !playable) "preparing" else p.phase)
                         .put("missingCharge", chargeState?.missingMetrics() ?: 3)
                         .put("mode", active?.mode ?: "pending")
                         .put("view", VIEWS[(active?.direction ?: -1) + 1])
+                        .put("request", request)
+                        .put("playlist", if (playable) window!!.playlistPath else "")
                 }
                 override fun presentation() = JSONObject().put("locale", locale).put("theme", theme).put("provider", p.method)
                 override fun firstFrame(session: String, mode: String) = execute(p, run) {
@@ -421,10 +428,12 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
         return true
     }
 
-    private fun live(p: Profile, run: Run, id: String, direction: Int) {
+    private fun live(p: Profile, run: Run, id: String, direction: Int, request: String = "") {
         val active = viewer?.takeIf { current(run, id) } ?: return
         require(direction in -1..3)
-        active.mode = "live"; active.direction = direction
+        p.phase = "preparing"
+        active.mode = "live"; active.direction = direction; active.request = request
+        active.firstLiveFrame = false
         run.deadline = SystemClock.elapsedRealtime() + 30_000
         prepare(p, run)
     }
@@ -459,19 +468,23 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             false
         }
         if (!ready) { retryPreparation(p, run); return }
-        if (run.video && sourceRun === run && sourceAttached) {
+        if (run.video && sourceRun === run && sourceAttached &&
+            (run.publisher != null || run.encoder?.window?.request == active.request)) {
             camera.updateOutput(null, active.direction)
             p.phase = if (run.publisher != null || run.encoder?.window?.isReady == true) "connected" else "preparing"
             return
         }
         val previous = sourceRun
         try {
-            val surface = run.publisher?.startVideo() ?: CameraHlsEncoder({ event, frames, bytes ->
+            check(run.retiringEncoder == null) { "Previous viewer encoder is not released" }
+            run.retiringEncoder = run.encoder
+            val surface = run.publisher?.startVideo() ?: CameraHlsEncoder(active.request, { event, frames, bytes ->
                 execute(p, run) { viewer?.takeIf { it.run === run }?.let {
                     sessionEvent(event, it, "frames=$frames bytes=$bytes")
                 } }
             }, { encoder -> execute(p, run) {
-                if (sourceRun === run && run.encoder === encoder && run.video && viewer?.mode == "live") {
+                if (sourceRun === run && run.encoder === encoder && run.video && viewer?.mode == "live" &&
+                    encoder.window.request == viewer?.request) {
                     p.phase = "connected"
                     viewer?.let { sessionEvent("playable_media_ready", it) }
                 }
@@ -486,6 +499,8 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             }
             sourceRun = run
             if (previous != null && previous !== run) closeEncoder(previous)
+            // Only the output queue is replaced; the OEM camera lease stays attached.
+            run.retiringEncoder?.close(); run.retiringEncoder = null
             run.video = true
             p.phase = if (run.publisher != null || run.encoder?.window?.isReady == true) "connected" else "preparing"
             run.encoder?.let { encoder ->
@@ -560,7 +575,14 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     }
     private fun closeEncoder(run: Run) {
         run.preparing = false
-        run.publisher?.stopVideo(); run.encoder?.close(); run.encoder = null; run.video = false
+        var failure: Exception? = null
+        try { run.publisher?.stopVideo() } catch (error: Exception) { failure = error }
+        try { run.encoder?.close(); run.encoder = null }
+        catch (error: Exception) { if (failure == null) failure = error else failure.addSuppressed(error) }
+        try { run.retiringEncoder?.close(); run.retiringEncoder = null }
+        catch (error: Exception) { if (failure == null) failure = error else failure.addSuppressed(error) }
+        run.video = false
+        failure?.let { throw it }
     }
     private fun stop(p: Profile) {
         p.retryOnNetwork = false

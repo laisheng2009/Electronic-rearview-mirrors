@@ -54,11 +54,6 @@ type storedZrokEnvironment struct {
 	Host         string `json:"host"`
 }
 
-type storedZrokShare struct {
-	Token   string `json:"token"`
-	Address string `json:"address"`
-}
-
 func shareToken(shares ...*storedZrokShare) string {
 	for _, share := range shares {
 		if share != nil && share.Token != "" {
@@ -292,28 +287,31 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 	if !root.IsEnabled() {
 		return failure("not_authorized")
 	}
-	staleShare, loadErr := loadZrokShare()
+	savedShare, loadErr := loadZrokShare()
 	if loadErr != nil {
 		return zrokFailure("secure_store_error", "start.load_previous_share", loadErr, root)
 	}
-	if staleShare != nil {
-		if err := deleteZrokShare(root, &sdk.Share{Token: staleShare.Token}); err != nil {
-			return zrokOperationFailure(ctx, "provider_unavailable", "start.delete_previous_share", err, root, staleShare.Token)
+	var share *sdk.Share
+	if savedShare != nil {
+		detail, err := sdk.GetShareDetail(root, savedShare.Token)
+		if err != nil {
+			return zrokOperationFailure(ctx, "zrok_share_failed", "start.resume_share", err, root, savedShare.Token, savedShare.Address)
 		}
-		if err := deleteSecret(zrokShareKey); err != nil {
-			return zrokFailure("secure_store_error", "start.remove_previous_share", err, root, staleShare.Token)
+		restored, err := validateStoredZrokShare(savedShare, detail, root.Environment().ZitiIdentity)
+		if err != nil {
+			return zrokFailure("zrok_share_failed", "start.validate_saved_share", err, root, savedShare.Token, savedShare.Address)
 		}
-		p.share = nil
-	}
-	target := fmt.Sprintf("http://127.0.0.1:%d", localPort)
-	share, err := sdk.CreateShare(root, &sdk.ShareRequest{
-		BackendMode:    sdk.ProxyBackendMode,
-		ShareMode:      sdk.PublicShareMode,
-		Target:         target,
-		NameSelections: []sdk.NameSelection{{NamespaceToken: "public"}},
-	})
-	if err != nil {
-		return zrokOperationFailure(ctx, "zrok_share_failed", "start.create_share", err, root)
+		share = &sdk.Share{Token: restored.Token, FrontendEndpoints: []string{restored.Address}}
+	} else {
+		share, err = sdk.CreateShare(root, &sdk.ShareRequest{
+			BackendMode:    sdk.ProxyBackendMode,
+			ShareMode:      sdk.PublicShareMode,
+			Target:         fmt.Sprintf("http://127.0.0.1:%d", localPort),
+			NameSelections: []sdk.NameSelection{{NamespaceToken: "public"}},
+		})
+		if err != nil {
+			return zrokOperationFailure(ctx, "zrok_share_failed", "start.create_share", err, root)
+		}
 	}
 	var endpoints []string
 	if share != nil {
@@ -321,13 +319,17 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 	}
 	address, diagnostic := firstHttpsEndpoint(endpoints)
 	// Carry response shape through success, cancellation and later listener/cleanup failures.
-	defer func() { result.Diagnostic = "stage=start.create_share_response " + diagnostic }()
+	stage := "start.create_share_response"
+	if savedShare != nil {
+		stage = "start.resume_share_response"
+	}
+	defer func() { result.Diagnostic = "stage=" + stage + " " + diagnostic }()
 	if share == nil || share.Token == "" {
 		return zrokFailureReason("zrok_share_failed", "start.create_share", "response missing share token", root)
 	}
 	if ctx.Err() != nil {
-		p.share = &storedZrokShare{Token: share.Token}
-		result := zrokOperationFailure(ctx, "zrok_share_failed", "start.create_share", ctx.Err(), root, share.Token)
+		p.share = &storedZrokShare{Token: share.Token, Address: address}
+		result := zrokOperationFailure(ctx, "zrok_share_failed", stage, ctx.Err(), root, share.Token)
 		if err := persistZrokShare(p.share); err != nil {
 			result = zrokSecondary(result, "start.persist_cancelled_share_cleanup_reference", err, root, share.Token)
 		}
@@ -347,6 +349,9 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 	p.share = &storedZrokShare{Token: share.Token, Address: address}
 	if err := persistZrokShare(p.share); err != nil {
 		result := zrokFailure("secure_store_error", "start.persist_share", err, root, share.Token)
+		if savedShare != nil {
+			return result
+		}
 		if cleanupErr := withZrokCleanupContext(root, func() error { return deleteZrokShare(root, share) }); cleanupErr != nil {
 			result = zrokSecondary(result, "start.delete_share_after_persist_failure", cleanupErr, root, share.Token)
 			if persistErr := persistZrokShare(p.share); persistErr != nil {
@@ -366,17 +371,7 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 		}()
 	}
 	if err != nil {
-		result := zrokOperationFailure(ctx, "zrok_identity_listener_failed", "start.open_share_listener", err, root, share.Token)
-		if cleanupErr := withZrokCleanupContext(root, func() error { return deleteZrokShare(root, share) }); cleanupErr == nil {
-			if removeErr := deleteSecret(zrokShareKey); removeErr == nil {
-				p.share = nil
-			} else {
-				result = zrokSecondary(result, "start.remove_failed_share_record", removeErr, root, share.Token)
-			}
-		} else {
-			result = zrokSecondary(result, "start.delete_share_after_listener_failure", cleanupErr, root, share.Token)
-		}
-		return result
+		return zrokOperationFailure(ctx, "zrok_identity_listener_failed", "start.open_share_listener", err, root, share.Token)
 	}
 	if ctx.Err() != nil {
 		if err := listener.Close(); err != nil {
@@ -390,15 +385,6 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 		result := zrokFailure("invalid_port", "start.create_loopback_proxy", err, root, share.Token)
 		if closeErr := listener.Close(); closeErr != nil {
 			result = zrokSecondary(result, "start.close_listener_after_proxy_failure", closeErr, root, share.Token)
-		}
-		if cleanupErr := withZrokCleanupContext(root, func() error { return deleteZrokShare(root, share) }); cleanupErr == nil {
-			if removeErr := deleteSecret(zrokShareKey); removeErr == nil {
-				p.share = nil
-			} else {
-				result = zrokSecondary(result, "start.remove_share_after_proxy_failure", removeErr, root, share.Token)
-			}
-		} else {
-			result = zrokSecondary(result, "start.delete_share_after_proxy_failure", cleanupErr, root, share.Token)
 		}
 		return result
 	}
@@ -417,58 +403,10 @@ func (p *zrokProvider) Start(name string, localPort int, public bool, _ string) 
 }
 
 func (p *zrokProvider) Stop() tunnelResult {
-	ctx, finish := p.beginOperation()
-	defer finish()
-	stopErr := p.stopServing()
-	root, err := loadMemoryRoot()
-	if errors.Is(err, errSecretMissing) {
-		share, shareErr := loadZrokShare()
-		if shareErr != nil {
-			result := zrokFailure("secure_store_error", "stop.load_share_without_environment", shareErr, nil)
-			return zrokSecondary(result, "stop.close_listener", stopErr, nil)
-		}
-		if share != nil || p.share != nil {
-			result := failureWithReason("provider_unavailable", "stop.load_environment", "active share exists without an encrypted environment")
-			return zrokSecondary(result, "stop.close_listener", stopErr, nil, shareToken(share, p.share))
-		}
-		if stopErr != nil {
-			return zrokFailure("provider_unavailable", "stop.close_listener", stopErr, nil)
-		}
-		return tunnelResult{State: "stopped"}
-	}
-	if err != nil {
-		result := zrokFailure("secure_store_error", "stop.load_environment", err, nil)
-		return zrokSecondary(result, "stop.close_listener", stopErr, nil)
-	}
-	root.operationContext = ctx
-	share := p.share
-	if share == nil {
-		share, err = loadZrokShare()
-	}
-	if err != nil {
-		result := zrokFailure("secure_store_error", "stop.load_share", err, root)
-		return zrokSecondary(result, "stop.close_listener", stopErr, root)
-	}
-	if share != nil && !root.IsEnabled() {
-		result := failureWithReason("provider_unavailable", "stop.delete_share", "active share exists without an enabled environment", shareToken(share))
-		return zrokSecondary(result, "stop.close_listener", stopErr, root, shareToken(share))
-	}
-	if share != nil {
-		if err := withZrokCleanupContext(root, func() error {
-			return deleteZrokShare(root, &sdk.Share{Token: share.Token})
-		}); err != nil {
-			result := zrokOperationFailure(ctx, "provider_unavailable", "stop.delete_share", err, root, share.Token)
-			return zrokSecondary(result, "stop.close_listener", stopErr, root, share.Token)
-		}
-		if err := deleteSecret(zrokShareKey); err != nil {
-			result := zrokFailure("secure_store_error", "stop.remove_share_record", err, root, share.Token)
-			return zrokSecondary(result, "stop.close_listener", stopErr, root, share.Token)
-		}
-	}
-	p.share = nil
+	// Ordinary shutdown releases transport only; Revoke owns publication deletion.
 	p.address = ""
-	if stopErr != nil {
-		return zrokFailure("provider_unavailable", "stop.close_listener", stopErr, root, shareToken(share))
+	if err := p.stopServing(); err != nil {
+		return zrokFailure("provider_unavailable", "stop.close_listener", err, nil, shareToken(p.share))
 	}
 	return tunnelResult{State: "stopped"}
 }

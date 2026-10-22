@@ -81,7 +81,7 @@
     liveFailed: false, firstLiveFrame: false, archiveView: 'composition', recordings: [], archiveLoaded: false,
     archiveLoading: false, archiveError: false, selectedDay: null, month: null, selectedRecord: null,
     playerError: false, playerFrameReported: false, missingCharge: 0, hls: null, poll: null, mainKey: '', seeking: false,
-    localFirstFrame: false
+    localFirstFrame: false, liveRequest: null, livePlaylist: null
   };
   const cameraLabels = Object.fromEntries(cameras.map((key) => [key, text[key]]));
   let hlsScriptPromise;
@@ -444,12 +444,16 @@
     state.firstLiveFrame = false;
     state.localFirstFrame = false;
     state.status = 'preparing';
+    state.liveRequest = null; state.livePlaylist = null;
     state.mainKey = '';
     stopLiveMedia();
     renderMain(true);
     try {
       const result = await post('/live', { view: state.view });
       if (action !== actionGeneration) return;
+      if (typeof result.request !== 'string' || !/^[0-9a-f-]{36}$/.test(result.request))
+        throw new Error('Missing live media request');
+      state.liveRequest = result.request;
       state.status = result.status === 'ready' || !result.status ? 'preparing' : result.status;
       if (['error', 'ended'].includes(state.status)) state.wantsLive = false;
       renderMain(true);
@@ -690,7 +694,8 @@
 
   async function startLiveMedia() {
     const video = document.getElementById('live-video');
-    if (!video || video.dataset.started === 'true' || state.liveFailed) return;
+    if (!video || video.dataset.started === 'true' || state.liveFailed || !state.livePlaylist) return;
+    const playlist = state.livePlaylist;
     const generation = ++mediaGeneration;
     const current = () => generation === mediaGeneration && video.isConnected &&
       state.authenticated && !state.replaced && state.mode === 'live' && state.wantsLive;
@@ -713,7 +718,7 @@
     video.onerror = () => fail(video.error, video.error?.code === 3 ? 'decode' : 'load');
     try {
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = '/live.m3u8';
+        video.src = playlist;
         await video.play();
         return;
       }
@@ -726,7 +731,7 @@
         if (current()) video.play().catch((error) => fail(error));
       });
       hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) fail(data, 'hls'); });
-      hls.loadSource('/live.m3u8');
+      hls.loadSource(playlist);
       hls.attachMedia(video);
     } catch (failure) { fail(failure); }
   }
@@ -778,6 +783,14 @@
       if (!['ready', 'preparing', 'connected', 'low_battery', 'error', 'ended'].includes(data.status)) {
         console.warn('Unexpected camera viewer status', data.status);
         return;
+      }
+      if (state.mode === 'live' && state.wantsLive) {
+        if (!state.liveRequest || data.request !== state.liveRequest) return;
+        const playlist = typeof data.playlist === 'string' && /^\/media\/[0-9a-f-]{36}\/live\.m3u8$/.test(data.playlist)
+          ? data.playlist : null;
+        if (playlist !== state.livePlaylist) state.mainKey = '';
+        state.livePlaylist = playlist;
+        if (data.status === 'connected' && !state.livePlaylist) data.status = 'preparing';
       }
       state.status = data.status;
       if (state.status === 'ready' && state.wantsLive) state.status = previous === 'connected' ? 'connected' : 'preparing';
