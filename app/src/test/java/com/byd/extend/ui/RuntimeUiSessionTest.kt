@@ -5,7 +5,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class RuntimeUiSessionTest {
-    @Test fun motionCameraTabSurvivesIntegrationSubtreeRecreation() {
+    @Test fun motionCameraTabSelectionIsRetainedInSessionModelAcrossRootTabChanges() {
         val selections = RuntimeUiSelections(
             activeTab = RootTab.Signals,
             signalsCategory = SignalsCategory.Motion,

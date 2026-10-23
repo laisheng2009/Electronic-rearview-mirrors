@@ -23,7 +23,7 @@ public final class CallsContactCardTest {
             "com.byd.bluetoothcall:id/contacts_detail_dialog";
 
     @Test
-    public void parsesRedactedRetainedContactTreeWithNormalizedNumbers() throws Exception {
+    public void normalizesFieldsExtractedFromRedactedContactFixture() throws Exception {
         CallsRuntime.ContactCard card = readRedactedCard();
 
         assertEquals("Test contact", card.name);
