@@ -11,7 +11,7 @@ BYD Extend adds configurable camera views, a rearview-mirror widget, turn-signal
 - **Compatibility:** primarily tested on the Chinese-market BYD Sea Lion 07 EV 2025 with DiLink 5.0. Features on other models and firmware, including instrument-cluster output, are not guaranteed.
 - **Download:** [latest GitHub release](https://github.com/sunlixWhyNotAvailable/byd-turnsignal-cameraview/releases/latest).
 - **Package:** `com.byd.extend` — a separate application from the older BYD Turn Signal.
-- **Help:** [ADB requirements](#which-functions-need-adb) · [Troubleshooting](#troubleshooting) · [Report a problem](#report-a-problem).
+- **Help:** [ADB requirements](#which-functions-need-adb) · [Remote cameras](#remote-camera-viewing-setup-and-everyday-use) · [Troubleshooting](#troubleshooting) · [Report a problem](#report-a-problem).
 
 ## Installation and first start
 
@@ -35,6 +35,7 @@ Here, **Yes** means authorized local ADB is needed to start/restart a privileged
 | --- | --- |
 | Turn-signal guard and manual turn-signal controls | **Yes**, to start/restart the vehicle-control helper. |
 | Blind-zone, parking, reverse, and mirror camera output | **Yes**, to start/restart camera and vehicle-state helpers, including the normal in-app camera preview. This applies to tablet and instrument-cluster output. |
+| Cameras integration: Motion warnings, recording and remote viewing | **Yes**, to start/restart the relevant helpers. Remote viewing also needs the vehicle's internet connection; the phone/PC viewer does not need ADB. Playing already saved local videos does not need a live camera source. |
 | Music metadata, visualization/lighting, and steering-wheel player routing | **Yes**, to start/restart the music helper. Player routing also needs Accessibility. |
 | AVAS event sounds, file audition, exterior microphone speech, and engine simulation | **Yes**, to start/restart the audio helper. Microphone speech additionally needs microphone permission and the app's connected Accessibility service. |
 | Weather retrieval and updating the stock weather card | **No** for routine updates on supported firmware. Location permission, internet, and access to the stock weather provider are required. Intercepting the stock weather Refresh button also needs Accessibility. |
@@ -199,34 +200,182 @@ Assigned buttons can replace their original actions. Reset a binding to release 
 
 ### Cameras integration
 
-`BYD integrations -> Cameras` groups `Tablet display`, `Video recording`, and `Viewing` in three tabs. Tablet display and recording can use vehicle battery; their consumption is not necessarily the same. Saved charge thresholds are shared by all three tabs and protect the tablet Motion warning, recording, and remote video:
+Open `BYD integrations → Cameras`. The three tabs are **Viewing**, **Tablet display**, and **Video recording**.
 
-| Reading | Range | Default |
+- **Tablet display:** shows your chosen warning template when motion is detected while the vehicle is off, subject to the selected lock condition.
+- **Video recording:** saves Motion event videos with a configurable buffer before/after the event, optional audio, storage limits, and an archive.
+- **Viewing:** lets you connect from a phone or computer. It does **not** require tablet warnings or recording to be enabled.
+
+Tablet display and recording keep camera-related components active while parked and consume battery. Remote live viewing also consumes battery and data while connected. Do not assume consumption is identical to OEM Sentry.
+
+<details>
+<summary>Tablet display, recording and low-battery protection</summary>
+
+<p align="center"><img src="docs/screenshots/en/cameras-tablet.png" alt="Cameras — tablet warning and shared charge limits" width="100%"></p>
+
+<p align="center"><img src="docs/screenshots/en/cameras-recording.png" alt="Cameras — recording, storage and archive" width="100%"></p>
+
+| Shared charge limit | Range | Default |
 | --- | --- | --- |
 | SOC | 10–90% in 1% steps | 20% |
 | 12V battery | 12.0–13.0V in 0.1V steps | 12.4V |
 
-When either valid reading is at or below its threshold, those three activities pause without turning off their switches or resetting their settings; an active recording is finalized cleanly. This guard does not disable reverse, blind-zone, or other driving-camera functions. If a reading is unavailable and no low-charge stop was previously confirmed, an in-form warning lists only the missing metric and allows you to continue at your discretion. Missing data does not clear a confirmed low-charge stop: it remains latched across runtime restarts until a fresh valid reading is above the threshold for every cause. The affected enabled features then recover automatically, subject to their normal Motion and vehicle conditions.
+At or below either valid limit, tablet warnings, Motion recording and remote viewing pause without changing their switches; an active recording is finalized. Driving cameras (reverse/blind zones/etc.) are not stopped by these limits. A confirmed low-charge stop persists until fresh valid readings exceed every triggered threshold; enabled features then resume under their normal conditions. If a reading is missing without an earlier confirmed low-charge stop, the app warns that protection for that reading is unavailable: continuing is your decision.
 
-Remote viewing is independent of Motion's enable switch and can run with vehicle power ON or OFF while the camera runtime, network route, and vehicle remain available. Choose one of these transports:
+</details>
 
-| Transport | Browser views |
+## Remote camera viewing: setup and everyday use
+
+### What you need
+
+**On the vehicle:**
+
+- BYD Extend set up with authorized local ADB, working camera/helper access and the required permissions. A laptop does **not** have to remain connected.
+- Internet that remains available **after you leave the vehicle**: for example, the vehicle's own mobile connection or a Wi-Fi connection that stays in range. A hotspot on the phone you take away will not do.
+- Background operation allowed in DiLink. For unattended recovery, enable Extend's Auto-start and complete the background/ADB setup described above.
+- `Cameras → Viewing → Allow remote viewing` enabled, a configured provider, and charge above the shared limits.
+- Compatible camera firmware and a hardware H.264 encoder; there is no software-encoding fallback. A parked vehicle can be viewed only while its Android/network/helper path remains reachable. A link cannot wake a completely offline vehicle; recovery after deep sleep or reboot is not guaranteed on every firmware.
+
+**On your phone or computer:** internet and a current browser with video playback support. No Extend APK is needed there. Only **private Tailscale Serve** additionally requires a connected Tailscale client with permission to reach the vehicle.
+
+All three transports are embedded in Extend: do not install a second tunnel app on the car just for these instructions, open router ports, or set up a website/GitHub Pages. The viewing URL is an access address, not cloud storage. Traffic counts against the car's data allowance; provider availability and limits also apply.
+
+### Which method should I choose?
+
+| Method | Setup on the vehicle | Phone / computer | What you get |
+| --- | --- | --- | --- |
+| **VDO.Ninja** | Stream ID + viewer password; no provider account | Browser + password; no VPN | Easiest starting point. Live four-camera composition in the standard VDO player. **No** Extend page, individual-camera selector, archive or remote mode switches. |
+| **Tailscale · Serve** | Tailscale account, approve the vehicle, MagicDNS + HTTPS | Tailscale connected to the same permitted private network, then browser | Extend's **Live / Recordings** page; access stays within your tailnet. |
+| **Tailscale · Funnel** | Same account, plus Funnel permission and viewer password | Browser + password; VPN not required | The same Extend page through a public HTTPS address. |
+| **zrok** | myzrok account token + connection name + viewer password | Browser + password; no VPN or zrok installation | The same Extend page through a public HTTPS address. |
+
+“VDO works out of the box” means **no separate provider account or VPN setup**—it still needs internet, enabled viewing and a password. Serve is useful when you want private-network access; Funnel/zrok when you want to use an ordinary browser without joining that network.
+
+The screenshots below are **Preview demonstrations**, not working vehicle links or evidence of real authorization. EN/UK images use the dark theme; scrollable screens are stitched.
+
+<details>
+<summary>VDO.Ninja — quickest setup, live composition only</summary>
+
+**On the vehicle**
+
+1. Open `BYD integrations → Cameras → Viewing`; enable **Allow remote viewing** and select **VDO.Ninja**.
+2. Enter a **Stream ID**, or press **Generate ID**. Your own ID may contain **1–64 Latin letters, digits or underscores**; no spaces/hyphens. It is case-sensitive.
+3. Enter a **Viewer password**: **1–49 Latin letters or digits**, case-sensitive; no spaces or punctuation. These are VDO's format limits, not a recommendation to use a short password. Use a long, unique password. [VDO password reference](https://docs.vdo.ninja/advanced-settings/setup-parameters/and-password).
+4. Press **Authorize**. For VDO this connects the saved stream configuration; there is no account sign-in page. Typing in a field alone does not authorize it.
+5. Wait for **Ready to start viewing** and an actual viewer link. Use **Copy link** or **QR code**.
+
+**On the phone / computer**
+
+1. Scan the QR code on your phone, or transfer the copied link to your computer and open it in a browser.
+2. Enter the **same viewer password**. Extend already prepares the password prompt; do not edit the URL or append a password yourself.
+3. Wait for the live composition. If the browser requests a tap to start video, tap it.
+4. Use VDO's **Hang Up** button to disconnect, or close the viewing tab.
+
+<p align="center"><img src="docs/screenshots/en/cameras-vdo.png" alt="VDO.Ninja settings in Preview" width="100%"></p>
+
+</details>
+
+<details>
+<summary>Tailscale Serve — private access from your own devices</summary>
+
+**Account and phone / computer**
+
+1. Create/sign in to a [Tailscale account](https://tailscale.com/). Its private network is called a **tailnet**.
+2. In the [DNS settings](https://login.tailscale.com/admin/dns), enable **MagicDNS** and **HTTPS Certificates**. HTTPS publishes the device/domain name in certificate-transparency records: use a neutral name, not your registration plate or other private information. [HTTPS setup](https://tailscale.com/docs/how-to/set-up-https-certificates).
+3. Install Tailscale on each phone/computer you will use, sign in to the permitted tailnet and connect it. Your access rules must allow that device/user to reach the vehicle's HTTPS service (port 443); avoid unnecessarily opening the whole network. [Serve access rules](https://tailscale.com/docs/features/tailscale-serve).
+
+**On the vehicle**
+
+1. Enable **Allow remote viewing**, select **Tailscale**, then **Private · Serve**.
+2. Enter a neutral **Vehicle device name**, such as `byd-car`: **1–63 lowercase Latin letters, digits or hyphens**, no leading/trailing hyphen.
+3. Press **Authorize**. Complete sign-in and device approval on the Tailscale page opened in the browser. If your tailnet requires administrator approval, complete that too.
+4. Return to Extend and wait for the ready status and HTTPS link. **Browser approval alone is not confirmation that the tunnel is ready.**
+
+**To view**
+
+Keep Tailscale connected on the phone/computer, open the copied link or scan the QR code, and use Extend's page. Serve uses tailnet identity/access policy instead of an Extend viewer password.
+
+<p align="center"><img src="docs/screenshots/en/cameras-tailscale-serve.png" alt="Private Tailscale Serve settings in Preview" width="100%"></p>
+
+</details>
+
+<details>
+<summary>Tailscale Funnel — public link protected by a viewer password</summary>
+
+1. Complete the Tailscale account, MagicDNS, HTTPS and vehicle-approval steps above.
+2. In Tailscale's **Access controls**, allow the `funnel` node attribute for the account or tag that owns the vehicle. An administrator can use **Add Funnel to policy**; do not replace the entire policy or grant unrelated permissions. Authorizing the vehicle does not grant this capability by itself. [Funnel requirements and policy](https://tailscale.com/docs/features/tailscale-funnel).
+3. On the vehicle, select **Public · Funnel** and set a strong, non-empty **Viewer password**.
+4. Press **Authorize** for initial setup, or **Apply connection settings** when changing an already authorized profile. Wait for ready status; while changes are pending, the old link is not a confirmation of the new mode.
+5. On your phone/computer, open the displayed HTTPS link and enter the viewer password. Tailscale VPN is **not required**. In Funnel mode, access through an already connected tailnet is also accepted, but still requires the viewer password.
+
+**Serve and Funnel share a Tailscale identity/address, but only the applied mode is active.** The same URL does not mean both modes are enabled. Selecting a different provider in the form is different from applying a new Tailscale mode. Public DNS may take time to propagate when Funnel is first enabled.
+
+<p align="center"><img src="docs/screenshots/en/cameras-tailscale-funnel.png" alt="Public Tailscale Funnel settings in Preview" width="100%"></p>
+
+</details>
+
+<details>
+<summary>zrok — public viewing without a VPN client</summary>
+
+**On the phone / computer**
+
+1. Sign in to [myzrok.io](https://myzrok.io/).
+2. Open **zrok → Getting Started** and copy the **account token** from step 2. This build uses the zrok **v2** service (`api-v2.zrok.io`); use its account token, not a viewer password, share ID or token from an older service. [Official token instructions](https://netfoundry.io/docs/zrok/get-started/get-token/).
+
+**On the vehicle**
+
+1. Enable **Allow remote viewing**, select **Zrok** and enter that **Account token**. Treat it as a secret: never send it to viewers or include it in screenshots.
+2. Enter a **Connection name**, for example `byd-car`: **1–63 lowercase Latin letters, digits or hyphens**, no hyphen at either end.
+3. Set a separate, strong **Viewer password**. This is what you enter when opening the page; it is not your myzrok password or account token.
+4. Press **Authorize**. Extend registers the vehicle and prepares the viewing link. There is no second browser sign-in or separate “Start viewing” step.
+5. Wait for ready status, then copy the link or display its QR code.
+
+**To view**
+
+Open the link in a phone/computer browser and enter the viewer password. No zrok program or VPN is needed on the viewing device. Extend reuses its saved publication across ordinary reconnects; revoking/replacing access can change the link, so use the current one shown in the app.
+
+<p align="center"><img src="docs/screenshots/en/cameras-zrok.png" alt="zrok settings in Preview" width="100%"></p>
+
+</details>
+
+### Using the Extend page (Tailscale and zrok)
+
+The page uses the language and theme selected in Extend.
+
+- **Live:** choose Composition, Front, Rear, Left or Right. The output changes without deliberately closing and reopening the camera source. Live video has no audio and does not itself create recordings.
+- **Recordings:** select a date in the calendar and a recording. Use the event timeline, seek, playback speed and fullscreen controls. Red event markers take priority where they overlap yellow ones. Recorded audio plays when present. Only Extend recordings are included—not OEM Sentry. Older videos without saved camera order support Composition only. Opening the archive does not start live cameras.
+- **Car modes:** the desktop panel is on the right; on a phone, expand the collapsed panel. **Show on tablet** and **Record cameras** read/change the same saved switches as the app. They are not merely web-player settings: changing them affects the vehicle and remains in effect after you close the page. Enabling a switch does not bypass power/lock, permission or low-charge conditions. If required recording permissions are missing, grant them on the tablet first.
+- **Disconnect:** press **End session** or close the tab. Viewing-owned resources are released; recording or other camera consumers remain active if independently enabled.
+
+### Access, passwords and safe use
+
+One saved access/account is kept **per provider**, not per phone/browser. Choosing a provider in the settings form does not disable the other authorized providers. However, **only one viewer session is active across all providers**: a new authenticated viewer replaces the previous one. The Extend page explains the replacement; VDO's stock player controls its own messages.
+
+**Revoke access** affects the selected provider, not all providers. Use it to remove that account/access—not as the normal way to disconnect. To replace a saved account or locked name, revoke the old access first. For a temporary connection error, use **Retry connection** after correcting the cause.
+
+Public routes (VDO, Funnel and zrok) require a viewer password. Use a long, unique password even if a shorter one passes format validation. The link/QR does not contain the password; share it separately and only with trusted people. A permitted Tailscale/zrok viewer can also view the Extend archive and change the two vehicle-mode switches.
+
+Secrets are encrypted using Android Keystore and excluded from settings export/Android backup. Restoring exported settings does not replace provider authorization. External providers still handle connection traffic; public-link protection is not a promise that a sleeping, offline or low-battery vehicle can always be reached.
+
+<details>
+<summary>If the page or video does not open</summary>
+
+| Symptom | What to check |
 | --- | --- |
-| VDO.Ninja | Live four-camera composition on the standard VDO.Ninja page |
-| Tailscale Serve (private) or Funnel (public) | Shared Live / Recordings page: composition or an individual camera, plus the Extend archive |
-| Zrok (public) | The same Live / Recordings page as Tailscale |
+| Authorize is disabled | Viewing enabled; valid non-empty name; required password; zrok account token. Entering fields alone does not start authorization. |
+| Tailscale approved, but not ready | MagicDNS/HTTPS, any administrator device approval, access policy, and Funnel permission if selected. Check the error in Extend; do not repeatedly revoke a valid account. |
+| Serve works only with VPN | Expected: connect the viewer to the permitted tailnet. Use Funnel only if you intentionally want public access. |
+| Funnel not reachable after setup | Confirm the applied mode and account capability; allow for DNS propagation. Test once without another VPN to distinguish routing from service failure. |
+| Password rejected | Use the viewer password for that provider, not its account password/token. VDO passwords are case-sensitive; check phone auto-capitalization. |
+| Page opens, video does not | Check camera/helper status, charge protection, hardware encoding and the vehicle connection. A loaded page does not prove live camera readiness. |
+| Worked while parked nearby, unavailable later | Check whether the car lost internet when your hotspot left or Android/network went to sleep. |
+| Another device was disconnected | Only one viewer is allowed across providers. Close old viewing tabs before switching devices. |
 
-VDO.Ninja creates a random `byd-…` stream ID if its ID field is left empty; you can instead enter a custom ID. Its viewer link is built from that ID. Set a viewer password in the app; it is entered separately from the link ([VDO.Ninja stream IDs](https://docs.vdo.ninja/getting-started/stream-ids), [passwords](https://docs.vdo.ninja/advanced-settings/setup-parameters/and-password)). For Tailscale, enter a device name or leave it blank for an app-generated one, then choose **Authorize**; if sign-in is needed, the embedded Tailscale client supplies the authorization URL to approve that device in your tailnet. **Serve** is private to the tailnet and follows its access-control rules; **Funnel** is public ([Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve), [Funnel](https://tailscale.com/docs/features/tailscale-funnel)). For Zrok, enter the account token from your myzrok account console ([official token instructions](https://netfoundry.io/docs/zrok/get-started/get-token/)). You can enter a custom connection name or keep the app-generated default; **Authorize** enables the environment, and **Start viewing** creates the share address. Zrok uses this account token and does not provide a separate authorization URL.
+If it persists, note local time, provider, Serve/Funnel mode, VPN state and exact browser error, then export diagnostic logs. Never include passwords or account tokens in a public issue.
 
-A viewer password is required for VDO.Ninja and every public route, including Tailscale Funnel and Zrok; public viewing cannot start with an empty password. Private Tailscale Serve uses tailnet identity and policy instead. The shared link and QR code do not contain the viewer password. Passwords, provider tokens, and tunnel identity are encrypted with Android Keystore and are excluded from settings exports and Android backups. Revoke stops the active share and clears the saved credentials for that transport.
+</details>
 
-The Tailscale/Zrok page is included in the app and served by the vehicle; it needs no separate website or hosting account. It uses Extend's language and theme. Choose **Live** for composition or Front / Rear / Left / Right, or **Recordings** for the calendar, covers and read-only Extend archive. Playback includes event markers, seeking, speed and fullscreen controls, and preserves audio when the recording contains it. Old recordings without saved camera order offer composition only. Opening the archive does not start live cameras; OEM Sentry recordings are not included. VDO.Ninja remains live-only, with its standard viewer and no Extend archive or camera-selection menu.
-
-One viewer is active across all transports. A new authenticated viewer replaces the previous session; our Tailscale/Zrok page explains the replacement and does not reconnect automatically. Live-to-live handover retains the camera source. A failed password does not replace the current viewer, and closing an old session cannot stop its replacement. The standard VDO page's exact notice and reconnect behavior depend on VDO.Ninja.
-
-Live streams are video-only and do not create recordings. Live encoding and camera use start only for a connected viewer and require a compatible hardware H.264 encoder; there is no software-encoding fallback. Network routing, existing VPNs, firmware, and sleep state can prevent access, and remote viewing cannot wake a vehicle that is fully asleep or unreachable. Compatibility and recovery behavior are not guaranteed on every model or encoder.
-
-Thanks to the [OverDrive project](https://github.com/yash-srivastava/Overdrive-release) for its publicly available code and ideas that informed our camera and tunnel research.
+Thanks to the [OverDrive project](https://github.com/yash-srivastava/Overdrive-release) for publicly available code and ideas that informed our camera and tunnel research.
 
 ## Optional integrations
 

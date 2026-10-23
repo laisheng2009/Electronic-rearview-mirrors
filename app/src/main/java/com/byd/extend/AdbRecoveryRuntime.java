@@ -150,7 +150,9 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         closeDiscovery();
         if (networkRegistered && connectivity != null) {
             try { connectivity.unregisterNetworkCallback(networkCallback); }
-            catch (RuntimeException ignored) { }
+            catch (RuntimeException error) {
+                failure("adb_wifi_callback_cleanup_failed", "unregisterNetworkCallback", error);
+            }
         }
         networkRegistered = false;
         worker.shutdownNow();
@@ -206,6 +208,8 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
                 || reason == Reason.ADB_FAILURE
                 && coordinator.snapshot().authenticated5555();
         coordinator.begin(forceCycle, nowElapsed);
+        log.log("adb_recovery_attempt", "cycle", coordinator.snapshot().cycleId(),
+                "trigger", reason, "new_boot", detectedNewBoot);
         publish();
 
         AdbRecoveryPolicy.Proof proof = freshClassicProof();
@@ -315,7 +319,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
             long generation = ++discoveryGeneration;
             discovery = new AdbTlsDiscovery(context,
                     port -> execute(() -> tryTlsPort(port, generation)),
-                    message -> log.log("adb_recovery_discovery", "message", message));
+                    log);
         }
         discovery.start();
     }
@@ -358,11 +362,10 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
                     "category", result.category, "reason", result.reason);
         } catch (Throwable error) {
             consentPaused = false;
-            if (deferForPrerequisite()) return;
-            log.log("adb_tls_failed", "port", port,
-                    "error", error.getClass().getSimpleName(),
+            failure("adb_tls_failed", "tls_connect_or_tcpip5555", error, "port", port,
                     "category", LocalAdbTlsClient.failureCategory(error),
                     "reason", LocalAdbTlsClient.failureReason(error));
+            if (deferForPrerequisite()) return;
             consentPaused = false;
             if (!settings.getBoolean(RECOVERY_ENABLED, false)) {
                 applyDisabled();
@@ -416,7 +419,8 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
             AdbRecoveryPolicy.Proof proof = AdbRecoveryPolicy.classifyProof(result, PROOF_MARKER);
             log.log("adb_5555_proof", "ok", proof == AdbRecoveryPolicy.Proof.AVAILABLE,
                     "category", proof,
-                    "result", result.ok ? "ok" : result.error);
+                    "result", result.ok ? "ok" : AdbRecoveryDiagnostics.safeText(result.error),
+                    "exit_code", result.exitCode);
             return proof;
         } finally {
             internalProof.remove();
@@ -424,27 +428,44 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
     }
 
     private BiConsumer<String, Object[]> noSecretsEventSink() {
-        return (event, fields) -> log.log("adb_transport", "event", event);
+        return (event, fields) -> log.log("adb_transport",
+                AdbRecoveryDiagnostics.transportFields(event, fields));
     }
 
     private boolean ensureGlobalSetting(String key, int value, boolean writeWhenEqual) {
         if (deferForPrerequisite()) return false;
+        String step = "read_before";
+        int current = -1;
         try {
-            int current = Settings.Global.getInt(context.getContentResolver(), key, -1);
+            current = Settings.Global.getInt(context.getContentResolver(), key, -1);
             if (current != value || writeWhenEqual) {
+                step = "write";
                 boolean[] written = {false};
+                boolean[] permitted = {false};
                 operation.write(() -> {
-                    if (AppPermissionProvisioner.hasWriteSecureSettings(context)) {
+                    permitted[0] = AppPermissionProvisioner.hasWriteSecureSettings(context);
+                    if (permitted[0]) {
                         written[0] = Settings.Global.putInt(context.getContentResolver(), key, value);
                     }
                 });
-                if (!written[0]) return false;
+                if (!written[0]) {
+                    log.log("adb_setting_failed", "operation", "write", "key", key,
+                            "before", current, "requested", value, "wss", permitted[0],
+                            "reason", permitted[0] ? "putInt_returned_false" : "wss_not_granted");
+                    return false;
+                }
             }
-            return Settings.Global.getInt(context.getContentResolver(), key, -1) == value;
+            step = "readback";
+            int readback = Settings.Global.getInt(context.getContentResolver(), key, -1);
+            log.log(readback == value ? "adb_setting_verified" : "adb_setting_failed",
+                    "operation", step, "key", key, "before", current,
+                    "requested", value, "readback", readback,
+                    "reason", readback == value ? "matched" : "readback_mismatch");
+            return readback == value;
         } catch (Exception error) {
+            failure("adb_setting_failed", step, error, "key", key,
+                    "before", current, "requested", value);
             if (deferForPrerequisite()) return false;
-            log.log("adb_setting_failed", "key", key,
-                    "error", error.getClass().getSimpleName());
             return false;
         }
     }
@@ -453,23 +474,34 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         if (deferForPrerequisite()) return false;
         try {
             boolean[] written = {false};
+            boolean[] permitted = {false};
             operation.write(() -> {
-                if (AppPermissionProvisioner.hasWriteSecureSettings(context)) {
+                permitted[0] = AppPermissionProvisioner.hasWriteSecureSettings(context);
+                if (permitted[0]) {
                     written[0] = Settings.Global.putInt(context.getContentResolver(), key, 1);
                 }
             });
+            if (!written[0]) log.log("adb_setting_failed", "operation", "request_one",
+                    "key", key, "requested", 1, "wss", permitted[0],
+                    "reason", permitted[0] ? "putInt_returned_false" : "wss_not_granted");
             return written[0];
         } catch (Exception error) {
+            failure("adb_setting_failed", "request_one", error, "key", key, "requested", 1);
             if (deferForPrerequisite()) return false;
-            log.log("adb_setting_failed", "key", key,
-                    "error", error.getClass().getSimpleName());
             return false;
         }
     }
 
     private int readGlobal(String key) {
-        try { return Settings.Global.getInt(context.getContentResolver(), key, -1); }
-        catch (RuntimeException error) { return -1; }
+        try {
+            int value = Settings.Global.getInt(context.getContentResolver(), key, -1);
+            if (value == -1) log.log("adb_setting_unavailable", "operation", "read",
+                    "key", key, "reason", "missing_or_minus_one");
+            return value;
+        } catch (RuntimeException error) {
+            failure("adb_setting_failed", "read", error, "key", key);
+            return -1;
+        }
     }
 
     private boolean detectAndRememberBoot(Reason reason, long nowElapsed) {
@@ -500,7 +532,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
             }
             return false;
         } catch (RuntimeException error) {
-            log.log("adb_wifi_state_failed", "error", error.getClass().getSimpleName());
+            failure("adb_wifi_state_failed", "getAllNetworks/getNetworkCapabilities", error);
             return false;
         }
     }
@@ -513,7 +545,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
             connectivity.registerNetworkCallback(request, networkCallback);
             networkRegistered = true;
         } catch (RuntimeException error) {
-            log.log("adb_wifi_callback_failed", "error", error.getClass().getSimpleName());
+            failure("adb_wifi_callback_failed", "registerNetworkCallback", error);
         }
     }
 
@@ -553,8 +585,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         try {
             listener.onAdbRecoverySnapshot(coordinator.snapshot());
         } catch (Throwable error) {
-            log.log("adb_snapshot_listener_failed", "error",
-                    error.getClass().getSimpleName());
+            failure("adb_snapshot_listener_failed", "publish_snapshot", error);
         }
     }
 
@@ -595,7 +626,21 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
 
     private void execute(Runnable action) {
         if (closed) return;
-        try { worker.execute(action); } catch (RejectedExecutionException ignored) { }
+        try {
+            worker.execute(() -> {
+                try { action.run(); }
+                catch (RuntimeException | Error error) {
+                    failure("adb_recovery_worker_failed", "worker_action", error);
+                    throw error;
+                }
+            });
+        } catch (RejectedExecutionException error) {
+            failure("adb_recovery_worker_failed", "submit_action", error, "closed", closed);
+        }
+    }
+
+    private void failure(String event, String operationName, Throwable error, Object... fields) {
+        AdbRecoveryDiagnostics.failure(log::log, event, operationName, error, fields);
     }
 
     private static Reason higherPriority(Reason first, Reason second) {
