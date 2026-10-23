@@ -259,7 +259,7 @@ The screenshots below are **Preview demonstrations**, not working vehicle links 
 **On the vehicle**
 
 1. Open `BYD integrations → Cameras → Viewing`; enable **Allow remote viewing** and select **VDO.Ninja**.
-2. Enter a **Stream ID**, or press **Generate ID**. Your own ID may contain **1–64 Latin letters, digits or underscores**; no spaces/hyphens. It is case-sensitive.
+2. Enter a **Stream ID**, or press **Generate ID**. You choose this ID in Extend; you do not need to copy an account/device ID from VDO. If reusing your own stream ID, paste only its value—not a complete VDO link. Your own ID may contain **1–64 Latin letters, digits or underscores**; no spaces/hyphens. It is case-sensitive.
 3. Enter a **Viewer password**: **1–49 Latin letters or digits**, case-sensitive; no spaces or punctuation. These are VDO's format limits, not a recommendation to use a short password. Use a long, unique password. [VDO password reference](https://docs.vdo.ninja/advanced-settings/setup-parameters/and-password).
 4. Press **Authorize**. For VDO this connects the saved stream configuration; there is no account sign-in page. Typing in a field alone does not authorize it.
 5. Wait for **Ready to start viewing** and an actual viewer link. Use **Copy link** or **QR code**.
@@ -287,7 +287,7 @@ The screenshots below are **Preview demonstrations**, not working vehicle links 
 **On the vehicle**
 
 1. Enable **Allow remote viewing**, select **Tailscale**, then **Private · Serve**.
-2. Enter a neutral **Vehicle device name**, such as `byd-car`: **1–63 lowercase Latin letters, digits or hyphens**, no leading/trailing hyphen.
+2. Choose a neutral **Vehicle device name**, such as `byd-car`: **1–63 lowercase Latin letters, digits or hyphens**, no leading/trailing hyphen. This names the vehicle; it is not the ID/name of your phone or computer. **Do not copy an auth key, API key, IP address or device ID from Tailscale into this field.** Both Serve and Funnel use the browser approval in the next step, not a pasted token.
 3. Press **Authorize**. Complete sign-in and device approval on the Tailscale page opened in the browser. If your tailnet requires administrator approval, complete that too.
 4. Return to Extend and wait for the ready status and HTTPS link. **Browser approval alone is not confirmation that the tunnel is ready.**
 
@@ -320,12 +320,13 @@ Keep Tailscale connected on the phone/computer, open the copied link or scan the
 **On the phone / computer**
 
 1. Sign in to [myzrok.io](https://myzrok.io/).
-2. Open **zrok → Getting Started** and copy the **account token** from step 2. This build uses the zrok **v2** service (`api-v2.zrok.io`); use its account token, not a viewer password, share ID or token from an older service. [Official token instructions](https://netfoundry.io/docs/zrok/get-started/get-token/).
+2. Click the **zrok icon in the left sidebar** to open the API console, then the green **CLICK HERE TO GET STARTED!** button. In **step 2** of that wizard, copy the **account token**. This build uses the zrok **v2** service (`api-v2.zrok.io`). [Official token instructions](https://netfoundry.io/docs/zrok/get-started/get-token/).
+3. Transfer **only the token value** to the vehicle's **Account token** field. If shown as `zrok2 enable YOUR_ACCOUNT_TOKEN`, copy only the value in place of `YOUR_ACCOUNT_TOKEN`—not the command, spaces, quotes or the placeholder itself. Do not use an environment ID (`EnvZId`), share ID/token, viewing URL, myzrok password or token from the older service. You do not need to run that command: Extend enables its own environment when you press **Authorize**. [Token versus environment](https://netfoundry.io/docs/zrok/get-started/enable-env/).
 
 **On the vehicle**
 
 1. Enable **Allow remote viewing**, select **Zrok** and enter that **Account token**. Treat it as a secret: never send it to viewers or include it in screenshots.
-2. Enter a **Connection name**, for example `byd-car`: **1–63 lowercase Latin letters, digits or hyphens**, no hyphen at either end.
+2. Choose a **Connection name**, for example `byd-car`: **1–63 lowercase Latin letters, digits or hyphens**, no hyphen at either end. This is your label for the connection, not another ID to copy from zrok.
 3. Set a separate, strong **Viewer password**. This is what you enter when opening the page; it is not your myzrok password or account token.
 4. Press **Authorize**. Extend registers the vehicle and prepares the viewing link. There is no second browser sign-in or separate “Start viewing” step.
 5. Wait for ready status, then copy the link or display its QR code.
@@ -346,6 +347,32 @@ The page uses the language and theme selected in Extend.
 - **Recordings:** select a date in the calendar and a recording. Use the event timeline, seek, playback speed and fullscreen controls. Red event markers take priority where they overlap yellow ones. Recorded audio plays when present. Only Extend recordings are included—not OEM Sentry. Older videos without saved camera order support Composition only. Opening the archive does not start live cameras.
 - **Car modes:** the desktop panel is on the right; on a phone, expand the collapsed panel. **Show on tablet** and **Record cameras** read/change the same saved switches as the app. They are not merely web-player settings: changing them affects the vehicle and remains in effect after you close the page. Enabling a switch does not bypass power/lock, permission or low-charge conditions. If required recording permissions are missing, grant them on the tablet first.
 - **Disconnect:** press **End session** or close the tab. Viewing-owned resources are released; recording or other camera consumers remain active if independently enabled.
+
+The examples below show the shared **Tailscale (Serve/Funnel) and zrok** page on a computer and a phone. They use the current web interface in the dark theme, with **illustrated camera frames and demonstration recordings**, not footage from a vehicle. The provider label shown is Tailscale; zrok has the same controls. VDO uses its own player instead.
+
+<details>
+<summary>PC / laptop examples — Live and Recordings</summary>
+
+**Live:** camera selection, fullscreen and the vehicle-mode switches on the right.
+
+<p align="center"><img src="docs/screenshots/en/viewer-desktop-live.png" alt="Desktop camera page: live composition with camera selection and vehicle-mode switches; demonstration data" width="100%"></p>
+
+**Recordings:** calendar, thumbnails and yellow/red event counts.
+
+<p align="center"><img src="docs/screenshots/en/viewer-desktop-archive.png" alt="Desktop recording archive with calendar and video thumbnails; demonstration data" width="100%"></p>
+
+</details>
+
+<details>
+<summary>Phone examples — Live and Recordings</summary>
+
+The vehicle-mode panel starts collapsed. The archive scrolls vertically.
+
+<p align="center"><img src="docs/screenshots/en/viewer-phone-live.png" alt="Phone live camera page with collapsed vehicle-mode panel; demonstration data" width="360"></p>
+
+<p align="center"><img src="docs/screenshots/en/viewer-phone-archive.png" alt="Phone recording archive with calendar and video thumbnails; demonstration data" width="360"></p>
+
+</details>
 
 ### Access, passwords and safe use
 
