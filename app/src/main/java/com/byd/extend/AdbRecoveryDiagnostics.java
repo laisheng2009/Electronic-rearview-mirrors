@@ -14,7 +14,7 @@ final class AdbRecoveryDiagnostics {
     private static final Pattern KEY_MATERIAL = Pattern.compile(
             "(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{128,}={0,2}");
     private static final Pattern PERSONAL = Pattern.compile(
-            "(?i)(\\b(?:ssid|bssid|serial|public_key|private_key|certificate)\\s*[:=]\\s*)"
+            "(?i)([\"']?\\b(?:ssid|bssid|serial|public_key|private_key|certificate)[\"']?\\s*[:=]\\s*)"
                     + "(?:\"[^\"]*\"|'[^']*'|[^\\s,;}]+)");
     private static final List<String> TRANSPORT_FIELDS = Arrays.asList(
             "stage", "operation", "reason", "error", "error_class", "category", "endpoint",
@@ -32,6 +32,7 @@ final class AdbRecoveryDiagnostics {
 
     static void failure(BiConsumer<String, Object[]> sink, String event,
             String operation, Throwable error, Object... context) {
+        if (sink == null) return;
         List<Object> fields = new ArrayList<>(Arrays.asList(context));
         fields.addAll(Arrays.asList("operation", operation,
                 "error_class", error.getClass().getName(),

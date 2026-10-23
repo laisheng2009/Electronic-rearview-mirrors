@@ -15,6 +15,7 @@ import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
+import java.util.function.BiConsumer;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.SSLContext;
@@ -31,6 +32,7 @@ final class LocalAdbTlsClient implements AutoCloseable {
     private final Socket socket;
     private final InputStream input;
     private final OutputStream output;
+    private final BiConsumer<String, Object[]> log;
 
     enum TcpipResult {
         NORMAL_CLOSE("response", "orderly_close"),
@@ -46,8 +48,9 @@ final class LocalAdbTlsClient implements AutoCloseable {
         }
     }
 
-    private LocalAdbTlsClient(Socket socket) throws IOException {
+    private LocalAdbTlsClient(Socket socket, BiConsumer<String, Object[]> log) throws IOException {
         this.socket = socket;
+        this.log = log;
         input = socket.getInputStream();
         output = socket.getOutputStream();
     }
@@ -58,6 +61,12 @@ final class LocalAdbTlsClient implements AutoCloseable {
 
     static LocalAdbTlsClient connect(int port, AdbTlsIdentity identity,
             AdbAuthorizationSession.RecoveryOperation recovery) throws Exception {
+        return connect(port, identity, recovery, null);
+    }
+
+    static LocalAdbTlsClient connect(int port, AdbTlsIdentity identity,
+            AdbAuthorizationSession.RecoveryOperation recovery,
+            BiConsumer<String, Object[]> log) throws Exception {
         if (port < 1 || port > 65535) throw new IOException("Invalid local ADB TLS port");
         Socket plain = new Socket();
         try {
@@ -79,7 +88,7 @@ final class LocalAdbTlsClient implements AutoCloseable {
             if (recovery != null) recovery.register(encrypted);
             encrypted.setSoTimeout(READ_TIMEOUT_MS);
             encrypted.startHandshake();
-            LocalAdbTlsClient client = new LocalAdbTlsClient(encrypted);
+            LocalAdbTlsClient client = new LocalAdbTlsClient(encrypted, log);
             try {
                 AdbPacket packet = AdbPacket.read(client.input, true);
                 if (packet.command == AdbPacket.A_AUTH
@@ -94,23 +103,23 @@ final class LocalAdbTlsClient implements AutoCloseable {
                 }
                 return client;
             } catch (Throwable error) {
-                client.close();
+                try { encrypted.close(); } catch (IOException cleanup) { error.addSuppressed(cleanup); }
                 throw error;
             }
         } catch (Throwable error) {
-            try { plain.close(); } catch (IOException ignored) { }
+            try { plain.close(); } catch (IOException cleanup) { error.addSuppressed(cleanup); }
             throw error;
         }
     }
 
     /** A transport-ending result is only a possible restart; fresh classic proof remains success. */
     TcpipResult requestTcpip5555() throws IOException {
-        return requestTcpip5555(input, output);
+        return requestTcpip5555(input, output, null, log);
     }
 
     TcpipResult requestTcpip5555(AdbAuthorizationSession.RecoveryOperation recovery)
             throws IOException {
-        return requestTcpip5555(input, output, recovery);
+        return requestTcpip5555(input, output, recovery, log);
     }
 
     static TcpipResult requestTcpip5555(InputStream input, OutputStream output)
@@ -120,6 +129,12 @@ final class LocalAdbTlsClient implements AutoCloseable {
 
     static TcpipResult requestTcpip5555(InputStream input, OutputStream output,
             AdbAuthorizationSession.RecoveryOperation recovery) throws IOException {
+        return requestTcpip5555(input, output, recovery, null);
+    }
+
+    private static TcpipResult requestTcpip5555(InputStream input, OutputStream output,
+            AdbAuthorizationSession.RecoveryOperation recovery,
+            BiConsumer<String, Object[]> log) throws IOException {
         int local = 1;
         int remote = 0;
         int responseBytes = 0;
@@ -150,8 +165,12 @@ final class LocalAdbTlsClient implements AutoCloseable {
                 }
             }
         } catch (EOFException possibleRestart) {
+            AdbRecoveryDiagnostics.failure(log, "adb_tls_transport_ended", "tcpip5555_read",
+                    possibleRestart, "category", "possible_restart");
             return TcpipResult.POSSIBLE_RESTART_EOF;
         } catch (SocketException possibleRestart) {
+            AdbRecoveryDiagnostics.failure(log, "adb_tls_transport_ended", "tcpip5555_read",
+                    possibleRestart, "category", "possible_restart");
             return TcpipResult.POSSIBLE_RESTART_DISCONNECT;
         }
     }
@@ -220,6 +239,8 @@ final class LocalAdbTlsClient implements AutoCloseable {
     }
 
     @Override public void close() {
-        try { socket.close(); } catch (IOException ignored) { }
+        try { socket.close(); } catch (IOException error) {
+            AdbRecoveryDiagnostics.failure(log, "adb_tls_cleanup_failed", "close_socket", error);
+        }
     }
 }

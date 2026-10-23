@@ -236,6 +236,8 @@ final class LocalAdbClient {
                                             shell.output, shell.exitCode, open.fingerprint);
                         }
                     } catch (SocketTimeoutException timeout) {
+                        if (recovery != null) AdbRecoveryDiagnostics.failure(eventSink,
+                                "adb_recovery_transport_failed", "classic_proof_read", timeout);
                         result = isCancellationTokenCurrent(cancellationToken) && !connection.authorizationPreempted()
                                 ? Result.commandReadTimeout(
                                         summary(timeout), open.fingerprint)
@@ -244,8 +246,12 @@ final class LocalAdbClient {
                 }
             }
         } catch (AuthorizationSupersededException superseded) {
+            if (recovery != null) AdbRecoveryDiagnostics.failure(eventSink,
+                    "adb_recovery_transport_cancelled", "classic_proof", superseded);
             result = Result.superseded();
         } catch (Throwable error) {
+            if (recovery != null) AdbRecoveryDiagnostics.failure(eventSink,
+                    "adb_recovery_transport_failed", "classic_proof", error);
             if (!isCancellationTokenCurrent(cancellationToken)
                     || connection != null && connection.authorizationPreempted()) {
                 result = Result.superseded();
@@ -444,8 +450,12 @@ final class LocalAdbClient {
     }
 
     static boolean hasAuthorizedIdentity(Context context) {
+        return hasAuthorizedIdentity(context, null);
+    }
+
+    static boolean hasAuthorizedIdentity(Context context, BiConsumer<String, Object[]> eventSink) {
         String saved = prefs(context).getString(AUTHORIZED_KEY, "");
-        return !saved.isEmpty() && saved.equals(currentFingerprint(context));
+        return !saved.isEmpty() && saved.equals(currentFingerprint(context, eventSink));
     }
 
     private static OperationCancellation recoveryCancellation(
@@ -683,6 +693,10 @@ final class LocalAdbClient {
                     socket.setSoTimeout(AUTH_TIMEOUT_MS);
                 }
             } catch (Throwable error) {
+                // Preserve the original before cancellation/authorization wrappers replace it.
+                if (mode == PromptMode.NEVER && cancellation != null)
+                    AdbRecoveryDiagnostics.failure(eventSink, "adb_recovery_connection_failed",
+                            "connect_or_authenticate", error);
                 boolean preempted = background != null && background.cancelled();
                 if (background != null) background.close();
                 clearPending(socket);
@@ -1126,9 +1140,14 @@ final class LocalAdbClient {
     }
 
     private static String currentFingerprint(Context context) {
+        return currentFingerprint(context, null);
+    }
+
+    private static String currentFingerprint(Context context, BiConsumer<String, Object[]> eventSink) {
         try {
             return fingerprint(loadOrCreateKeys(context));
         } catch (Throwable error) {
+            AdbRecoveryDiagnostics.failure(eventSink, "adb_identity_failed", "load_identity", error);
             return "unavailable";
         }
     }

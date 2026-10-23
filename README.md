@@ -375,7 +375,12 @@ If it persists, note local time, provider, Serve/Funnel mode, VPN state and exac
 
 </details>
 
-Thanks to the [OverDrive project](https://github.com/yash-srivastava/Overdrive-release) for publicly available code and ideas that informed our camera and tunnel research.
+Thanks to the [OverDrive project](https://github.com/yash-srivastava/Overdrive-release) for these specific technical references:
+
+- **Camera optimization:** direct GPU output to a `SurfaceControl` layer instead of `TextureView`, and sharing one camera-frame source between Motion detection and GPU recording rather than opening duplicate recording streams.
+- **Tailscale Serve:** the idea of using userspace Tailscale with Serve to provide private remote access to a local web interface on the vehicle. We adapted this idea for Extend's camera viewer; this credit does not cover Funnel.
+
+These references informed individual optimizations and the Serve approach, not the overall concept of BYD Extend or a port of OverDrive's camera system or viewing interface.
 
 ## Optional integrations
 

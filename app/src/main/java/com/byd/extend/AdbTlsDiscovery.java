@@ -15,13 +15,13 @@ final class AdbTlsDiscovery implements AutoCloseable, NsdManager.DiscoveryListen
     static final String SERVICE_TYPE = "_adb-tls-connect._tcp.";
     private final NsdManager manager;
     private final Consumer<Integer> candidate;
-    private final Consumer<String> log;
+    private final AdbRecoveryRuntime.LogSink log;
     private final Queue<NsdServiceInfo> pending = new ArrayDeque<>();
     private final StartGate startGate = new StartGate();
     private boolean resolving;
     private volatile boolean closed;
 
-    AdbTlsDiscovery(Context context, Consumer<Integer> candidate, Consumer<String> log) {
+    AdbTlsDiscovery(Context context, Consumer<Integer> candidate, AdbRecoveryRuntime.LogSink log) {
         manager = (NsdManager) context.getSystemService(Context.NSD_SERVICE);
         this.candidate = candidate;
         this.log = log;
@@ -30,23 +30,30 @@ final class AdbTlsDiscovery implements AutoCloseable, NsdManager.DiscoveryListen
     synchronized void start() {
         int propertyPort = propertyPort();
         if (propertyPort > 0) candidate.accept(propertyPort);
-        if (manager == null || !startGate.begin(closed)) return;
+        if (manager == null) {
+            log.log("adb_tls_mdns_unavailable", "reason", "nsd_service_null");
+            return;
+        }
+        if (!startGate.begin(closed)) return;
         try {
             manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, this);
         } catch (RuntimeException error) {
             startGate.failed();
-            log.accept("adb_tls_mdns_start_failed:" + error.getClass().getSimpleName());
+            AdbRecoveryDiagnostics.failure(log::log, "adb_tls_mdns_start_failed",
+                    "discoverServices", error);
         }
     }
 
-    static int propertyPort() {
+    private int propertyPort() {
         try {
             Class<?> type = Class.forName("android.os.SystemProperties");
             Method getInt = type.getDeclaredMethod("getInt", String.class, int.class);
             getInt.setAccessible(true);
             int value = (Integer) getInt.invoke(null, "service.adb.tls.port", -1);
             return value > 0 && value <= 65535 ? value : -1;
-        } catch (Throwable ignored) {
+        } catch (Throwable error) {
+            AdbRecoveryDiagnostics.failure(log::log, "adb_tls_property_failed",
+                    "SystemProperties.getInt", error, "key", "service.adb.tls.port");
             return -1;
         }
     }
@@ -65,6 +72,8 @@ final class AdbTlsDiscovery implements AutoCloseable, NsdManager.DiscoveryListen
         try {
             manager.resolveService(service, new NsdManager.ResolveListener() {
                 @Override public void onResolveFailed(NsdServiceInfo info, int errorCode) {
+                    log.log("adb_tls_mdns_resolve_failed", "operation", "resolveService",
+                            "error_code", errorCode);
                     finishResolve();
                 }
 
@@ -76,8 +85,9 @@ final class AdbTlsDiscovery implements AutoCloseable, NsdManager.DiscoveryListen
                                 || NetworkInterface.getByInetAddress(info.getHost()) != null)) {
                             candidate.accept(port);
                         }
-                    } catch (Throwable ignored) {
-                        // A non-local or vanished address is not a candidate.
+                    } catch (Throwable error) {
+                        AdbRecoveryDiagnostics.failure(log::log, "adb_tls_candidate_failed",
+                                "validate_local_endpoint", error);
                     } finally {
                         finishResolve();
                     }
@@ -85,7 +95,8 @@ final class AdbTlsDiscovery implements AutoCloseable, NsdManager.DiscoveryListen
             });
         } catch (RuntimeException error) {
             resolving = false;
-            log.accept("adb_tls_mdns_resolve_failed:" + error.getClass().getSimpleName());
+            AdbRecoveryDiagnostics.failure(log::log, "adb_tls_mdns_resolve_failed",
+                    "resolveService", error);
             resolveNext();
         }
     }
@@ -99,12 +110,12 @@ final class AdbTlsDiscovery implements AutoCloseable, NsdManager.DiscoveryListen
     @Override public void onDiscoveryStarted(String serviceType) { }
     @Override public void onDiscoveryStopped(String serviceType) { startGate.failed(); }
     @Override public void onStartDiscoveryFailed(String serviceType, int errorCode) {
-        log.accept("adb_tls_mdns_start_failed:" + errorCode);
+        log.log("adb_tls_mdns_start_failed", "operation", "discoverServices", "error_code", errorCode);
         startGate.failed();
-        try { manager.stopServiceDiscovery(this); } catch (RuntimeException ignored) { }
+        stopDiscovery();
     }
     @Override public void onStopDiscoveryFailed(String serviceType, int errorCode) {
-        log.accept("adb_tls_mdns_stop_failed:" + errorCode);
+        log.log("adb_tls_mdns_stop_failed", "operation", "stopServiceDiscovery", "error_code", errorCode);
     }
 
     @Override public synchronized void close() {
@@ -112,9 +123,17 @@ final class AdbTlsDiscovery implements AutoCloseable, NsdManager.DiscoveryListen
         closed = true;
         pending.clear();
         if (startGate.started() && manager != null) {
-            try { manager.stopServiceDiscovery(this); } catch (RuntimeException ignored) { }
+            stopDiscovery();
         }
         startGate.failed();
+    }
+
+    private void stopDiscovery() {
+        try { manager.stopServiceDiscovery(this); }
+        catch (RuntimeException error) {
+            AdbRecoveryDiagnostics.failure(log::log, "adb_tls_mdns_cleanup_failed",
+                    "stopServiceDiscovery", error);
+        }
     }
 
     /** Small JVM-testable lifecycle gate; a failed start remains retryable until close. */

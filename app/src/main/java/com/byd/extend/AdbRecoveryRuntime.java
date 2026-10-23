@@ -349,7 +349,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         coordinator.stage(AdbRecoverySnapshot.Stage.SWITCHING_TO_5555);
         publish();
         try (LocalAdbTlsClient tls = LocalAdbTlsClient.connect(port,
-                AdbTlsIdentity.load(context), operation)) {
+                AdbTlsIdentity.load(context), operation, log::log)) {
             if (closed || !settings.getBoolean(RECOVERY_ENABLED, false)
                     || !wifiConnected() || deferForPrerequisite()) {
                 consentPaused = false;
@@ -366,7 +366,6 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
                     "category", LocalAdbTlsClient.failureCategory(error),
                     "reason", LocalAdbTlsClient.failureReason(error));
             if (deferForPrerequisite()) return;
-            consentPaused = false;
             if (!settings.getBoolean(RECOVERY_ENABLED, false)) {
                 applyDisabled();
                 return;
@@ -420,7 +419,8 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
             log.log("adb_5555_proof", "ok", proof == AdbRecoveryPolicy.Proof.AVAILABLE,
                     "category", proof,
                     "result", result.ok ? "ok" : AdbRecoveryDiagnostics.safeText(result.error),
-                    "exit_code", result.exitCode);
+                    "exit_code", result.exitCode,
+                    "marker_present", result.output != null && result.output.contains(PROOF_MARKER));
             return proof;
         } finally {
             internalProof.remove();
@@ -599,7 +599,7 @@ public final class AdbRecoveryRuntime implements AutoCloseable {
         if (closed) return true;
         boolean pending = LocalAdbClient.AUTHORIZATION.pending();
         AdbRecoverySnapshot.Stage prerequisite = AdbRecoveryPolicy.prerequisite(pending,
-                !pending && LocalAdbClient.hasAuthorizedIdentity(context),
+                !pending && LocalAdbClient.hasAuthorizedIdentity(context, log::log),
                 AppPermissionProvisioner.hasWriteSecureSettings(context));
         if (prerequisite != null) {
             waitForPrerequisite(prerequisite);

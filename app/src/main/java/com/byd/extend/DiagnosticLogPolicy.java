@@ -83,6 +83,11 @@ final class DiagnosticLogPolicy {
                     + '|' + value.optString("request_id") + '|' + value.optString("camera_id")
                     + '|' + value.optString("profile") + '|' + value.optString("device")
                     + '|' + value.optString("fid") + '|' + value.optString("stage");
+            if (kind.startsWith("adb_")) {
+                signature += '|' + value.optString("key") + '|' + value.optString("error_code")
+                        + '|' + value.optString("requested") + '|' + value.optString("readback")
+                        + '|' + value.optString("port");
+            }
         } catch (Exception ignored) { }
         if (signature.equals(lastError) && now - firstAt < 60_000) {
             repeats++; lastAt = now; suppressed = true; return null;

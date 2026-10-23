@@ -237,6 +237,40 @@ final class DiagnosticLogExporter {
         return "byd-extend-diagnostics-" + format.format(new Date(createdAtMillis)) + ".zip";
     }
 
+    /** App-owned files are copied before any optional ADB collector is attempted. */
+    static void writeAppLogs(ZipOutputStream zip, Snapshot snapshot,
+            List<SourceRecord> records, ProgressTracker progress) throws IOException {
+        Set<String> usedNames = new HashSet<>();
+        for (Source source : snapshot.sources) {
+            String entry = uniqueLogEntry(source.file.getName(), usedNames);
+            progress.stage(entry, -1);
+            SourceRecord record = new SourceRecord(
+                    "app_jsonl", entry, source.file.getName(), source.length);
+            records.add(record);
+            try {
+                long currentLength = source.file.length();
+                long readableBound = Math.min(source.length, currentLength);
+                long completeBound = completeJsonlLength(source.file, readableBound);
+                record.droppedBytes = Math.max(0, source.length - completeBound);
+                zip.putNextEntry(new ZipEntry(entry));
+                record.archivedBytes = copyBounded(source.file, completeBound,
+                        new CountingOutputStream(zip, progress));
+                zip.closeEntry();
+                if (record.archivedBytes != source.length) {
+                    record.status = "partial";
+                    if (currentLength < source.length) record.error = "source_shrank";
+                } else {
+                    record.status = "included";
+                }
+            } catch (Throwable error) {
+                progress.check();
+                safelyCloseEntry(zip);
+                record.status = "error";
+                record.error = summary(error);
+            }
+        }
+    }
+
     private static void writeArchive(
             File partial,
             Snapshot snapshot,
@@ -245,36 +279,8 @@ final class DiagnosticLogExporter {
             StreamCommandRunner streamCommandRunner,
             long createdAtMillis,
             List<SourceRecord> records, ProgressTracker progress) throws IOException {
-        Set<String> usedNames = new HashSet<>();
         try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(partial))) {
-            for (Source source : snapshot.sources) {
-                String entry = uniqueLogEntry(source.file.getName(), usedNames);
-                progress.stage(entry, -1);
-                SourceRecord record = new SourceRecord(
-                        "app_jsonl", entry, source.file.getName(), source.length);
-                records.add(record);
-                try {
-                    long currentLength = source.file.length();
-                    long readableBound = Math.min(source.length, currentLength);
-                    long completeBound = completeJsonlLength(source.file, readableBound);
-                    record.droppedBytes = Math.max(0, source.length - completeBound);
-                    zip.putNextEntry(new ZipEntry(entry));
-                    record.archivedBytes = copyBounded(source.file, completeBound,
-                            new CountingOutputStream(zip, progress));
-                    zip.closeEntry();
-                    if (record.archivedBytes != source.length) {
-                        record.status = "partial";
-                        if (currentLength < source.length) record.error = "source_shrank";
-                    } else {
-                        record.status = "included";
-                    }
-                } catch (Throwable error) {
-                    progress.check();
-                    safelyCloseEntry(zip);
-                    record.status = "error";
-                    record.error = summary(error);
-                }
-            }
+            writeAppLogs(zip, snapshot, records, progress);
 
             for (CollectorSpec collector : SYSTEM_COLLECTORS) {
                 long bound = -1;
@@ -656,7 +662,7 @@ final class DiagnosticLogExporter {
         }
     }
 
-    private static final class ProgressTracker {
+    static final class ProgressTracker {
         final CompatibilityBundleExporter.ExportControl control;
         final CompatibilityBundleExporter.ProgressReporter reporter;
         long bytes;
@@ -693,7 +699,7 @@ final class DiagnosticLogExporter {
         }
     }
 
-    private static final class SourceRecord {
+    static final class SourceRecord {
         final String type;
         final String entry;
         final String name;
