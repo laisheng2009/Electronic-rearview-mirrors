@@ -2,7 +2,7 @@
 
 [English](README.md) | **Українська**
 
-<img align="right" src="app/src/main/res/drawable-nodpi/byd_extend_launcher.png" alt="Іконка BYD Extend" width="112">
+![Іконка BYD Extend](docs/images/byd-extend.png)
 
 BYD Extend додає налаштовувані види камер, віджет дзеркала заднього виду, допоміжні функції поворотників та необов'язкові інтеграції музики, погоди й зовнішнього звуку для сумісних автомобілів BYD.
 
@@ -12,6 +12,36 @@ BYD Extend додає налаштовувані види камер, відже
 - **Завантаження:** [останній реліз на GitHub](https://github.com/sunlixWhyNotAvailable/byd-turnsignal-cameraview/releases/latest).
 - **Пакет:** `com.byd.extend` — окремий застосунок від попереднього BYD Turn Signal.
 - **Допомога:** [Залежність від ADB](#які-функції-потребують-adb) · [Віддалені камери](#віддалений-перегляд-камер-налаштування-та-використання) · [Усунення проблем](#усунення-проблем) · [Повідомити про проблему](#повідомити-про-проблему).
+
+## Зміст
+
+- [Встановлення та перший запуск](#встановлення-та-перший-запуск)
+  - [Які функції потребують ADB?](#які-функції-потребують-adb)
+  - [Перехід із BYD Turn Signal](#перехід-із-byd-turn-signal)
+- [Щоденне використання](#щоденне-використання)
+  - [Поворотники](#поворотники)
+  - [Камери сліпих зон](#камери-сліпих-зон)
+  - [Камери паркування](#камери-паркування)
+  - [Камери заднього ходу](#камери-заднього-ходу)
+  - [Дзеркало заднього виду](#дзеркало-заднього-виду)
+  - [Інтеграція «Камери»](#інтеграція-камери)
+- [Віддалений перегляд камер: налаштування та використання](#віддалений-перегляд-камер-налаштування-та-використання)
+  - [Що потрібно](#що-потрібно)
+  - [Який спосіб обрати?](#який-спосіб-обрати)
+  - [Сторінка Extend у Tailscale та zrok](#сторінка-extend-у-tailscale-та-zrok)
+  - [Доступ, паролі та безпека](#доступ-паролі-та-безпека)
+- [Необов'язкові інтеграції](#необовязкові-інтеграції)
+  - [Музика, підсвітка та погода](#музика-підсвітка-та-погода)
+  - [AVAS: звуки подій, мікрофон та імітація двигуна](#avas-звуки-подій-мікрофон-та-імітація-двигуна)
+- [Пресети та діагностика](#пресети-та-діагностика)
+- [Фонова робота та оновлення](#фонова-робота-та-оновлення)
+- [Модальні вікна та віджети](#модальні-вікна-та-віджети)
+- [Екрани відладки](#екрани-відладки)
+- [Усунення проблем](#усунення-проблем)
+  - [Повідомити про проблему](#повідомити-про-проблему)
+- [Збірка з вихідного коду](#збірка-з-вихідного-коду)
+- [Підтримати проєкт](#підтримати-проєкт)
+- [Ліцензія](#ліцензія)
 
 ## Встановлення та перший запуск
 
@@ -69,7 +99,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Ключові скриншоти показано одразу; деталізація доступна в розгортаних блоках. Усі зображення українською зроблено з Preview у темній темі з демонстраційними даними; сторінки з прокручуванням склеєно.
 
-<p align="center"><img src="docs/screenshots/uk/turn-signals.png" alt="Налаштування поворотників BYD Extend" width="100%"></p>
+![Налаштування поворотників BYD Extend](docs/screenshots/uk/turn-signals.png)
 
 ### Камери сліпих зон
 
@@ -80,26 +110,26 @@ BYD Extend встановлюється окремо й не замінює BYD 
 - `Не показувати під час панорамного виду` стосується **тільки планшета**, а не приборки.
 - Для кожного виду налаштовуються обрізання, сила корекції, поворот, віддзеркалення, розміри та рамка.
 
-<p align="center"><img src="docs/screenshots/uk/blind-zones.png" alt="Камери сліпих зон BYD Extend" width="100%"></p>
+![Камери сліпих зон BYD Extend](docs/screenshots/uk/blind-zones.png)
 
 <details>
 <summary>Розташування та калібрування</summary>
 
 #### Розташування
 
-<p align="center"><img src="docs/screenshots/uk/blind-zones-placement.png" alt="Камери сліпих зон — Розташування" width="100%"></p>
+![Камери сліпих зон — Розташування](docs/screenshots/uk/blind-zones-placement.png)
 
 #### Калібрування: оригінал
 
-<p align="center"><img src="docs/screenshots/uk/blind-zones-calibration.png" alt="Камери сліпих зон — Калібрування: оригінал" width="100%"></p>
+![Камери сліпих зон — Калібрування: оригінал](docs/screenshots/uk/blind-zones-calibration.png)
 
 #### Калібрування: корекція
 
-<p align="center"><img src="docs/screenshots/uk/blind-zones-correction.png" alt="Камери сліпих зон — Калібрування: корекція" width="100%"></p>
+![Камери сліпих зон — Калібрування: корекція](docs/screenshots/uk/blind-zones-correction.png)
 
 #### Калібрування: вивід
 
-<p align="center"><img src="docs/screenshots/uk/blind-zones-output.png" alt="Камери сліпих зон — Калібрування: вивід" width="100%"></p>
+![Камери сліпих зон — Калібрування: вивід](docs/screenshots/uk/blind-zones-output.png)
 
 </details>
 
@@ -109,26 +139,26 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Кожна камера має власні налаштування зображення. Ці види доповнюють штатні камери й парктроніки, а не замінюють їх.
 
-<p align="center"><img src="docs/screenshots/uk/parking.png" alt="Камери паркування BYD Extend" width="100%"></p>
+![Камери паркування BYD Extend](docs/screenshots/uk/parking.png)
 
 <details>
 <summary>Розташування та калібрування</summary>
 
 #### Розташування
 
-<p align="center"><img src="docs/screenshots/uk/parking-placement.png" alt="Камери паркування — Розташування" width="100%"></p>
+![Камери паркування — Розташування](docs/screenshots/uk/parking-placement.png)
 
 #### Калібрування: оригінал
 
-<p align="center"><img src="docs/screenshots/uk/parking-calibration.png" alt="Камери паркування — Калібрування: оригінал" width="100%"></p>
+![Камери паркування — Калібрування: оригінал](docs/screenshots/uk/parking-calibration.png)
 
 #### Калібрування: корекція
 
-<p align="center"><img src="docs/screenshots/uk/parking-correction.png" alt="Камери паркування — Калібрування: корекція" width="100%"></p>
+![Камери паркування — Калібрування: корекція](docs/screenshots/uk/parking-correction.png)
 
 #### Калібрування: вивід
 
-<p align="center"><img src="docs/screenshots/uk/parking-output.png" alt="Камери паркування — Калібрування: вивід" width="100%"></p>
+![Камери паркування — Калібрування: вивід](docs/screenshots/uk/parking-output.png)
 
 </details>
 
@@ -142,26 +172,26 @@ BYD Extend встановлюється окремо й не замінює BYD 
 - Віджет вибору та навчена кнопка керма дозволяють вручну перемикати активну композицію. Кнопка реагує на один короткий натиск і не відкриває неактивну композицію.
 - Рамки налаштовуються для камер, тла та віджета вибору.
 
-<p align="center"><img src="docs/screenshots/uk/reverse-placement.png" alt="Композиція камер заднього ходу BYD Extend" width="100%"></p>
+![Композиція камер заднього ходу BYD Extend](docs/screenshots/uk/reverse-placement.png)
 
 <details>
 <summary>Параметри та калібрування камер заднього ходу</summary>
 
 #### Параметри
 
-<p align="center"><img src="docs/screenshots/uk/reverse.png" alt="Камери заднього ходу — параметри" width="100%"></p>
+![Камери заднього ходу — параметри](docs/screenshots/uk/reverse.png)
 
 #### Калібрування: оригінал
 
-<p align="center"><img src="docs/screenshots/uk/reverse-calibration.png" alt="Камери заднього ходу — Калібрування: оригінал" width="100%"></p>
+![Камери заднього ходу — Калібрування: оригінал](docs/screenshots/uk/reverse-calibration.png)
 
 #### Калібрування: корекція
 
-<p align="center"><img src="docs/screenshots/uk/reverse-correction.png" alt="Камери заднього ходу — Калібрування: корекція" width="100%"></p>
+![Камери заднього ходу — Калібрування: корекція](docs/screenshots/uk/reverse-correction.png)
 
 #### Калібрування: вивід
 
-<p align="center"><img src="docs/screenshots/uk/reverse-output.png" alt="Камери заднього ходу — Калібрування: вивід" width="100%"></p>
+![Камери заднього ходу — Калібрування: вивід](docs/screenshots/uk/reverse-output.png)
 
 </details>
 
@@ -175,26 +205,26 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Призначені кнопки можуть замінювати їхні штатні дії. Скиньте прив'язку, щоб звільнити кнопку; розпізнавання залежить від подій, які надає прошивка.
 
-<p align="center"><img src="docs/screenshots/uk/mirror.png" alt="Налаштування дзеркала заднього виду BYD Extend" width="100%"></p>
+![Налаштування дзеркала заднього виду BYD Extend](docs/screenshots/uk/mirror.png)
 
 <details>
 <summary>Розташування та калібрування</summary>
 
 #### Розташування
 
-<p align="center"><img src="docs/screenshots/uk/mirror-placement.png" alt="Дзеркало заднього виду — Розташування" width="100%"></p>
+![Дзеркало заднього виду — Розташування](docs/screenshots/uk/mirror-placement.png)
 
 #### Калібрування: оригінал
 
-<p align="center"><img src="docs/screenshots/uk/mirror-calibration.png" alt="Дзеркало заднього виду — Калібрування: оригінал" width="100%"></p>
+![Дзеркало заднього виду — Калібрування: оригінал](docs/screenshots/uk/mirror-calibration.png)
 
 #### Калібрування: корекція
 
-<p align="center"><img src="docs/screenshots/uk/mirror-correction.png" alt="Дзеркало заднього виду — Калібрування: корекція" width="100%"></p>
+![Дзеркало заднього виду — Калібрування: корекція](docs/screenshots/uk/mirror-correction.png)
 
 #### Калібрування: вивід
 
-<p align="center"><img src="docs/screenshots/uk/mirror-output.png" alt="Дзеркало заднього виду — Калібрування: вивід" width="100%"></p>
+![Дзеркало заднього виду — Калібрування: вивід](docs/screenshots/uk/mirror-output.png)
 
 </details>
 
@@ -211,9 +241,9 @@ BYD Extend встановлюється окремо й не замінює BYD 
 <details>
 <summary>Показ на планшеті, запис і захист від низького заряду</summary>
 
-<p align="center"><img src="docs/screenshots/uk/cameras-tablet.png" alt="Камери — попередження на планшеті та спільні пороги заряду" width="100%"></p>
+![Камери — попередження на планшеті та спільні пороги заряду](docs/screenshots/uk/cameras-tablet.png)
 
-<p align="center"><img src="docs/screenshots/uk/cameras-recording.png" alt="Камери — запис, сховище та архів" width="100%"></p>
+![Камери — запис, сховище та архів](docs/screenshots/uk/cameras-recording.png)
 
 | Спільний поріг заряду | Діапазон | За замовчуванням |
 | --- | --- | --- |
@@ -271,7 +301,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 3. Дочекайтеся живої композиції. Якщо браузер просить натиснути для початку відео, натисніть.
 4. Для від'єднання використайте кнопку **Hang Up** у VDO або закрийте вкладку перегляду.
 
-<p align="center"><img src="docs/screenshots/uk/cameras-vdo.png" alt="Налаштування VDO.Ninja у Preview" width="100%"></p>
+![Налаштування VDO.Ninja у Preview](docs/screenshots/uk/cameras-vdo.png)
 
 </details>
 
@@ -295,7 +325,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Залиште Tailscale підключеним на телефоні/ПК, відкрийте скопійоване посилання або QR й користуйтеся сторінкою Extend. Замість пароля глядача Serve використовує ідентифікацію та правила доступу tailnet.
 
-<p align="center"><img src="docs/screenshots/uk/cameras-tailscale-serve.png" alt="Налаштування приватного Tailscale Serve у Preview" width="100%"></p>
+![Налаштування приватного Tailscale Serve у Preview](docs/screenshots/uk/cameras-tailscale-serve.png)
 
 </details>
 
@@ -310,7 +340,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 **Serve і Funnel мають спільну ідентичність/адресу Tailscale, але працює лише застосований режим.** Однакова адреса не означає одночасного ввімкнення обох режимів. Вибір іншого провайдера у формі — не те саме, що застосування нового режиму Tailscale. Після першого ввімкнення Funnel публічному DNS може знадобитися час на оновлення.
 
-<p align="center"><img src="docs/screenshots/uk/cameras-tailscale-funnel.png" alt="Налаштування публічного Tailscale Funnel у Preview" width="100%"></p>
+![Налаштування публічного Tailscale Funnel у Preview](docs/screenshots/uk/cameras-tailscale-funnel.png)
 
 </details>
 
@@ -335,7 +365,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Відкрийте посилання у браузері телефона/ПК та введіть пароль глядача. Встановлювати zrok або VPN на пристрій перегляду не потрібно. Extend повторно використовує збережену публікацію при звичайних перепідключеннях; після відкликання/заміни доступу адреса може змінитися — беріть поточну з застосунку.
 
-<p align="center"><img src="docs/screenshots/uk/cameras-zrok.png" alt="Налаштування zrok у Preview" width="100%"></p>
+![Налаштування zrok у Preview](docs/screenshots/uk/cameras-zrok.png)
 
 </details>
 
@@ -355,11 +385,11 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 **Наживо:** вибір камер, повноекранний режим і перемикачі режимів авто праворуч.
 
-<p align="center"><img src="docs/screenshots/uk/viewer-desktop-live.png" alt="Сторінка камер на ПК: жива композиція, вибір камер і перемикачі режимів авто; демонстраційні дані" width="100%"></p>
+![Сторінка камер на ПК: жива композиція, вибір камер і перемикачі режимів авто; демонстраційні дані](docs/screenshots/uk/viewer-desktop-live.png)
 
 **Архів записів:** календар, обкладинки та кількість жовтих/червоних подій.
 
-<p align="center"><img src="docs/screenshots/uk/viewer-desktop-archive.png" alt="Архів записів на ПК із календарем та обкладинками відео; демонстраційні дані" width="100%"></p>
+![Архів записів на ПК із календарем та обкладинками відео; демонстраційні дані](docs/screenshots/uk/viewer-desktop-archive.png)
 
 </details>
 
@@ -368,9 +398,9 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Блок режимів авто спочатку згорнутий. Архів прокручується вертикально.
 
-<p align="center"><img src="docs/screenshots/uk/viewer-phone-live.png" alt="Сторінка живих камер на телефоні зі згорнутим блоком режимів авто; демонстраційні дані" width="360"></p>
+![Сторінка живих камер на телефоні зі згорнутим блоком режимів авто; демонстраційні дані](docs/screenshots/uk/viewer-phone-live.png)
 
-<p align="center"><img src="docs/screenshots/uk/viewer-phone-archive.png" alt="Архів записів на телефоні з календарем та обкладинками відео; демонстраційні дані" width="360"></p>
+![Архів записів на телефоні з календарем та обкладинками відео; демонстраційні дані](docs/screenshots/uk/viewer-phone-archive.png)
 
 </details>
 
@@ -425,11 +455,11 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 #### Музика та підсвітка
 
-<p align="center"><img src="docs/screenshots/uk/music.png" alt="Налаштування музики та підсвітки" width="100%"></p>
+![Налаштування музики та підсвітки](docs/screenshots/uk/music.png)
 
 #### Погода
 
-<p align="center"><img src="docs/screenshots/uk/weather.png" alt="Налаштування інтеграції погоди" width="100%"></p>
+![Налаштування інтеграції погоди](docs/screenshots/uk/weather.png)
 
 </details>
 
@@ -450,7 +480,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Висока гучність мікрофона може спричинити акустичний зворотний зв'язок; обробка звуку не гарантує його усунення. Функції AVAS не замінюють штатну систему попередження пішоходів, а поведінка звуку після сну авто може залежати від прошивки.
 
-<p align="center"><img src="docs/screenshots/uk/avas.png" alt="Налаштування звуку AVAS у BYD Extend" width="100%"></p>
+![Налаштування звуку AVAS у BYD Extend](docs/screenshots/uk/avas.png)
 
 ## Пресети та діагностика
 
@@ -466,12 +496,12 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 **Перевіряйте файли перед надсиланням.** Системні логи та пакети сумісності можуть містити ідентифікатори, локацію та інформацію інших застосунків. Надсилайте лише потрібне й не публікуйте облікові дані. Запити погоди передають координати постачальнику погоди; перевірка оновлень звертається до GitHub.
 
-<p align="center"><img src="docs/screenshots/uk/settings.png" alt="Налаштування та діагностика BYD Extend" width="100%"></p>
+![Налаштування та діагностика BYD Extend](docs/screenshots/uk/settings.png)
 
 <details>
 <summary>Скриншот: параметри виводу камер</summary>
 
-<p align="center"><img src="docs/screenshots/uk/settings-camera-output.png" alt="Загальні параметри виводу камер" width="100%"></p>
+![Загальні параметри виводу камер](docs/screenshots/uk/settings-camera-output.png)
 
 </details>
 
@@ -490,11 +520,11 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 ### Дозволи та служба
 
-<p align="center"><img src="docs/screenshots/uk/settings-permissions.png" alt="Дозволи, автозапуск та оновлення" width="100%"></p>
+![Дозволи, автозапуск та оновлення](docs/screenshots/uk/settings-permissions.png)
 
 ### Відновлення ADB
 
-<p align="center"><img src="docs/screenshots/uk/adb-recovery.png" alt="Налаштування відновлення ADB" width="100%"></p>
+![Налаштування відновлення ADB](docs/screenshots/uk/adb-recovery.png)
 
 </details>
 
@@ -507,7 +537,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Редактор показує підказку щодо Wi-Fi та дію повторної спроби й дозволяє налаштувати вигляд і розташування віджета. Це підказка для відновлення, а не вікно первинної авторизації ADB.
 
-<p align="center"><img src="docs/screenshots/uk/adb-reminder-dialog.png" alt="Редактор підказки відновлення ADB" width="100%"></p>
+![Редактор підказки відновлення ADB](docs/screenshots/uk/adb-reminder-dialog.png)
 
 </details>
 
@@ -516,9 +546,9 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Налаштуйте вигляд підказки та перегляньте, як виглядає плаваюче повідомлення про нову версію. Це окремий віджет, а не вікно завантаження оновлення.
 
-<p align="center"><img src="docs/screenshots/uk/update-hint-dialog.png" alt="Налаштування вигляду віджета-підказки оновлення" width="100%"></p>
+![Налаштування вигляду віджета-підказки оновлення](docs/screenshots/uk/update-hint-dialog.png)
 
-<p align="center"><img src="docs/screenshots/uk/update-hint-widget.png" alt="Плаваючий віджет-підказка оновлення" width="100%"></p>
+![Плаваючий віджет-підказка оновлення](docs/screenshots/uk/update-hint-widget.png)
 
 </details>
 
@@ -527,7 +557,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Відкрийте вікно навчання для потрібної дії та натисніть кнопку керма, яку хочете призначити. Камери й аудіофункції використовують спільне вікно; достатньо одного прикладу.
 
-<p align="center"><img src="docs/screenshots/uk/button-learning-dialog.png" alt="Вікно навчання кнопки керма" width="100%"></p>
+![Вікно навчання кнопки керма](docs/screenshots/uk/button-learning-dialog.png)
 
 </details>
 
@@ -536,7 +566,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Оберіть імпортований звук для події та прослухайте його перед призначенням. Бібліотека показує доступні файли й поточний вибір.
 
-<p align="center"><img src="docs/screenshots/uk/avas-sound-library-dialog.png" alt="Бібліотека звуків AVAS" width="100%"></p>
+![Бібліотека звуків AVAS](docs/screenshots/uk/avas-sound-library-dialog.png)
 
 </details>
 
@@ -545,7 +575,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Під час надсилання або збереження логів вікно показує загальний, опрацьований і залишковий обсяг даних та відсоток, коли вони відомі. Одного прикладу достатньо для обох способів експорту; у Preview прогрес демонстраційний.
 
-<p align="center"><img src="docs/screenshots/uk/log-export-progress-dialog.png" alt="Прогрес формування діагностичного архіву" width="100%"></p>
+![Прогрес формування діагностичного архіву](docs/screenshots/uk/log-export-progress-dialog.png)
 
 </details>
 
@@ -554,7 +584,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 Оберіть колір рамки камери візуально або введіть його шістнадцяткове значення. Один приклад показує спільний редактор кольору.
 
-<p align="center"><img src="docs/screenshots/uk/border-colour-dialog.png" alt="Вибір кольору рамки камери" width="100%"></p>
+![Вибір кольору рамки камери](docs/screenshots/uk/border-colour-dialog.png)
 
 </details>
 
@@ -565,15 +595,15 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 ### Сигнали
 
-<p align="center"><img src="docs/screenshots/uk/debug-signals.png" alt="Відладка — Сигнали" width="100%"></p>
+![Відладка — Сигнали](docs/screenshots/uk/debug-signals.png)
 
 ### AVM
 
-<p align="center"><img src="docs/screenshots/uk/debug-avm.png" alt="Відладка — AVM" width="100%"></p>
+![Відладка — AVM](docs/screenshots/uk/debug-avm.png)
 
 ### Прямий доступ до камер
 
-<p align="center"><img src="docs/screenshots/uk/debug-direct.png" alt="Відладка — Прямий доступ до камер" width="100%"></p>
+![Відладка — Прямий доступ до камер](docs/screenshots/uk/debug-direct.png)
 
 </details>
 
@@ -631,7 +661,7 @@ BYD Extend встановлюється окремо й не замінює BYD 
 
 [Відкрити Банку для підтримки](https://send.monobank.ua/jar/bKFV15i9e) або відсканувати QR-код:
 
-<p><a href="https://send.monobank.ua/jar/bKFV15i9e"><img src="app/src/main/res/drawable-nodpi/mono_support_qr.jpg" alt="QR-код Банки Support BYD app для підтримки розробки" width="240"></a></p>
+[![QR-код Банки Support BYD app для підтримки розробки](docs/images/support-qr.png)](https://send.monobank.ua/jar/bKFV15i9e)
 
 </details>
 

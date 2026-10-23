@@ -2,7 +2,7 @@
 
 **English** | [Українська](README.uk.md)
 
-<img align="right" src="app/src/main/res/drawable-nodpi/byd_extend_launcher.png" alt="BYD Extend icon" width="112">
+![BYD Extend icon](docs/images/byd-extend.png)
 
 BYD Extend adds configurable camera views, a rearview-mirror widget, turn-signal assistance, and optional music, weather, and exterior-audio integrations to compatible BYD vehicles.
 
@@ -12,6 +12,36 @@ BYD Extend adds configurable camera views, a rearview-mirror widget, turn-signal
 - **Download:** [latest GitHub release](https://github.com/sunlixWhyNotAvailable/byd-turnsignal-cameraview/releases/latest).
 - **Package:** `com.byd.extend` — a separate application from the older BYD Turn Signal.
 - **Help:** [ADB requirements](#which-functions-need-adb) · [Remote cameras](#remote-camera-viewing-setup-and-everyday-use) · [Troubleshooting](#troubleshooting) · [Report a problem](#report-a-problem).
+
+## Contents
+
+- [Installation and first start](#installation-and-first-start)
+  - [Which functions need ADB?](#which-functions-need-adb)
+  - [Moving from BYD Turn Signal](#moving-from-byd-turn-signal)
+- [Everyday use](#everyday-use)
+  - [Turn signals](#turn-signals)
+  - [Blind-zone cameras](#blind-zone-cameras)
+  - [Parking cameras](#parking-cameras)
+  - [Reverse cameras](#reverse-cameras)
+  - [Rearview mirror](#rearview-mirror)
+  - [Cameras integration](#cameras-integration)
+- [Remote camera viewing: setup and everyday use](#remote-camera-viewing-setup-and-everyday-use)
+  - [What you need](#what-you-need)
+  - [Which method should I choose?](#which-method-should-i-choose)
+  - [Using the Extend page (Tailscale and zrok)](#using-the-extend-page-tailscale-and-zrok)
+  - [Access, passwords and safe use](#access-passwords-and-safe-use)
+- [Optional integrations](#optional-integrations)
+  - [Music, lighting, and weather](#music-lighting-and-weather)
+  - [AVAS: event sounds, microphone, and engine simulation](#avas-event-sounds-microphone-and-engine-simulation)
+- [Presets and diagnostics](#presets-and-diagnostics)
+- [Background operation and updates](#background-operation-and-updates)
+- [Dialogs and widgets](#dialogs-and-widgets)
+- [Debug screens](#debug-screens)
+- [Troubleshooting](#troubleshooting)
+  - [Report a problem](#report-a-problem)
+- [Building from source](#building-from-source)
+- [Support the project](#support-the-project)
+- [License](#license)
 
 ## Installation and first start
 
@@ -69,7 +99,7 @@ This feature depends on valid vehicle telemetry and compatible BYD controls. It 
 
 Key screenshots are shown inline; detailed views are available in expandable sections. All images show the English dark-theme Preview with demonstration data; scrollable pages are stitched.
 
-<p align="center"><img src="docs/screenshots/en/turn-signals.png" alt="BYD Extend turn-signal settings" width="100%"></p>
+![BYD Extend turn-signal settings](docs/screenshots/en/turn-signals.png)
 
 ### Blind-zone cameras
 
@@ -80,26 +110,26 @@ Configure the rear and front groups independently: enable the required views, ch
 - `Do not show while panorama is open` applies **only to tablet output**, not the instrument cluster.
 - Adjust image crop, correction strength, rotation, mirroring, dimensions, and border for each view.
 
-<p align="center"><img src="docs/screenshots/en/blind-zones.png" alt="BYD Extend blind-zone cameras" width="100%"></p>
+![BYD Extend blind-zone cameras](docs/screenshots/en/blind-zones.png)
 
 <details>
 <summary>Placement and calibration</summary>
 
 #### Placement
 
-<p align="center"><img src="docs/screenshots/en/blind-zones-placement.png" alt="Blind-zone cameras — Placement" width="100%"></p>
+![Blind-zone cameras — Placement](docs/screenshots/en/blind-zones-placement.png)
 
 #### Calibration: original
 
-<p align="center"><img src="docs/screenshots/en/blind-zones-calibration.png" alt="Blind-zone cameras — Calibration: original" width="100%"></p>
+![Blind-zone cameras — Calibration: original](docs/screenshots/en/blind-zones-calibration.png)
 
 #### Calibration: correction
 
-<p align="center"><img src="docs/screenshots/en/blind-zones-correction.png" alt="Blind-zone cameras — Calibration: correction" width="100%"></p>
+![Blind-zone cameras — Calibration: correction](docs/screenshots/en/blind-zones-correction.png)
 
 #### Calibration: output
 
-<p align="center"><img src="docs/screenshots/en/blind-zones-output.png" alt="Blind-zone cameras — Calibration: output" width="100%"></p>
+![Blind-zone cameras — Calibration: output](docs/screenshots/en/blind-zones-output.png)
 
 </details>
 
@@ -109,26 +139,26 @@ Select the views you need and configure their distance and speed thresholds. Aut
 
 Each camera has its own visual settings. These views supplement the stock cameras and parking sensors, not replace them.
 
-<p align="center"><img src="docs/screenshots/en/parking.png" alt="BYD Extend parking cameras" width="100%"></p>
+![BYD Extend parking cameras](docs/screenshots/en/parking.png)
 
 <details>
 <summary>Placement and calibration</summary>
 
 #### Placement
 
-<p align="center"><img src="docs/screenshots/en/parking-placement.png" alt="Parking cameras — Placement" width="100%"></p>
+![Parking cameras — Placement](docs/screenshots/en/parking-placement.png)
 
 #### Calibration: original
 
-<p align="center"><img src="docs/screenshots/en/parking-calibration.png" alt="Parking cameras — Calibration: original" width="100%"></p>
+![Parking cameras — Calibration: original](docs/screenshots/en/parking-calibration.png)
 
 #### Calibration: correction
 
-<p align="center"><img src="docs/screenshots/en/parking-correction.png" alt="Parking cameras — Calibration: correction" width="100%"></p>
+![Parking cameras — Calibration: correction](docs/screenshots/en/parking-correction.png)
 
 #### Calibration: output
 
-<p align="center"><img src="docs/screenshots/en/parking-output.png" alt="Parking cameras — Calibration: output" width="100%"></p>
+![Parking cameras — Calibration: output](docs/screenshots/en/parking-output.png)
 
 </details>
 
@@ -142,26 +172,26 @@ Enable `Enhanced reverse view`, choose the composition elements, and arrange the
 - The selector widget and a learned steering-wheel button can switch an active composition manually. The button uses a single short press and does not open an inactive composition.
 - Background, camera, and selector-widget borders are configurable.
 
-<p align="center"><img src="docs/screenshots/en/reverse-placement.png" alt="BYD Extend reverse-camera composition" width="100%"></p>
+![BYD Extend reverse-camera composition](docs/screenshots/en/reverse-placement.png)
 
 <details>
 <summary>Reverse-camera parameters and calibration</summary>
 
 #### Parameters
 
-<p align="center"><img src="docs/screenshots/en/reverse.png" alt="Reverse cameras — parameters" width="100%"></p>
+![Reverse cameras — parameters](docs/screenshots/en/reverse.png)
 
 #### Calibration: original
 
-<p align="center"><img src="docs/screenshots/en/reverse-calibration.png" alt="Reverse cameras — Calibration: original" width="100%"></p>
+![Reverse cameras — Calibration: original](docs/screenshots/en/reverse-calibration.png)
 
 #### Calibration: correction
 
-<p align="center"><img src="docs/screenshots/en/reverse-correction.png" alt="Reverse cameras — Calibration: correction" width="100%"></p>
+![Reverse cameras — Calibration: correction](docs/screenshots/en/reverse-correction.png)
 
 #### Calibration: output
 
-<p align="center"><img src="docs/screenshots/en/reverse-output.png" alt="Reverse cameras — Calibration: output" width="100%"></p>
+![Reverse cameras — Calibration: output](docs/screenshots/en/reverse-output.png)
 
 </details>
 
@@ -175,26 +205,26 @@ Learn separate button actions for switching front/rear and showing/hiding the wi
 
 Assigned buttons can replace their original actions. Reset a binding to release it; recognition depends on which key events the firmware exposes.
 
-<p align="center"><img src="docs/screenshots/en/mirror.png" alt="BYD Extend rearview-mirror settings" width="100%"></p>
+![BYD Extend rearview-mirror settings](docs/screenshots/en/mirror.png)
 
 <details>
 <summary>Placement and calibration</summary>
 
 #### Placement
 
-<p align="center"><img src="docs/screenshots/en/mirror-placement.png" alt="Rearview mirror — Placement" width="100%"></p>
+![Rearview mirror — Placement](docs/screenshots/en/mirror-placement.png)
 
 #### Calibration: original
 
-<p align="center"><img src="docs/screenshots/en/mirror-calibration.png" alt="Rearview mirror — Calibration: original" width="100%"></p>
+![Rearview mirror — Calibration: original](docs/screenshots/en/mirror-calibration.png)
 
 #### Calibration: correction
 
-<p align="center"><img src="docs/screenshots/en/mirror-correction.png" alt="Rearview mirror — Calibration: correction" width="100%"></p>
+![Rearview mirror — Calibration: correction](docs/screenshots/en/mirror-correction.png)
 
 #### Calibration: output
 
-<p align="center"><img src="docs/screenshots/en/mirror-output.png" alt="Rearview mirror — Calibration: output" width="100%"></p>
+![Rearview mirror — Calibration: output](docs/screenshots/en/mirror-output.png)
 
 </details>
 
@@ -211,9 +241,9 @@ Tablet display and recording keep camera-related components active while parked 
 <details>
 <summary>Tablet display, recording and low-battery protection</summary>
 
-<p align="center"><img src="docs/screenshots/en/cameras-tablet.png" alt="Cameras — tablet warning and shared charge limits" width="100%"></p>
+![Cameras — tablet warning and shared charge limits](docs/screenshots/en/cameras-tablet.png)
 
-<p align="center"><img src="docs/screenshots/en/cameras-recording.png" alt="Cameras — recording, storage and archive" width="100%"></p>
+![Cameras — recording, storage and archive](docs/screenshots/en/cameras-recording.png)
 
 | Shared charge limit | Range | Default |
 | --- | --- | --- |
@@ -271,7 +301,7 @@ The screenshots below are **Preview demonstrations**, not working vehicle links 
 3. Wait for the live composition. If the browser requests a tap to start video, tap it.
 4. Use VDO's **Hang Up** button to disconnect, or close the viewing tab.
 
-<p align="center"><img src="docs/screenshots/en/cameras-vdo.png" alt="VDO.Ninja settings in Preview" width="100%"></p>
+![VDO.Ninja settings in Preview](docs/screenshots/en/cameras-vdo.png)
 
 </details>
 
@@ -295,7 +325,7 @@ The screenshots below are **Preview demonstrations**, not working vehicle links 
 
 Keep Tailscale connected on the phone/computer, open the copied link or scan the QR code, and use Extend's page. Serve uses tailnet identity/access policy instead of an Extend viewer password.
 
-<p align="center"><img src="docs/screenshots/en/cameras-tailscale-serve.png" alt="Private Tailscale Serve settings in Preview" width="100%"></p>
+![Private Tailscale Serve settings in Preview](docs/screenshots/en/cameras-tailscale-serve.png)
 
 </details>
 
@@ -310,7 +340,7 @@ Keep Tailscale connected on the phone/computer, open the copied link or scan the
 
 **Serve and Funnel share a Tailscale identity/address, but only the applied mode is active.** The same URL does not mean both modes are enabled. Selecting a different provider in the form is different from applying a new Tailscale mode. Public DNS may take time to propagate when Funnel is first enabled.
 
-<p align="center"><img src="docs/screenshots/en/cameras-tailscale-funnel.png" alt="Public Tailscale Funnel settings in Preview" width="100%"></p>
+![Public Tailscale Funnel settings in Preview](docs/screenshots/en/cameras-tailscale-funnel.png)
 
 </details>
 
@@ -335,7 +365,7 @@ Keep Tailscale connected on the phone/computer, open the copied link or scan the
 
 Open the link in a phone/computer browser and enter the viewer password. No zrok program or VPN is needed on the viewing device. Extend reuses its saved publication across ordinary reconnects; revoking/replacing access can change the link, so use the current one shown in the app.
 
-<p align="center"><img src="docs/screenshots/en/cameras-zrok.png" alt="zrok settings in Preview" width="100%"></p>
+![zrok settings in Preview](docs/screenshots/en/cameras-zrok.png)
 
 </details>
 
@@ -355,11 +385,11 @@ The examples below show the shared **Tailscale (Serve/Funnel) and zrok** page on
 
 **Live:** camera selection, fullscreen and the vehicle-mode switches on the right.
 
-<p align="center"><img src="docs/screenshots/en/viewer-desktop-live.png" alt="Desktop camera page: live composition with camera selection and vehicle-mode switches; demonstration data" width="100%"></p>
+![Desktop camera page: live composition with camera selection and vehicle-mode switches; demonstration data](docs/screenshots/en/viewer-desktop-live.png)
 
 **Recordings:** calendar, thumbnails and yellow/red event counts.
 
-<p align="center"><img src="docs/screenshots/en/viewer-desktop-archive.png" alt="Desktop recording archive with calendar and video thumbnails; demonstration data" width="100%"></p>
+![Desktop recording archive with calendar and video thumbnails; demonstration data](docs/screenshots/en/viewer-desktop-archive.png)
 
 </details>
 
@@ -368,9 +398,9 @@ The examples below show the shared **Tailscale (Serve/Funnel) and zrok** page on
 
 The vehicle-mode panel starts collapsed. The archive scrolls vertically.
 
-<p align="center"><img src="docs/screenshots/en/viewer-phone-live.png" alt="Phone live camera page with collapsed vehicle-mode panel; demonstration data" width="360"></p>
+![Phone live camera page with collapsed vehicle-mode panel; demonstration data](docs/screenshots/en/viewer-phone-live.png)
 
-<p align="center"><img src="docs/screenshots/en/viewer-phone-archive.png" alt="Phone recording archive with calendar and video thumbnails; demonstration data" width="360"></p>
+![Phone recording archive with calendar and video thumbnails; demonstration data](docs/screenshots/en/viewer-phone-archive.png)
 
 </details>
 
@@ -425,11 +455,11 @@ Enable these separately under `BYD integrations`.
 
 #### Music and lighting
 
-<p align="center"><img src="docs/screenshots/en/music.png" alt="Music and lighting settings" width="100%"></p>
+![Music and lighting settings](docs/screenshots/en/music.png)
 
 #### Weather
 
-<p align="center"><img src="docs/screenshots/en/weather.png" alt="Weather integration settings" width="100%"></p>
+![Weather integration settings](docs/screenshots/en/weather.png)
 
 </details>
 
@@ -450,7 +480,7 @@ Engine simulation starts automatically from the confirmed vehicle **OK / ready-t
 
 High microphone volume can cause acoustic feedback; suppression does not guarantee its removal. AVAS features do not replace the stock pedestrian-warning system, and audible behaviour after vehicle sleep can vary by firmware.
 
-<p align="center"><img src="docs/screenshots/en/avas.png" alt="BYD Extend AVAS audio settings" width="100%"></p>
+![BYD Extend AVAS audio settings](docs/screenshots/en/avas.png)
 
 ## Presets and diagnostics
 
@@ -466,12 +496,12 @@ Continuous logcat can grow very large and is not automatically rotated away. Tur
 
 **Review files before sharing.** System logs and compatibility packages may contain identifiers, locations, and information from other apps. Share only what is needed and do not publish credentials. Weather requests send coordinates to the weather provider; update checks contact GitHub.
 
-<p align="center"><img src="docs/screenshots/en/settings.png" alt="BYD Extend settings and diagnostics" width="100%"></p>
+![BYD Extend settings and diagnostics](docs/screenshots/en/settings.png)
 
 <details>
 <summary>Screenshot: camera output settings</summary>
 
-<p align="center"><img src="docs/screenshots/en/settings-camera-output.png" alt="General camera output settings" width="100%"></p>
+![General camera output settings](docs/screenshots/en/settings-camera-output.png)
 
 </details>
 
@@ -490,11 +520,11 @@ Check updates manually in Settings or enable automatic checks. The update dialog
 
 ### Permissions and runtime
 
-<p align="center"><img src="docs/screenshots/en/settings-permissions.png" alt="Permissions, startup, and update settings" width="100%"></p>
+![Permissions, startup, and update settings](docs/screenshots/en/settings-permissions.png)
 
 ### ADB recovery
 
-<p align="center"><img src="docs/screenshots/en/adb-recovery.png" alt="ADB recovery settings" width="100%"></p>
+![ADB recovery settings](docs/screenshots/en/adb-recovery.png)
 
 </details>
 
@@ -507,7 +537,7 @@ The examples below show the English dark-theme Preview. Version numbers, archive
 
 The reminder editor previews the Wi-Fi prompt and retry action and lets you adjust the widget's appearance and position. It is a reminder for recovery, not a first-time ADB authorization dialog.
 
-<p align="center"><img src="docs/screenshots/en/adb-reminder-dialog.png" alt="ADB recovery reminder editor" width="100%"></p>
+![ADB recovery reminder editor](docs/screenshots/en/adb-reminder-dialog.png)
 
 </details>
 
@@ -516,9 +546,9 @@ The reminder editor previews the Wi-Fi prompt and retry action and lets you adju
 
 Configure the update hint's appearance, then see how the floating notification of a new version looks. This is separate from the update download dialog.
 
-<p align="center"><img src="docs/screenshots/en/update-hint-dialog.png" alt="Update-hint appearance settings" width="100%"></p>
+![Update-hint appearance settings](docs/screenshots/en/update-hint-dialog.png)
 
-<p align="center"><img src="docs/screenshots/en/update-hint-widget.png" alt="Floating update-hint widget" width="100%"></p>
+![Floating update-hint widget](docs/screenshots/en/update-hint-widget.png)
 
 </details>
 
@@ -527,7 +557,7 @@ Configure the update hint's appearance, then see how the floating notification o
 
 Open the button-learning dialog for the desired action, then press the steering-wheel button you want to assign. The same dialog is shared by the camera and audio controls; one example illustrates it.
 
-<p align="center"><img src="docs/screenshots/en/button-learning-dialog.png" alt="Steering-wheel button-learning dialog" width="100%"></p>
+![Steering-wheel button-learning dialog](docs/screenshots/en/button-learning-dialog.png)
 
 </details>
 
@@ -536,7 +566,7 @@ Open the button-learning dialog for the desired action, then press the steering-
 
 Choose an imported sound for an event and audition it before assigning it. The library shows the available files and the current selection.
 
-<p align="center"><img src="docs/screenshots/en/avas-sound-library-dialog.png" alt="AVAS sound library" width="100%"></p>
+![AVAS sound library](docs/screenshots/en/avas-sound-library-dialog.png)
 
 </details>
 
@@ -545,7 +575,7 @@ Choose an imported sound for an event and audition it before assigning it. The l
 
 When sharing or saving logs, the progress dialog shows the total, processed, and remaining data volume and the percentage when available. One example covers both export actions; Preview uses simulated progress.
 
-<p align="center"><img src="docs/screenshots/en/log-export-progress-dialog.png" alt="Diagnostic archive preparation progress" width="100%"></p>
+![Diagnostic archive preparation progress](docs/screenshots/en/log-export-progress-dialog.png)
 
 </details>
 
@@ -554,7 +584,7 @@ When sharing or saving logs, the progress dialog shows the total, processed, and
 
 Choose a camera-border colour visually or enter its hexadecimal value. One example illustrates the shared colour picker.
 
-<p align="center"><img src="docs/screenshots/en/border-colour-dialog.png" alt="Camera border colour picker" width="100%"></p>
+![Camera border colour picker](docs/screenshots/en/border-colour-dialog.png)
 
 </details>
 
@@ -565,15 +595,15 @@ Choose a camera-border colour visually or enter its hexadecimal value. One examp
 
 ### Signals
 
-<p align="center"><img src="docs/screenshots/en/debug-signals.png" alt="Debug — Signals" width="100%"></p>
+![Debug — Signals](docs/screenshots/en/debug-signals.png)
 
 ### AVM
 
-<p align="center"><img src="docs/screenshots/en/debug-avm.png" alt="Debug — AVM" width="100%"></p>
+![Debug — AVM](docs/screenshots/en/debug-avm.png)
 
 ### Direct camera access
 
-<p align="center"><img src="docs/screenshots/en/debug-direct.png" alt="Debug — Direct camera access" width="100%"></p>
+![Debug — Direct camera access](docs/screenshots/en/debug-direct.png)
 
 </details>
 
@@ -631,7 +661,7 @@ Copy this number and use your bank's card-to-card transfer feature. You do not n
 
 [Open the donation Jar](https://send.monobank.ua/jar/bKFV15i9e), or scan the QR code:
 
-<p><a href="https://send.monobank.ua/jar/bKFV15i9e"><img src="app/src/main/res/drawable-nodpi/mono_support_qr.jpg" alt="QR code for the Support BYD app donation Jar" width="240"></a></p>
+[![QR code for the Support BYD app donation Jar](docs/images/support-qr.png)](https://send.monobank.ua/jar/bKFV15i9e)
 
 </details>
 
