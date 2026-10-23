@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.SystemClock
 import com.byd.extend.CameraChargePolicy
+import com.byd.extend.CameraModeClient
 import com.byd.extend.RemoteCameraPreparation
 import com.byd.extend.RemoteCameraSource
 import com.byd.extend.remote.security.EncryptedFileSecretStore
@@ -39,6 +40,8 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     private var sourceAttached = false
     private val archiveDelegate = lazy { CameraViewerArchive.create(context, ownerUid) }
     private val archive by archiveDelegate
+    private val modeSettings = CameraModeClient(context)
+    private var lastModeReadFailure: String? = null
     @Volatile private var locale = "en"
     @Volatile private var theme = "dark"
     private var enabled = false
@@ -386,6 +389,14 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
                         .put("view", VIEWS[(active?.direction ?: -1) + 1])
                         .put("request", request)
                         .put("playlist", if (playable) window!!.playlistPath else "")
+                        .put("modes", readModes())
+                }
+                override fun setMode(session: String, mode: String, enabled: Boolean): JSONObject? = serialized {
+                    if (!current(run, session) || run.server?.canControl(session) != true) return@serialized null
+                    modeSettings.setMode(mode, enabled).also {
+                        viewer?.let { active -> sessionEvent("mode_setting_saved", active,
+                            "mode=$mode enabled=$enabled applyState=${it.optString("applyState")}") }
+                    }
                 }
                 override fun presentation() = JSONObject().put("locale", locale).put("theme", theme).put("provider", p.method)
                     .put("accessMode", accessMode).put("run", run.generation)
@@ -410,6 +421,17 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
     private fun current(run: Run, id: String): Boolean {
         val active = viewer ?: return false
         return active.run === run && active.session == id && lease.owns(active)
+    }
+
+    @Synchronized private fun readModes(): JSONObject = try {
+        modeSettings.snapshot().also { lastModeReadFailure = null }
+    } catch (failure: Exception) {
+        val diagnostic = CameraViewingDiagnostics.describe(failure)
+        if (diagnostic != lastModeReadFailure) {
+            lastModeReadFailure = diagnostic
+            CameraViewingDiagnostics.failure("viewer_modes_read", "shared", failure)
+        }
+        JSONObject().put("available", false).put("applyState", "error").put("error", "modes_unavailable")
     }
 
     /** Only called after HTTP credentials or VDO's protected SDP + connection succeed. */
@@ -708,6 +730,7 @@ class CameraViewingRuntime(private val context: Context, directory: File, ownerU
             configure(false)
             chargeObservation?.close(); chargeObservation = null
             if (archiveDelegate.isInitialized()) archive.close()
+            modeSettings.close()
             if (networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
             networkRegistered = false; closed = true
         }.get(30, TimeUnit.SECONDS)

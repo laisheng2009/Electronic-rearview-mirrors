@@ -4,6 +4,53 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class MotionSessionRuntimeTest {
+    @Test public void modeOnlyEnableFromRemoteOnlyRetainsTelemetryAndSession() throws Exception {
+        MotionSessionRuntime runtime = new MotionSessionRuntime();
+        String id = "0123456789abcdef0123456789abcdef";
+        runtime.configure(id, MotionConfig.parse("{\"remoteViewingEnabled\":true,\"lock\":1}"));
+        runtime.telemetry("epoch", "power", 0, true, 1_000);
+        runtime.telemetry("epoch", "lock", 2, true, 1_000);
+        assertFalse(runtime.armed());
+        assertFalse(runtime.needsTelemetry());
+
+        assertEquals(MotionSessionRuntime.Change.ARMING,
+                runtime.updateModes(MotionConfig.parse(
+                        "{\"remoteViewingEnabled\":true,\"lock\":1,\"enabled\":true}"), 1_000));
+        assertEquals(id, runtime.sessionId());
+        assertEquals(0, runtime.power());
+        assertEquals(2, runtime.lock());
+        assertEquals(2_500L, runtime.remainingArmDelayMs(1_000));
+        assertEquals(MotionSessionRuntime.Change.ARMED, runtime.advance(3_500));
+        assertTrue(runtime.armed());
+    }
+
+    @Test public void modeOnlyOffOnPreservesRemoteTelemetryAndRequiresFreshWarmupAgain() throws Exception {
+        MotionSessionRuntime runtime = new MotionSessionRuntime();
+        String id = "abcdef0123456789abcdef0123456789";
+        runtime.configure(id, MotionConfig.parse(
+                "{\"remoteViewingEnabled\":true,\"warning\":true,\"enabled\":true,\"lock\":1}"));
+        runtime.telemetry("epoch", "power", 0, true, 1_000);
+        runtime.telemetry("epoch", "lock", 2, true, 1_000);
+        assertEquals(MotionSessionRuntime.Change.ARMED, runtime.advance(3_500));
+        long recordingRevision = runtime.recordingRevision();
+
+        assertEquals(MotionSessionRuntime.Change.DISARMED,
+                runtime.updateModes(MotionConfig.parse("{\"remoteViewingEnabled\":true,\"lock\":1}"), 4_000));
+        assertFalse(runtime.armed());
+        assertTrue(runtime.recordingRevision() > recordingRevision);
+        assertEquals(0, runtime.power());
+        assertEquals(2, runtime.lock());
+        assertFalse(runtime.needsTelemetry());
+        assertEquals(id, runtime.sessionId());
+
+        assertEquals(MotionSessionRuntime.Change.ARMING,
+                runtime.updateModes(MotionConfig.parse(
+                        "{\"remoteViewingEnabled\":true,\"warning\":true,\"lock\":1}"), 4_100));
+        assertEquals(id, runtime.sessionId());
+        assertEquals(2_500L, runtime.remainingArmDelayMs(4_100));
+        assertEquals(MotionSessionRuntime.Change.ARMED, runtime.advance(6_600));
+    }
+
     @Test public void remoteOnlyRetainsPowerTelemetryWithoutArmingMotionOrRequiringLock()
             throws Exception {
         MotionSessionRuntime runtime = new MotionSessionRuntime();

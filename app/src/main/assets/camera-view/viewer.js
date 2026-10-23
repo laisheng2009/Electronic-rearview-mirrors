@@ -1,5 +1,5 @@
 (() => {
-  const WEB_REVISION = 2;
+  const WEB_REVISION = 3;
   const REVISION_HEADER = 'X-Byd-Viewer-Revision';
   const app = document.getElementById('app');
   const bootstrapNode = document.getElementById('viewer-bootstrap');
@@ -25,6 +25,11 @@
       play: 'Play', pause: 'Pause', restart: 'Restart', previous: 'Previous recording', next: 'Next recording', position: 'Playback position', speed: 'Playback speed',
       previousMonth: 'Previous month', nextMonth: 'Next month',
       streamError: 'Live video could not be played.', noScript: 'JavaScript is required to view cameras.',
+      modes: 'Car modes', showOnTablet: 'Show on tablet', recordCameras: 'Record cameras', modeEnabled: 'Enabled', modeDisabled: 'Disabled',
+      modeLoading: 'Loading settings…', modeUnavailable: 'Unavailable', modeLastKnown: 'Last known', modeSaving: 'Saving…',
+      modeApplyPending: 'Saved; applying…', modeApplyError: 'The app could not apply this setting.', modeUpdateError: 'Could not update this setting.',
+      modePermissionError: 'Permission is required. Change it in the app settings.',
+      modeNote: 'Modes run under app conditions and battery protection.',
       updateRequired: 'The viewer has changed. Refresh this page to continue.'
     },
     uk: {
@@ -40,6 +45,11 @@
       play: 'Відтворити', pause: 'Пауза', restart: 'З початку', previous: 'Попередній запис', next: 'Наступний запис', position: 'Позиція відтворення', speed: 'Швидкість відтворення',
       previousMonth: 'Попередній місяць', nextMonth: 'Наступний місяць',
       streamError: 'Не вдалося відтворити відео наживо.', noScript: 'Для перегляду камер потрібен JavaScript.',
+      modes: 'Режими авто', showOnTablet: 'Показ на планшеті', recordCameras: 'Запис камер', modeEnabled: 'Увімкнено', modeDisabled: 'Вимкнено',
+      modeLoading: 'Завантаження налаштувань…', modeUnavailable: 'Недоступно', modeLastKnown: 'Останній стан', modeSaving: 'Збереження…',
+      modeApplyPending: 'Збережено; застосовуємо…', modeApplyError: 'Застосунок не зміг застосувати цей параметр.', modeUpdateError: 'Не вдалося змінити параметр.',
+      modePermissionError: 'Потрібен дозвіл. Змініть його в налаштуваннях застосунку.',
+      modeNote: 'Режими працюють за умовами застосунку та захистом заряду.',
       updateRequired: 'Версія переглядача змінилася. Оновіть сторінку, щоб продовжити.'
     },
     ru: {
@@ -55,6 +65,11 @@
       play: 'Воспроизвести', pause: 'Пауза', restart: 'С начала', previous: 'Предыдущая запись', next: 'Следующая запись', position: 'Позиция воспроизведения', speed: 'Скорость воспроизведения',
       previousMonth: 'Предыдущий месяц', nextMonth: 'Следующий месяц',
       streamError: 'Не удалось воспроизвести видео в эфире.', noScript: 'Для просмотра камер требуется JavaScript.',
+      modes: 'Режимы авто', showOnTablet: 'Показ на планшете', recordCameras: 'Запись камер', modeEnabled: 'Включено', modeDisabled: 'Выключено',
+      modeLoading: 'Загрузка настроек…', modeUnavailable: 'Недоступно', modeLastKnown: 'Последнее состояние', modeSaving: 'Сохранение…',
+      modeApplyPending: 'Сохранено; применяется…', modeApplyError: 'Приложение не смогло применить этот параметр.', modeUpdateError: 'Не удалось изменить параметр.',
+      modePermissionError: 'Требуется разрешение. Измените его в настройках приложения.',
+      modeNote: 'Режимы работают с учётом условий приложения и защиты заряда.',
       updateRequired: 'Версия просмотрщика изменилась. Обновите страницу, чтобы продолжить.'
     },
     zh: {
@@ -70,6 +85,11 @@
       play: '播放', pause: '暂停', restart: '重新开始', previous: '上一段录像', next: '下一段录像', position: '播放位置', speed: '播放速度',
       previousMonth: '上个月', nextMonth: '下个月',
       streamError: '无法播放实时视频。', noScript: '查看摄像头需要启用 JavaScript。',
+      modes: '车辆模式', showOnTablet: '在平板上显示', recordCameras: '录制摄像头', modeEnabled: '已开启', modeDisabled: '已关闭',
+      modeLoading: '正在加载设置…', modeUnavailable: '不可用', modeLastKnown: '上次状态', modeSaving: '正在保存…',
+      modeApplyPending: '已保存；正在应用…', modeApplyError: '应用无法启用此设置。', modeUpdateError: '无法更新此设置。',
+      modePermissionError: '需要权限。请在应用设置中更改。',
+      modeNote: '模式按应用条件和电量保护规则运行。',
       updateRequired: '查看器已更新。请刷新页面以继续。'
     }
   }[locale];
@@ -87,13 +107,18 @@
     liveFailed: false, firstLiveFrame: false, archiveView: 'composition', recordings: [], archiveLoaded: false,
     archiveLoading: false, archiveError: false, selectedDay: null, month: null, selectedRecord: null,
     playerError: false, playerFrameReported: false, missingCharge: 0, hls: null, poll: null, mainKey: '', seeking: false,
-    localFirstFrame: false, liveRequest: null, livePlaylist: null
+    localFirstFrame: false, liveRequest: null, livePlaylist: null,
+    modes: { available: null, tabletEnabled: null, recordingEnabled: null, applyState: null, error: null },
+    lastKnownModes: { tabletEnabled: null, recordingEnabled: null }, modePending: null, modeError: null, modesOpen: false
   };
   const cameraLabels = Object.fromEntries(cameras.map((key) => [key, text[key]]));
   let hlsScriptPromise;
   let actionGeneration = 0;
   let mediaGeneration = 0;
   let controlQueue = Promise.resolve();
+  let modeQueue = Promise.resolve();
+  let modeWriteGeneration = 0;
+  let statusRequestGeneration = 0;
   let liveFrameToken = 0;
   let archiveFrameToken = 0;
   let archiveResizeObserver = null;
@@ -149,7 +174,9 @@
     warning: '<path d="M10.3 3.9 1.8 18.5A1.7 1.7 0 0 0 3.3 21h17.4a1.7 1.7 0 0 0 1.5-2.5L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4m0 4h.01"/>',
     rotate: '<path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/>',
     skipBack: '<path d="M5 5v14m14-14L8 12l11 7z"/>', skipForward: '<path d="M19 5v14M5 5l11 7-11 7z"/>',
-    empty: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 14h.01M12 14h.01M16 14h.01"/>'
+    empty: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 14h.01M12 14h.01M16 14h.01"/>',
+    sliders: '<path d="M4 21v-7m0-4V3m8 18v-9m0-4V3m8 18v-5m0-4V3"/><path d="M2 14h4m4-6h4m4 8h4"/>',
+    chevronDown: '<path d="m6 9 6 6 6-6"/>'
   };
   const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPaths[name] || iconPaths.camera}</svg>`;
   const clock = (seconds) => {
@@ -198,6 +225,11 @@
   }
   const post = (path, body = {}) => {
     const send = () => api(path, { method: 'POST', body: JSON.stringify(body) });
+    if (path === '/modes') {
+      const pending = modeQueue.then(send, send);
+      modeQueue = pending.catch(() => {});
+      return pending;
+    }
     if (!['/live', '/archive/open', '/archive/close', '/stop', '/session'].includes(path)) return send();
     const pending = controlQueue.then(send, send);
     controlQueue = pending.catch(() => {});
@@ -233,6 +265,132 @@
     return missing.length ? `<p class="charge-note">${escapeHtml(text.chargeUnavailable)} ${escapeHtml(missing.join(' / '))}. ${escapeHtml(text.chargeSuffix)}</p>` : '';
   }
 
+  function modePanel() {
+    return `<aside class="mode-panel" aria-label="${escapeHtml(text.modes)}"><h2 class="mode-heading mode-desktop-heading">${icon('sliders')}${escapeHtml(text.modes)}</h2><details class="mode-disclosure" id="mode-disclosure"${state.modesOpen ? ' open' : ''}><summary><span class="mode-summary-heading">${icon('sliders')}<span>${escapeHtml(text.modes)}<small>${escapeHtml(text.showOnTablet)} · ${escapeHtml(text.recordCameras)}</small></span></span>${icon('chevronDown')}</summary><div class="mode-content"><label class="mode-row" for="mode-tablet"><span class="mode-label"><strong>${escapeHtml(text.showOnTablet)}</strong><small id="mode-state-tablet"></small></span><input class="mode-toggle" id="mode-tablet" type="checkbox" data-mode="tablet" aria-describedby="mode-state-tablet"></label><label class="mode-row" for="mode-recording"><span class="mode-label"><strong>${escapeHtml(text.recordCameras)}</strong><small id="mode-state-recording"></small></span><input class="mode-toggle" id="mode-recording" type="checkbox" data-mode="recording" aria-describedby="mode-state-recording"></label><p class="mode-note">${escapeHtml(text.modeNote)}</p><p class="mode-feedback" id="mode-feedback" role="status" aria-live="polite"></p></div></details></aside>`;
+  }
+
+  function resetModes() {
+    state.modes = { available: null, tabletEnabled: null, recordingEnabled: null, applyState: null, error: null };
+    state.modePending = null;
+    state.modeError = null;
+    state.lastKnownModes = { tabletEnabled: null, recordingEnabled: null };
+    ++modeWriteGeneration;
+    ++statusRequestGeneration;
+  }
+
+  function applyModeSnapshot(modes) {
+    if (!modes || typeof modes !== 'object') {
+      state.modes = { available: null, tabletEnabled: null, recordingEnabled: null, applyState: null, error: null };
+      return;
+    }
+    const available = typeof modes.available === 'boolean' ? modes.available : null;
+    state.modes = {
+      available,
+      tabletEnabled: available && typeof modes.tabletEnabled === 'boolean' ? modes.tabletEnabled : null,
+      recordingEnabled: available && typeof modes.recordingEnabled === 'boolean' ? modes.recordingEnabled : null,
+      applyState: ['applied', 'pending', 'error'].includes(modes.applyState) ? modes.applyState : null,
+      error: typeof modes.error === 'string' ? modes.error : null
+    };
+    for (const field of ['tabletEnabled', 'recordingEnabled']) {
+      if (typeof state.modes[field] === 'boolean') state.lastKnownModes[field] = state.modes[field];
+    }
+  }
+
+  function modeValueLabel(field) {
+    if (state.modePending === (field === 'tabletEnabled' ? 'tablet' : 'recording')) return text.modeSaving;
+    const value = state.modes[field];
+    if (state.modes.available === true && typeof value === 'boolean') return value ? text.modeEnabled : text.modeDisabled;
+    const lastKnown = state.lastKnownModes[field];
+    if (typeof lastKnown === 'boolean') return `${text.modeUnavailable} · ${text.modeLastKnown.toLowerCase()}: ${lastKnown ? text.modeEnabled : text.modeDisabled}`;
+    return state.modes.available === null ? text.modeLoading : text.modeUnavailable;
+  }
+
+  function modeFeedback() {
+    if (state.modePending) return text.modeSaving;
+    const code = state.modeError || (state.modes.applyState === 'error' ? state.modes.error || 'apply_error' : null);
+    if (code) {
+      const message = code === 'permission_required' ? text.modePermissionError
+        : code === 'modes_unavailable' ? text.modeUnavailable
+          : state.modeError ? text.modeUpdateError : text.modeApplyError;
+      return `${message}${code === 'permission_required' ? '' : ` (${escapeHtml(code)})`}`;
+    }
+    if (state.modes.applyState === 'pending') return text.modeApplyPending;
+    if (state.modes.available !== true) return state.modes.available === null ? text.modeLoading : text.modeUnavailable;
+    return '';
+  }
+
+  function updateModePanel() {
+    const panel = document.querySelector('.mode-panel');
+    if (!panel) return;
+    const controlsEnabled = state.authenticated && !state.replaced && !['ended', 'replaced'].includes(state.status) &&
+      state.modes.available === true && !state.modePending;
+    for (const [mode, field] of [['tablet', 'tabletEnabled'], ['recording', 'recordingEnabled']]) {
+      const input = panel.querySelector(`[data-mode="${mode}"]`);
+      if (!input) continue;
+      const known = state.modes.available === true && typeof state.modes[field] === 'boolean';
+      input.checked = known && state.modes[field];
+      input.indeterminate = !known;
+      input.disabled = !controlsEnabled || !known;
+      const label = panel.querySelector(`#mode-state-${mode}`);
+      if (label && label.textContent !== modeValueLabel(field)) label.textContent = modeValueLabel(field);
+    }
+    const feedback = panel.querySelector('#mode-feedback');
+    const message = modeFeedback();
+    if (feedback && feedback.textContent !== message) feedback.textContent = message;
+    feedback?.classList.toggle('is-error', Boolean(state.modeError || state.modes.applyState === 'error'));
+  }
+
+  function syncModeDisclosure() {
+    const disclosure = document.getElementById('mode-disclosure');
+    if (disclosure) disclosure.open = !window.matchMedia('(max-width: 800px)').matches || state.modesOpen;
+  }
+  window.addEventListener('resize', syncModeDisclosure);
+
+  async function changeMode(input) {
+    const mode = input.dataset.mode;
+    const field = mode === 'tablet' ? 'tabletEnabled' : mode === 'recording' ? 'recordingEnabled' : null;
+    if (!field) return;
+    const enabled = input.checked;
+    if (!state.authenticated || state.modePending || state.modes.available !== true || typeof state.modes[field] !== 'boolean') {
+      updateModePanel();
+      return;
+    }
+    state.modePending = mode;
+    state.modeError = null;
+    const generation = ++modeWriteGeneration;
+    ++statusRequestGeneration;
+    updateModePanel();
+    let refresh = false;
+    try {
+      const result = await post('/modes', { mode, enabled });
+      if (generation !== modeWriteGeneration || !state.authenticated) return;
+      if (result.modes && typeof result.modes === 'object') {
+        applyModeSnapshot(result.modes);
+        state.modeError = null;
+      } else {
+        state.modeError = 'mode_state_unavailable';
+        refresh = true;
+      }
+    } catch (failure) {
+      if (generation !== modeWriteGeneration) return;
+      if (failure.statusCode === 401) handleUnauthorized(failure);
+      else {
+        console.warn('Could not update remote camera mode', failure);
+        if (failure.body?.modes && typeof failure.body.modes === 'object') applyModeSnapshot(failure.body.modes);
+        state.modeError = failure.body?.modes?.error || failure.body?.status || 'request_failed';
+        refresh = true;
+      }
+    } finally {
+      if (generation === modeWriteGeneration) {
+        state.modePending = null;
+        ++modeWriteGeneration;
+        ++statusRequestGeneration;
+        updateModePanel();
+      }
+    }
+    if (refresh && state.authenticated && !state.replaced) await pollStatus();
+  }
+
   function connectionLabel() {
     if (state.replaced || state.status === 'replaced') return text.replaced;
     if (state.status === 'low_battery') return text.lowBattery;
@@ -252,7 +410,12 @@
     if (contractBlocked) { renderLogin(); return; }
     app.classList.remove('is-expanded');
     app.classList.remove('has-player');
-    app.innerHTML = `${pageHeader()}<div class="statusrow"><div class="connection" id="connection" data-state="ready" role="status"><span class="dot"></span><span id="connection-label"></span></div><button class="quiet" type="button" data-action="end">${icon('stop')}${escapeHtml(text.end)}</button></div><nav class="nav" aria-label="${escapeHtml(text.title)}"><button type="button" data-action="tab" data-mode="live" aria-pressed="true">${icon('video')}${escapeHtml(text.live)}</button><button type="button" data-action="tab" data-mode="archive" aria-pressed="false">${icon('archive')}${escapeHtml(text.archive)}</button></nav><main class="content" id="main-panel"></main>`;
+    app.innerHTML = `${pageHeader()}<div class="statusrow"><div class="connection" id="connection" data-state="ready" role="status"><span class="dot"></span><span id="connection-label"></span></div><button class="quiet" type="button" data-action="end">${icon('stop')}${escapeHtml(text.end)}</button></div><div class="viewer-workspace"><section class="viewer-main"><nav class="nav" aria-label="${escapeHtml(text.title)}"><button type="button" data-action="tab" data-mode="live" aria-pressed="true">${icon('video')}${escapeHtml(text.live)}</button><button type="button" data-action="tab" data-mode="archive" aria-pressed="false">${icon('archive')}${escapeHtml(text.archive)}</button></nav><main class="content" id="main-panel"></main></section>${modePanel()}</div>`;
+    const disclosure = document.getElementById('mode-disclosure');
+    syncModeDisclosure();
+    disclosure.addEventListener('toggle', (event) => {
+      if (window.matchMedia('(max-width: 800px)').matches) state.modesOpen = event.currentTarget.open;
+    });
     updateStatusBar();
     renderMain(true);
   }
@@ -272,6 +435,7 @@
       else if (gate && state.missingCharge) gate.insertAdjacentHTML('beforeend', chargeNote());
     }
     document.querySelectorAll('.nav [data-action="tab"]').forEach((tab) => tab.setAttribute('aria-pressed', String(tab.dataset.mode === state.mode)));
+    updateModePanel();
   }
 
   function liveGate() {
@@ -815,14 +979,18 @@
   async function pollStatus() {
     if (!state.authenticated || state.replaced) return;
     const action = actionGeneration;
+    const modeWrite = modeWriteGeneration;
+    const request = ++statusRequestGeneration;
     try {
       const previous = state.status;
       const data = await api('/status');
-      if (action !== actionGeneration || !state.authenticated) return;
+      if (action !== actionGeneration || !state.authenticated || modeWrite !== modeWriteGeneration || request !== statusRequestGeneration) return;
       if (data.status === 'replaced') {
         handleUnauthorized({ body: { status: 'replaced' } });
         return;
       }
+      if (!state.modePending) applyModeSnapshot(data.modes);
+      updateModePanel();
       if (!['ready', 'preparing', 'connected', 'low_battery', 'error', 'ended'].includes(data.status)) {
         console.warn('Unexpected camera viewer status', data.status);
         return;
@@ -845,7 +1013,7 @@
       updateStatusBar();
       renderMain();
     } catch (failure) {
-      if (action !== actionGeneration || !state.authenticated) return;
+      if (action !== actionGeneration || !state.authenticated || modeWrite !== modeWriteGeneration || request !== statusRequestGeneration) return;
       if (failure.statusCode === 401) handleUnauthorized(failure);
       else console.warn('Camera viewer status poll failed', failure);
     }
@@ -872,6 +1040,7 @@
     state.month = null;
     state.firstLiveFrame = false;
     state.localFirstFrame = false;
+    resetModes();
     renderLogin(text.ended);
   }
 
@@ -880,6 +1049,7 @@
     clearInterval(state.poll);
     state.poll = null;
     state.authenticated = false;
+    resetModes();
     state.archiveLoaded = false;
     state.recordings = [];
     state.selectedRecord = null;
@@ -905,6 +1075,7 @@
     try {
       const result = await post('/session', { password: secret });
       if (result.status !== 'ready') throw Object.assign(new Error(result.status || 'session unavailable'), { body: result });
+      resetModes();
       state.authenticated = true;
       state.replaced = false;
       state.archiveLoaded = false;
@@ -1026,7 +1197,8 @@
     if (Number.isFinite(value)) video.currentTime = value;
     updateArchiveControls();
   });
-  app.addEventListener('change', (event) => {
+  app.addEventListener('change', async (event) => {
+    if (event.target.matches('input[data-mode]')) { await changeMode(event.target); return; }
     if (event.target.id === 'seek') { state.seeking = false; updateArchiveControls(); return; }
     if (event.target.id === 'playback-speed') {
       const video = document.getElementById('archive-video');

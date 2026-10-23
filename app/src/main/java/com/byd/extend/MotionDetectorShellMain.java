@@ -38,6 +38,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -210,12 +211,11 @@ public final class MotionDetectorShellMain {
 
     private static final class ConfigureResult {
         final MotionSessionConfigStore.Snapshot snapshot;
-        // True only when this request changed/disabled the active worker config, not on a no-op or pending drain.
-        final boolean applied;
+        final int applyKind;
 
-        ConfigureResult(MotionSessionConfigStore.Snapshot snapshot, boolean applied) {
+        ConfigureResult(MotionSessionConfigStore.Snapshot snapshot, int applyKind) {
             this.snapshot = snapshot;
-            this.applied = applied;
+            this.applyKind = applyKind;
         }
     }
 
@@ -431,7 +431,7 @@ public final class MotionDetectorShellMain {
                         reply.writeInt(1);
                         reply.writeString(configured.snapshot == null ? "" : configured.snapshot.sessionId);
                         reply.writeStrongBinder(binder);
-                        reply.writeInt(configured.applied ? 1 : 0);
+                        reply.writeInt(configured.applyKind);
                         return true;
                     }
                     case MotionDetectorProtocol.TX_ATTACH_UI: {
@@ -678,24 +678,53 @@ public final class MotionDetectorShellMain {
             if (sessionId != null) stopOnControl(sessionId, "settings_disabled");
             config = null;
             eligible = false;
-            return new ConfigureResult(null, true);
+            return new ConfigureResult(null, MotionDetectorProtocol.CONFIG_APPLIED);
         }
-        if (next.sessionId.equals(sessionId) && !sessionRuntime.suspended()) {
+        if (next.sessionId.equals(sessionId) && !shuttingDown && !sessionRuntime.suspended()) {
             if (teardownPending) {
                 pendingConfig = next;
                 pendingConfigureCallback = configureCallback;
                 pendingConfigureToken = requestToken;
-                return new ConfigureResult(null, false);
+                return new ConfigureResult(null, MotionDetectorProtocol.CONFIG_PENDING);
             }
             pendingAppCallback = configureCallback;
             boolean activeWithoutHost = !workerBinding && !cameraHostPending
                     && "charge_blocked".equals(state);
             if (!workerBinding && !cameraHostPending && (workerBound || activeWithoutHost))
                 attachPendingUiOnControl(next.sessionId);
-            return new ConfigureResult(next, true);
+            if (config != null && next.config.onlyMotionModesDifferFrom(config)) {
+                applyModeOnlyConfig(next);
+                return new ConfigureResult(next, MotionDetectorProtocol.CONFIG_MODE_ONLY);
+            }
+            if (config != null && next.config.toJson().equals(config.toJson()))
+                return new ConfigureResult(next, MotionDetectorProtocol.CONFIG_RETAINED);
+            return new ConfigureResult(next, MotionDetectorProtocol.CONFIG_APPLIED);
         }
         boolean applied = startConfiguredSession(next, configureCallback, requestToken);
-        return new ConfigureResult(applied ? next : null, applied);
+        return new ConfigureResult(applied ? next : null,
+                applied ? MotionDetectorProtocol.CONFIG_APPLIED : MotionDetectorProtocol.CONFIG_PENDING);
+    }
+
+    private void applyModeOnlyConfig(MotionSessionConfigStore.Snapshot next) throws Exception {
+        String id = sessionId;
+        MotionConfig previous = config;
+        if (!sameSession(id) || teardownPending || shuttingDown || sessionRuntime.suspended()
+                || previous == null || !next.config.onlyMotionModesDifferFrom(previous))
+            throw new IllegalStateException("Motion session cannot accept an in-place mode update");
+        MotionSessionRuntime.Change change = sessionRuntime.updateModes(
+                next.config, SystemClock.elapsedRealtime());
+        config = next.config;
+        applyEligibilityChange(id, change);
+        if (!sameSession(id)) return;
+        if (previous.warningEnabled && !config.warningEnabled && warning && change != MotionSessionRuntime.Change.DISARMED)
+            finishWarning(id, false);
+        if (previous.recordingEnabled && !config.recordingEnabled && eligible
+                && recorder != null && change != MotionSessionRuntime.Change.DISARMED)
+            stopRecording("recording_disabled");
+        if (!previous.recordingEnabled && config.recordingEnabled && eligible) startRecording(id);
+        if (!previous.motionEnabled() && config.motionEnabled() && !prepared
+                && !cameraChargeState.isBlocked() && !control.post(() -> prepareSession(id)))
+            throw new IllegalStateException("Motion control thread refused detector preparation");
     }
 
     private void startChargeTelemetry(MotionConfig next) {
@@ -1401,9 +1430,26 @@ public final class MotionDetectorShellMain {
             updateCameraDemand();
         } catch (Throwable error) {
             if (assets == null && setup.assets != null) {
-                try { setup.assets.close(); } catch (Throwable ignored) { }
+                try { setup.assets.close(); }
+                catch (Throwable cleanup) { if (cleanup != error) error.addSuppressed(cleanup); }
             }
-            fail(id, setup.stage, error);
+            String reference = Process.myPid() + "-" + UUID.randomUUID().toString().replace("-", "");
+            String detail = setup.stage + ": " + summary(error) + " (diagnostic ref " + reference + ")";
+            if (!prepared && config != null && config.remoteViewingEnabled
+                    && !remoteViewLeases.isEmpty()) {
+                lastError = detail;
+                deleteNative(error);
+                CameraViewingDiagnostics.failure("motion_native_setup_ref_" + reference,
+                        "shell_worker", error);
+                state = "viewing_only";
+                sendError(id, setup.stage, lastError);
+                sendStatus(id, state, "Motion detector preparation failed; remote viewing remains active; " + lastError);
+                updateCameraDemand();
+                return;
+            }
+            CameraViewingDiagnostics.failure("motion_native_setup_ref_" + reference,
+                    "shell_worker", error);
+            fail(id, setup.stage, new IllegalStateException(detail, error));
         }
     }
 
@@ -2885,19 +2931,32 @@ public final class MotionDetectorShellMain {
         beginTeardown(id, "runtime_error", true, false, false, appCallback, "error");
     }
 
-    private void deleteNative() {
+    private void deleteNative() { deleteNative(null); }
+
+    private void deleteNative(Throwable primaryFailure) {
         if (nativeInitialized) {
             nativeInitialized = false;
             try { nativeApi.delete(); }
-            catch (Throwable error) { lastError += "; native_delete: " + summary(error); }
+            catch (Throwable error) { recordNativeCleanupFailure("native_delete", error, primaryFailure); }
         }
         nativeApi = null;
         nativeInput = null;
         if (assets != null) {
             try { assets.close(); }
-            catch (Throwable error) { lastError += "; asset_close: " + summary(error); }
+            catch (Throwable error) { recordNativeCleanupFailure("asset_close", error, primaryFailure); }
             assets = null;
         }
+    }
+
+    private void recordNativeCleanupFailure(String operation, Throwable failure, Throwable primaryFailure) {
+        lastError += "; " + operation + ": " + summary(failure);
+        if (primaryFailure != null) {
+            if (failure != primaryFailure) primaryFailure.addSuppressed(failure);
+            return;
+        }
+        String reference = Process.myPid() + "-" + UUID.randomUUID().toString().replace("-", "");
+        CameraViewingDiagnostics.failure("motion_native_cleanup_" + operation + "_ref_" + reference,
+                "shell_worker", failure);
     }
 
     private <T> T callControl(ControlCall<T> call) throws Exception {

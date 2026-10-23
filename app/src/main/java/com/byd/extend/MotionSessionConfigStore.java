@@ -72,7 +72,8 @@ final class MotionSessionConfigStore {
         }
         Snapshot previous = read();
         if (previous != null && previous.config.toJson().equals(config.toJson())) return previous;
-        String id = UUID.randomUUID().toString().replace("-", "");
+        boolean modeOnly = previous != null && config.onlyMotionModesDifferFrom(previous.config);
+        String id = modeOnly ? previous.sessionId : UUID.randomUUID().toString().replace("-", "");
         try {
             JSONObject envelope = new JSONObject().put("version", 1).put("owner_uid", ownerUid)
                     .put("session_id", id).put("config", config.toJson());

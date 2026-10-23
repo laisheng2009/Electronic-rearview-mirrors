@@ -1,5 +1,6 @@
 package com.byd.extend.remote;
 
+import com.byd.extend.CameraModeClient;
 import android.os.ParcelFileDescriptor;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -45,6 +46,7 @@ public final class CameraViewerServer implements AutoCloseable {
         void live(String session, int direction, String request);
         void archive(String session, boolean leave);
         JSONObject status();
+        JSONObject setMode(String session, String mode, boolean enabled) throws Exception;
         JSONObject presentation();
         void firstFrame(String session, String mode);
         FragmentedVideoWindow video();
@@ -80,6 +82,11 @@ public final class CameraViewerServer implements AutoCloseable {
     }
 
     public int port() { return server.getLocalPort(); }
+
+    /** Rechecked by the owner when a queued settings mutation actually executes. */
+    public boolean canControl(String session) {
+        return !closed && access.isCurrent(session);
+    }
 
     /** Called by the runtime when another authenticated viewer takes the shared camera lease. */
     public void supersede(String session) {
@@ -243,11 +250,13 @@ public final class CameraViewerServer implements AutoCloseable {
             servePage(socket, request.method.equals("HEAD"), reply);
             return;
         }
-        if ((request.path.equals("/viewer.css") || request.path.equals("/viewer.js"))
+        if ((request.path.equals("/viewer.css") || request.path.equals("/viewer.js")
+                || request.path.equals("/favicon.ico"))
                 && isRead(request.method)) {
-            String name = request.path.equals("/viewer.css") ? "viewer.css" : "viewer.js";
+            String name = request.path.substring(1);
             serveBytes(socket, request.method.equals("HEAD"), reply,
-                    request.path.endsWith(".css") ? "text/css; charset=utf-8" : "application/javascript; charset=utf-8",
+                    name.equals("favicon.ico") ? "image/vnd.microsoft.icon"
+                            : name.endsWith(".css") ? "text/css; charset=utf-8" : "application/javascript; charset=utf-8",
                     stream.resource(name), null);
             return;
         }
@@ -265,6 +274,36 @@ public final class CameraViewerServer implements AutoCloseable {
                 serveJson(socket, request.method.equals("HEAD"), reply,
                         stream.status().put("webRevision", ViewerStopReason.WEB_REVISION));
                 return;
+            case "/modes": {
+                if (!request.method.equals("POST")) { methodNotAllowed(socket, reply); return; }
+                JSONObject input = bodyObject(request.body);
+                Object mode = input.opt("mode");
+                Object enabled = input.opt("enabled");
+                if (input.length() != 2 || !(enabled instanceof Boolean)
+                        || !("tablet".equals(mode) || "recording".equals(mode))) {
+                    json(socket, reply, 400, "invalid_mode", null);
+                    return;
+                }
+                try {
+                    JSONObject modes = stream.setMode(request.session, (String) mode, (Boolean) enabled);
+                    // The owner rechecks the lease on its serialized write path.
+                    if (modes == null) {
+                        json(socket, reply, 401, "replaced", null);
+                        return;
+                    }
+                    serveJson(socket, false, reply, new JSONObject().put("modes", modes));
+                } catch (CameraModeClient.ModeException failure) {
+                    CameraViewingDiagnostics.failure("viewer_mode_set", "shared", failure);
+                    String code = failure.code();
+                    boolean permission = "permission_required".equals(code);
+                    json(socket, reply, permission ? 403 : 500,
+                            permission ? code : "modes_unavailable", null);
+                } catch (Exception failure) {
+                    CameraViewingDiagnostics.failure("viewer_mode_set", "shared", failure);
+                    json(socket, reply, 500, "modes_unavailable", null);
+                }
+                return;
+            }
             case "/viewer.css":
             case "/viewer.js":
                 if (!isRead(request.method)) { methodNotAllowed(socket, reply); return; }
@@ -716,6 +755,7 @@ public final class CameraViewerServer implements AutoCloseable {
         if (path.startsWith("/archive/thumbnail/")) return "archive_thumbnail";
         if (path.startsWith("/archive")) return "archive";
         if (path.equals("/status")) return "status";
+        if (path.equals("/modes")) return "modes";
         if (path.equals("/stop")) return "stop";
         if (path.equals("/diagnostic")) return "diagnostic";
         return "resource";

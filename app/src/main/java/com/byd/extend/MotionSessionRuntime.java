@@ -30,6 +30,14 @@ final class MotionSessionRuntime {
         recordingRevision++;
     }
 
+    Change updateModes(MotionConfig next, long nowMs) {
+        if (config == null || !next.onlyMotionModesDifferFrom(config))
+            throw new IllegalArgumentException("only Motion mode flags may change in place");
+        if (config.recordingEnabled != next.recordingEnabled) recordingRevision++;
+        config = next;
+        return advance(nowMs);
+    }
+
     Change telemetry(String epoch, String signal, int value, boolean baseline, long nowMs) {
         if (sessionId == null || suspended || epoch == null || epoch.isEmpty()
                 || epoch.length() > 128 || nowMs < 0) return Change.NONE;

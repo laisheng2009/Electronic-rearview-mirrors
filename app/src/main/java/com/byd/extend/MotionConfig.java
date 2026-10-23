@@ -2,6 +2,7 @@ package com.byd.extend;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import java.util.Arrays;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -70,6 +71,23 @@ public final class MotionConfig {
 
     public boolean motionEnabled() { return warningEnabled || recordingEnabled; }
     public boolean anyEnabled() { return motionEnabled() || remoteViewingEnabled; }
+    boolean onlyMotionModesDifferFrom(MotionConfig other) {
+        return other != null && (warningEnabled != other.warningEnabled
+                || recordingEnabled != other.recordingEnabled)
+                && audioEnabled == other.audioEnabled
+                && remoteViewingEnabled == other.remoteViewingEnabled
+                && chargeSocThresholdPercent == other.chargeSocThresholdPercent
+                && chargeVoltageThresholdTenths == other.chargeVoltageThresholdTenths
+                && lockCondition == other.lockCondition
+                && beforeSeconds == other.beforeSeconds && afterSeconds == other.afterSeconds
+                && quality == other.quality && primarySd == other.primarySd
+                && fallbackEnabled == other.fallbackEnabled
+                && internalKeepFree == other.internalKeepFree && sdKeepFree == other.sdKeepFree
+                && oemCleanup == other.oemCleanup && internalLimitGb == other.internalLimitGb
+                && sdLimitGb == other.sdLimitGb && internalFreeGb == other.internalFreeGb
+                && sdFreeGb == other.sdFreeGb && oemLimitGb == other.oemLimitGb
+                && Arrays.equals(cameraOrder, other.cameraOrder);
+    }
     boolean eligible(int power, int lock) {
         return motionEnabled() && power == 0 && (lockCondition == 0 || lockCondition == 1 && lock == 2);
     }

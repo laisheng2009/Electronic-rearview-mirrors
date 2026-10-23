@@ -1,5 +1,10 @@
 package com.byd.extend.ui.motion
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
@@ -91,6 +96,17 @@ internal fun motionStoragePermissionsGranted(
     readGranted: Boolean,
     writeGranted: Boolean,
 ) = (!needs.read || readGranted) && (!needs.write || writeGranted)
+
+/** Java bridge for the same permission range used by the recording UI before enabling capture. */
+@JvmName("motionRecordingStoragePermissionGranted")
+fun motionRecordingStoragePermissionGranted(context: Context): Boolean {
+    val needs = motionStoragePermissionNeeds(Build.VERSION.SDK_INT)
+    val read = !needs.read || ContextCompat.checkSelfPermission(
+        context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    val write = !needs.write || ContextCompat.checkSelfPermission(
+        context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    return motionStoragePermissionsGranted(needs, read, write)
+}
 
 internal fun motionArchiveDateRange(from: LocalDate, to: LocalDate, zone: ZoneId): MotionArchiveBounds? {
     if (from.isAfter(to)) return null

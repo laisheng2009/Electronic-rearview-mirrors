@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.LocaleList
 import android.util.Log
 import android.view.ContextThemeWrapper
@@ -77,6 +79,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.byd.extend.MotionConfig
+import com.byd.extend.CameraModeClient
+import com.byd.extend.CameraModeSettings
 import com.byd.extend.MotionDirectionIcon
 import com.byd.extend.MotionMediaLibrary
 import com.byd.extend.MotionRuntime
@@ -129,7 +133,7 @@ private data class RecordingOptions(
     val cameraOrder: List<Int>,
 ) {
     fun write(preferences: android.content.SharedPreferences) = preferences.edit()
-        .putBoolean("enabled", enabled).putInt("before", before).putInt("after", after)
+        .putInt("before", before).putInt("after", after)
         .putBoolean("audio", audio).putInt("quality", quality).putBoolean("sd", sd)
         .putBoolean("fallback", fallback).putInt("internalLimit", internalLimit).putInt("sdLimit", sdLimit)
         .putBoolean("internalKeepFree", internalKeepFree).putBoolean("sdKeepFree", sdKeepFree)
@@ -184,10 +188,30 @@ internal fun FormScope.MotionRecordingScreen(
     var pendingOemEnable by rememberSaveable { mutableStateOf(false) }
 
     fun save(next: RecordingOptions) {
-        options = next
-        next.write(preferences)
+        val latestEnabled = MotionConfig.read(context).recordingEnabled
+        val nextWithoutModeChange = next.copy(enabled = latestEnabled)
+        options = nextWithoutModeChange
+        nextWithoutModeChange.write(preferences)
         MotionRuntime.settingsChanged(context)
         refreshKey++
+    }
+
+    fun setRecordingMode(enabled: Boolean) {
+        try {
+            MotionRuntime.setModeEnabled(context, CameraModeSettings.MODE_RECORDING, enabled)
+            options = RecordingOptions.from(MotionConfig.read(context))
+            refreshKey++
+        } catch (failure: CameraModeClient.ModeException) {
+            Log.e("MotionRecording", "recording_mode_update_failed code=${failure.code()}", failure)
+            options = RecordingOptions.from(MotionConfig.read(context))
+            val message = if (failure.code() == "permission_required")
+                R.string.motion_record_permission_denied else R.string.motion_save_error
+            Toast.makeText(context, strings.motionText(message), Toast.LENGTH_LONG).show()
+        } catch (failure: Exception) {
+            Log.e("MotionRecording", "recording_mode_update_failed", failure)
+            options = RecordingOptions.from(MotionConfig.read(context))
+            Toast.makeText(context, strings.motionText(R.string.motion_save_error), Toast.LENGTH_LONG).show()
+        }
     }
 
     LaunchedEffect(microphoneGranted, options.audio) {
@@ -214,7 +238,7 @@ internal fun FormScope.MotionRecordingScreen(
         if (pendingRecordingEnable) {
             pendingRecordingEnable = false
             if (motionStoragePermissionsGranted(motionStoragePermissionNeeds(Build.VERSION.SDK_INT), read, write)) {
-                save(options.copy(enabled = true))
+                setRecordingMode(true)
             } else Toast.makeText(context, strings.motionText(R.string.motion_record_permission_denied), Toast.LENGTH_LONG).show()
         }
     }
@@ -231,13 +255,13 @@ internal fun FormScope.MotionRecordingScreen(
     fun setRecordingEnabled(enabled: Boolean) {
         if (!enabled) {
             pendingRecordingEnable = false
-            save(options.copy(enabled = false))
+            setRecordingMode(false)
             return
         }
         val needs = motionStoragePermissionNeeds(Build.VERSION.SDK_INT)
         val (read, write) = refreshStoragePermissions()
         if (motionStoragePermissionsGranted(needs, read, write)) {
-            save(options.copy(enabled = true))
+            setRecordingMode(true)
         } else {
             pendingRecordingEnable = true
             val missing = buildList {
@@ -249,26 +273,37 @@ internal fun FormScope.MotionRecordingScreen(
     }
 
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val latestOptions by rememberUpdatedState(options)
     DisposableEffect(lifecycle, context) {
+        val main = Handler(Looper.getMainLooper())
+        val reloadSettings = {
+            options = RecordingOptions.from(MotionConfig.read(context))
+        }
+        val preferenceListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            main.post { reloadSettings() }
+        }
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 val (read, write) = refreshStoragePermissions()
-                val current = latestOptions
+                val current = RecordingOptions.from(MotionConfig.read(context))
+                options = current
                 val recordingDenied = current.enabled && !motionStoragePermissionsGranted(
                     motionStoragePermissionNeeds(Build.VERSION.SDK_INT), read, write)
                 val oemDenied = current.oemCleanup && (!read || !write)
                 if (recordingDenied || oemDenied) {
-                    save(current.copy(enabled = if (recordingDenied) false else current.enabled,
-                        oemCleanup = if (oemDenied) false else current.oemCleanup))
+                    if (recordingDenied) setRecordingMode(false)
+                    if (oemDenied) save(RecordingOptions.from(MotionConfig.read(context)).copy(oemCleanup = false))
                     val message = if (recordingDenied) R.string.motion_record_permission_denied
                         else R.string.motion_oem_permission_denied
                     Toast.makeText(context, strings.motionText(message), Toast.LENGTH_LONG).show()
                 }
             }
         }
+        preferences.registerOnSharedPreferenceChangeListener(preferenceListener)
         lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer) }
+        onDispose {
+            preferences.unregisterOnSharedPreferenceChangeListener(preferenceListener)
+            lifecycle.removeObserver(observer)
+        }
     }
     val playerOpen = archiveState.playerEntry != null
     LaunchedEffect(lifecycle, refreshKey, archiveState, archiveState.archiveOpen, playerOpen, showContent) {

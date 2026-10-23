@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.os.Handler
+import android.os.Looper
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -14,6 +16,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -78,6 +83,7 @@ import java.util.Locale
 import com.byd.extend.MotionConfig
 import com.byd.extend.MotionRuntime
 import com.byd.extend.CameraChargeSettings
+import com.byd.extend.CameraModeSettings
 import com.byd.extend.R
 import com.byd.extend.ui.ActionButton as ProductionActionButton
 import com.byd.extend.ui.ChoiceField
@@ -111,6 +117,27 @@ internal fun FormScope.MotionIntegrationScreen(
     var library by remember { mutableStateOf(store.read()) }
     var enabled by rememberSaveable { mutableStateOf(config.warningEnabled) }
     var lock by rememberSaveable { mutableIntStateOf(config.lockCondition) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(store, lifecycle, context) {
+        val main = Handler(Looper.getMainLooper())
+        val reloadSettings = {
+            val latest = MotionConfig.read(context)
+            enabled = latest.warningEnabled
+            lock = MotionConfig.normalizeLockMode(latest.lockCondition)
+        }
+        val preferenceListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == "enabled" || key == "lock") main.post { reloadSettings() }
+        }
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) reloadSettings()
+        }
+        store.preferences.registerOnSharedPreferenceChangeListener(preferenceListener)
+        lifecycle.addObserver(observer)
+        onDispose {
+            store.preferences.unregisterOnSharedPreferenceChangeListener(preferenceListener)
+            lifecycle.removeObserver(observer)
+        }
+    }
     val activationMode = MotionConfig.normalizeLockMode(lock)
     LaunchedEffect(store) {
         val storedLock = store.preferences.getInt("lock", 1)
@@ -198,8 +225,14 @@ internal fun FormScope.MotionIntegrationScreen(
                 }
                 Section(strings.motionText(R.string.settings), colors, Modifier.weight(.8f)) {
                     SwitchLine(strings.motionText(R.string.motion_enable), strings.motionText(R.string.motion_timing), enabled, {
-                        enabled = it; store.preferences.edit().putBoolean("enabled", it).apply()
-                        MotionRuntime.settingsChanged(context)
+                        try {
+                            MotionRuntime.setModeEnabled(context, CameraModeSettings.MODE_TABLET, it)
+                            enabled = MotionConfig.read(context).warningEnabled
+                        } catch (failure: Exception) {
+                            android.util.Log.e("MotionIntegration", "tablet_mode_update_failed", failure)
+                            enabled = MotionConfig.read(context).warningEnabled
+                            Toast.makeText(context, strings.motionText(R.string.motion_save_error), Toast.LENGTH_LONG).show()
+                        }
                     }, colors)
                     ChoiceField(strings.motionText(R.string.motion_lock), listOf(R.string.motion_locked, R.string.motion_any)
                         .map { strings.motionText(it) }, if (activationMode == 1) 0 else 1, { selected ->

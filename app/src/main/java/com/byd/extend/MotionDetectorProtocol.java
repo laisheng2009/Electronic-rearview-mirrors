@@ -17,7 +17,11 @@ public final class MotionDetectorProtocol {
     static final String CONFIG_PATH = STATE_ROOT + "/config.json";
     static final String ACTION_SHOW_WARNING = "com.byd.extend.action.SHOW_MOTION_WARNING";
     static final String EXTRA_SESSION = "motion_session_id";
-    static final int VERSION = 15;
+    static final int VERSION = 16;
+    static final int CONFIG_PENDING = 0;
+    static final int CONFIG_APPLIED = 1;
+    static final int CONFIG_MODE_ONLY = 2;
+    static final int CONFIG_RETAINED = 3;
     public static final String EXTRA_WINDOW_REPORTER = "motion_window_reporter";
     public static final String WINDOW_COMMANDS = "window_commands";
     public static final String WINDOW_CANCELLED = "window_cancelled";

@@ -6,6 +6,31 @@ import java.nio.file.Files;
 import static org.junit.Assert.*;
 
 public class MotionSessionConfigStoreTest {
+    @Test public void modeOnlyChangesKeepSessionAcrossReopenButOtherChangesRotateIt() throws Exception {
+        File root = Files.createTempDirectory("motion-mode-store").toFile();
+        try {
+            MotionSessionConfigStore store = new MotionSessionConfigStore(root, 10_123);
+            MotionSessionConfigStore.Snapshot remoteOnly = store.write(
+                    "{\"remoteViewingEnabled\":true,\"lock\":2,\"before\":7}");
+            MotionSessionConfigStore.Snapshot enabled = store.write(
+                    "{\"remoteViewingEnabled\":true,\"lock\":2,\"before\":7,\"enabled\":true}");
+            assertEquals(remoteOnly.sessionId, enabled.sessionId);
+
+            MotionSessionConfigStore afterRestart = new MotionSessionConfigStore(root, 10_123);
+            MotionSessionConfigStore.Snapshot reopened = afterRestart.read();
+            assertEquals(enabled.sessionId, reopened.sessionId);
+            assertEquals(enabled.config.toJson(), reopened.config.toJson());
+
+            MotionSessionConfigStore.Snapshot fullChange = afterRestart.write(
+                    "{\"remoteViewingEnabled\":true,\"lock\":2,\"before\":7,\"enabled\":true,\"quality\":2}");
+            assertNotEquals(enabled.sessionId, fullChange.sessionId);
+        } finally {
+            Files.deleteIfExists(new File(root, "config.json.tmp").toPath());
+            Files.deleteIfExists(new File(root, "config.json").toPath());
+            Files.deleteIfExists(root.toPath());
+        }
+    }
+
     @Test public void configSurvivesWorkerRecreationAndChangesSessionAtomically() throws Exception {
         File root = Files.createTempDirectory("motion-config-store").toFile();
         try {

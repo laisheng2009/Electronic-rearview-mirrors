@@ -24,19 +24,20 @@ public class ViewerStopReasonTest {
         FragmentedVideoWindow current = new FragmentedVideoWindow();
         FragmentedVideoWindow retired = new FragmentedVideoWindow();
         String playlist = current.getPlaylistPath();
-        assertEquals("resource=playlist generation=legacy clientRevision=unknown serverRevision=2",
+        String serverRevision = " serverRevision=" + ViewerStopReason.WEB_REVISION;
+        assertEquals("resource=playlist generation=legacy clientRevision=unknown" + serverRevision,
                 ViewerStopReason.mediaRequest("/live.m3u8", playlist, null));
-        assertEquals("resource=playlist generation=current clientRevision=2 serverRevision=2",
+        assertEquals("resource=playlist generation=current clientRevision=2" + serverRevision,
                 ViewerStopReason.mediaRequest(playlist, playlist, "2"));
-        assertEquals("resource=playlist generation=stale clientRevision=1 serverRevision=2",
+        assertEquals("resource=playlist generation=stale clientRevision=1" + serverRevision,
                 ViewerStopReason.mediaRequest(retired.getPlaylistPath(), playlist, "1"));
-        assertEquals("resource=init generation=current clientRevision=2 serverRevision=2",
+        assertEquals("resource=init generation=current clientRevision=2" + serverRevision,
                 ViewerStopReason.mediaRequest(playlist.replace("live.m3u8", "init.mp4"), playlist, "2"));
-        assertEquals("resource=segment generation=current clientRevision=2 serverRevision=2",
+        assertEquals("resource=segment generation=current clientRevision=2" + serverRevision,
                 ViewerStopReason.mediaRequest(playlist.replace("live.m3u8", "segment/7.m4s"), playlist, "2"));
-        assertEquals("resource=playlist generation=none clientRevision=2 serverRevision=2",
+        assertEquals("resource=playlist generation=none clientRevision=2" + serverRevision,
                 ViewerStopReason.mediaRequest(playlist, null, "2"));
-        assertEquals("resource=other generation=invalid clientRevision=unknown serverRevision=2",
+        assertEquals("resource=other generation=invalid clientRevision=unknown" + serverRevision,
                 ViewerStopReason.mediaRequest("/media/secret/private?password=secret", playlist, "secret\r\nforged"));
     }
 
